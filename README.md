@@ -1,4 +1,11 @@
-# Mayfly
+<p align="center"><img src="docs/mayfly-banner.webp" alt="mayfly" width="100%"></p>
+
+<p align="center">
+  <a href="https://github.com/hayfever/mayfly/actions/workflows/ci.yml"><img src="https://github.com/hayfever/mayfly/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/release-v0.1.0-2563EB" alt="Release v0.1.0"></a>
+  <a href="go.mod"><img src="https://img.shields.io/badge/go-1.26-00ADD8" alt="Go 1.26"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
+</p>
 
 Mayfly is a self-hosted platform for **ephemeral, interactive agent sessions**. A webhook or API call creates a session, the control plane starts a hardened container, people attach to the live thread, and the session ends with a durable artifact bundle.
 
