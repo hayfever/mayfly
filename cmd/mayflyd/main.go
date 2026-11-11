@@ -21,6 +21,7 @@ import (
 	"github.com/hayfever/mayfly/internal/httpapi"
 	"github.com/hayfever/mayfly/internal/hub"
 	"github.com/hayfever/mayfly/internal/k8s"
+	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/runner"
 	"github.com/hayfever/mayfly/internal/session"
 	"github.com/hayfever/mayfly/internal/version"
@@ -59,6 +60,17 @@ func main() {
 		os.Exit(2)
 	}
 
+	queueStore, err := queue.New(context.Background(), cfg.Queue)
+	if err != nil {
+		logger.Error("configure queue", "error", err)
+		os.Exit(2)
+	}
+	defer func() {
+		if err := queueStore.Close(); err != nil {
+			logger.Warn("close queue", "error", err)
+		}
+	}()
+
 	var sessionRunner runner.Runner
 	var kube *k8s.Client
 	switch cfg.Runtime.Backend {
@@ -91,9 +103,29 @@ func main() {
 		os.Exit(2)
 	}
 
+	// Accepted webhook work runs here, not in the request that accepted it.
+	concurrency := cfg.Sessions.MaxConcurrent
+	if concurrency <= 0 {
+		concurrency = 8
+	}
+	worker := queue.NewWorker(queueStore, func(ctx context.Context, job queue.Job) error {
+		if _, err := mgr.Create(ctx, job.Options); err != nil {
+			if errors.Is(err, session.ErrCapacity) {
+				return fmt.Errorf("%w: %v", queue.ErrRetryLater, err)
+			}
+			return err
+		}
+		return nil
+	}, concurrency, mgr.FreeSlots, cfg.Queue.PollInterval.Std(), logger)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		worker.Run(ctx)
+	}()
+
 	server := &http.Server{
 		Addr:              cfg.Server.Addr,
-		Handler:           httpapi.New(cfg, mgr, logger).Handler(),
+		Handler:           httpapi.New(cfg, mgr, queueStore, logger).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -117,6 +149,11 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	_ = server.Shutdown(shutdownCtx)
+	select {
+	case <-workerDone:
+	case <-time.After(20 * time.Second):
+		logger.Warn("queue worker did not stop in time; in-flight jobs will be retried")
+	}
 	mgr.Shutdown(shutdownCtx)
 }
 

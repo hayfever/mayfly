@@ -203,3 +203,18 @@ func writeSessionError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, err.Error())
 	}
 }
+
+// queueStats reports accepted work that has not run yet.
+func (s *Server) queueStats(w http.ResponseWriter, r *http.Request) {
+	if s.queue == nil {
+		writeError(w, http.StatusServiceUnavailable, "queue is not configured")
+		return
+	}
+	stats, err := s.queue.Stats(r.Context())
+	if err != nil {
+		s.logger.Warn("queue stats", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "queue is unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"queue": stats})
+}

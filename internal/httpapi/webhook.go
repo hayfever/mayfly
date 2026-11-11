@@ -7,9 +7,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/triggers"
 )
 
+// receiveWebhook verifies a delivery, stores it as a job, and answers. The
+// session is created later by a worker, so a slow cluster cannot make the
+// sender time out or retry.
 func (s *Server) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	cfg, ok := s.triggers[name]
@@ -48,26 +52,43 @@ func (s *Server) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "trigger rate limit reached")
 		return
 	}
-	created, err := s.mgr.Create(r.Context(), result.Options)
-	if err != nil {
-		if created == nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "session": created})
+	if s.queue == nil {
+		writeError(w, http.StatusServiceUnavailable, "queue is not configured")
 		return
 	}
-	link := s.sessionURL(created.ID)
+	job := queue.NewJob(cfg.Name, result.DeliveryKey, result.Options, time.Now())
+	switch err := s.queue.Accept(r.Context(), job); {
+	case errors.Is(err, queue.ErrDuplicate):
+		s.logger.Info("duplicate webhook delivery ignored", "trigger", name, "job", job.ID)
+		writeAccepted(w, job, true)
+		return
+	case errors.Is(err, queue.ErrFull):
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, "queue is full")
+		return
+	case err != nil:
+		s.logger.Error("accept webhook job", "trigger", name, "error", err)
+		writeError(w, http.StatusServiceUnavailable, "queue is unavailable")
+		return
+	}
+	s.logger.Info("webhook accepted", "trigger", name, "job", job.ID, "delivery", job.Delivery)
 	if cfg.Type == "slack" {
+		// Slack wants an answer within three seconds; the link is not known yet.
 		writeJSON(w, http.StatusOK, map[string]any{
 			"response_type": "in_channel",
-			"text":          "Mayfly session started: " + link,
+			"text":          "Mayfly session queued.",
 		})
 		return
 	}
+	writeAccepted(w, job, false)
+}
+
+func writeAccepted(w http.ResponseWriter, job queue.Job, duplicate bool) {
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"session_id": created.ID,
-		"status":     created.Status,
-		"url":        link,
+		"accepted":  true,
+		"duplicate": duplicate,
+		"job_id":    job.ID,
+		"delivery":  job.Delivery,
+		"status":    "queued",
 	})
 }

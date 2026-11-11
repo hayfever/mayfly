@@ -35,7 +35,7 @@ make kind-down
 | `internal/mcp` | stdio helper process, HTTP transport, tool naming |
 | `internal/broker` | model allowlist, streaming passthrough, MCP header injection |
 | `examples/litellm` | LiteLLM gateway configuration and deployment example |
-| `test/integration` | webhook → real agent process → MCP → WebSocket → close → artifact |
+| `test/integration` | webhook → queue → worker → real agent process → MCP → WebSocket → close → artifact |
 | `hack/e2e-kind.sh` | real pod isolation, NetworkPolicy, lifecycle, TTL, artifact |
 
 Run one test:

@@ -23,6 +23,38 @@ The control plane and runtime communicate over HTTP. The runtime initiates every
 
 No inbound path to a session pod is required. The NetworkPolicy drops all ingress.
 
+## Webhook intake
+
+A webhook is accepted before any pod exists. `mayflyd` verifies the signature, spends one rate-limit token, and writes one job to the queue. The response is sent as soon as that write commits, so the sender never waits for Kubernetes.
+
+```mermaid
+sequenceDiagram
+  participant Hook as GitHub/Slack/Datadog/generic
+  participant CP as mayflyd
+  participant Q as Queue
+  participant W as Worker
+  participant K8s as Kubernetes
+
+  Hook->>CP: POST /hooks/{name}
+  CP->>CP: verify signature, rate limit
+  CP->>Q: Accept(job) with delivery key
+  Q-->>CP: stored or duplicate
+  CP-->>Hook: 202 accepted (or 429)
+  W->>Q: Claim(n) where n = free capacity
+  Q-->>W: lease
+  W->>CP: Create(session options)
+  CP->>K8s: Secret + ConfigMap + NetworkPolicy + Pod
+  W->>Q: Ack, Nack, or Release
+```
+
+Properties:
+
+- Delivery key: `X-GitHub-Delivery`, Slack `trigger_id`, or an `Idempotency-Key` header. The same key accepted twice stores one job; the second response reports `duplicate: true`.
+- Capacity: a worker claims only when `sessions.max_concurrent` has a free slot. A race returns `ErrCapacity`, which releases the job without counting an attempt.
+- Retry: failures back off from `queue.retry_base`, doubling to ten minutes. A job that reaches `queue.max_attempts` is buried and appears in `queue.dead`.
+- Visibility: a worker that dies mid-job loses its lease after `queue.visibility_timeout`; the job becomes claimable again.
+- Crash safety: `bbolt` and `redis` survive a control-plane restart. The `memory` backend does not.
+
 ## Lifecycle
 
 ```mermaid
@@ -34,7 +66,7 @@ sequenceDiagram
   participant UI as Attach clients
   participant Store as Artifact store
 
-  Hook->>CP: POST /hooks/{name} or /api/v1/sessions
+  Hook->>CP: queued job (webhook) or POST /api/v1/sessions
   CP->>CP: create id, scoped token, session.json
   CP->>K8s: Secret + ConfigMap + NetworkPolicy + Pod
   CP-->>UI: session id + URL

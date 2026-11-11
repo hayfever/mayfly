@@ -72,6 +72,10 @@ patches:
             local:
               dir: /var/lib/mayfly/artifacts
             max_bytes: 134217728
+          queue:
+            backend: bbolt
+            bbolt:
+              path: /var/lib/mayfly/queue.db
           skills:
             dirs: [/etc/mayfly-skills]
           agents:

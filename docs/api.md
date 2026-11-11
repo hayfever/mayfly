@@ -17,7 +17,9 @@ Error responses:
 | 404 | Unknown session, trigger, or artifact |
 | 409 | Session is closed |
 | 413 | Body or artifact too large |
+| 429 | Trigger rate limit, `queue.max_jobs` reached, or `sessions.max_concurrent` reached on the admin API; `Retry-After` is set |
 | 500 | Startup, storage, or internal failure |
+| 503 | Control plane is not ready (`/readyz`), or the queue rejected the write |
 
 ## Public
 
@@ -31,11 +33,17 @@ Web UI. Static assets at `/app.js` and `/style.css`.
 
 ### `POST /hooks/{trigger}`
 
-Receives a webhook for a configured trigger. The response depends on the type:
+Receives a webhook for a configured trigger. The session is created after the response, by a queue worker, so the webhook never waits for Kubernetes.
 
-- Slack: `{"response_type":"in_channel","text":"Mayfly session started: <url>"}`.
-- Others: `202 {"session_id":"...","status":"running","url":"..."}`.
+Responses:
+
+- Slack: `200 {"response_type":"in_channel","text":"Mayfly session queued."}`.
+- Others: `202 {"accepted":true,"duplicate":false,"job_id":"...","delivery":"...","status":"queued"}`.
+- Duplicate delivery (same `X-GitHub-Delivery`, Slack `trigger_id`, or `Idempotency-Key`): `202` with `"duplicate":true`. No second job is stored.
 - Slack URL verification: `200 {"challenge":"..."}`.
+- Over the trigger rate limit, or when `queue.max_jobs` is reached: `429` with `Retry-After`. The rate limit counts only requests that pass signature verification, so unauthenticated traffic cannot exhaust a trigger.
+
+Find the session created for a delivery through `GET /api/v1/sessions` (the trigger delivery key is stored on the session) or watch `GET /api/v1/queue` until the job leaves the queue.
 
 ## Sessions
 
@@ -136,7 +144,17 @@ The actor name comes from the ticket. Multiple clients share the thread. The ser
 
 ### `GET /api/v1/sessions/{id}/artifact`
 
-Downloads the latest bundle as `application/gzip`. Returns `404` until finalize has stored it.
+Downloads the latest bundle as `application/gzip`. Returns `404` until finalize has stored it. Artifact metadata outlives `sessions.retention`, so the bundle stays downloadable after the session leaves the session list. The index itself is in memory and resets when the control plane restarts; read the store directly after that.
+
+### `GET /api/v1/queue`
+
+Accepted work that has not run yet.
+
+```json
+{"queue":{"pending":2,"leased":1,"dead":0,"oldest":"2026-11-11T13:41:49Z"}}
+```
+
+`pending` jobs are claimable, `leased` jobs are running, and `dead` jobs exhausted `queue.max_attempts`.
 
 ### `GET /api/v1/config`
 

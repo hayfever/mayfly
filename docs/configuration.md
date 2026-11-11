@@ -95,6 +95,50 @@ Credentials come from one of two places. Set `access_key_env` and `secret_key_en
 
 Mayfly asks the SDK for checksums only when an operation requires one. R2, B2, and older MinIO builds reject the default CRC32 checksum headers, so those stores work without extra configuration. Test the store with one export before you rely on it.
 
+## queue
+
+Accepted webhook work is stored here before any pod exists, so a slow cluster cannot make a sender time out. `memory` is for development; `bbolt` and `redis` survive a control-plane restart.
+
+```yaml
+queue:
+  backend: bbolt            # memory, bbolt, redis
+  max_jobs: 1000
+  max_attempts: 5
+  retry_base: 5s
+  visibility_timeout: 5m
+  dedupe_ttl: 72h
+  poll_interval: 2s
+  bbolt:
+    path: /var/lib/mayfly/queue.db
+  redis:
+    url: redis://valkey.mayfly.svc:6379/0
+    password_env: MAYFLY_REDIS_PASSWORD
+    key_prefix: mayfly
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `backend` | `memory` in config, `bbolt` in the Helm chart | `memory`, `bbolt`, or `redis` |
+| `max_jobs` | `1000` | Maximum undelivered jobs; further webhooks get `429` |
+| `max_attempts` | `5` | Failed attempts before a job is buried |
+| `retry_base` | `5s` | First retry delay; doubles per attempt up to ten minutes |
+| `visibility_timeout` | `5m` | How long a claimed job stays invisible before it is retried |
+| `dedupe_ttl` | `72h` | How long a delivery key is remembered. Keep it at or above the sender's redelivery window (GitHub redelivers for three days) |
+| `poll_interval` | `2s` | Worker polling delay when the queue is empty or capacity is full |
+| `bbolt.path` | — | Database file. Put it on a PersistentVolume for durability across pod replacement |
+| `redis.url` | — | `redis://` or `rediss://` URL. Host, port, user, password, and TLS come from it |
+| `redis.password_env` | — | Environment variable that overrides the URL password |
+| `redis.username` | — | ACL user name |
+| `redis.key_prefix` | `mayfly` | Keys are written as `{<prefix>}:queue`, `:jobs`, `:dead`, `:seen:<id>` |
+| `redis.cluster` | `false` | Use the cluster client for Redis Cluster or ElastiCache cluster mode |
+
+Backend requirements:
+
+- `bbolt` locks its file, so only one control-plane replica can use it. Back up the file; it is the only copy.
+- `redis` runs two Lua scripts for atomic accept and claim, so the cache must support `EVAL`. Redis, Valkey, KeyDB, Dragonfly, ElastiCache, Memorystore, Azure Managed Redis, and Upstash do.
+- `redis` must not evict keys: set `maxmemory-policy noeviction` on a dedicated instance or database, and enable AOF (`appendonly yes`, `everysec`) or snapshots. An `allkeys-lru` cache silently drops accepted jobs.
+- Dedupe keys live for `dedupe_ttl`, so size the cache for roughly one key per accepted delivery in that window.
+
 ## agents
 
 ```yaml

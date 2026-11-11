@@ -21,6 +21,7 @@ import (
 
 	"github.com/hayfever/mayfly/internal/broker"
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/ratelimit"
 	"github.com/hayfever/mayfly/internal/session"
 )
@@ -79,6 +80,7 @@ func (t *ticketStore) consume(token, sessionID string) (string, bool) {
 type Server struct {
 	cfg        *config.Config
 	mgr        *session.Manager
+	queue      queue.Store
 	broker     *broker.Broker
 	logger     *slog.Logger
 	triggers   map[string]config.TriggerConfig
@@ -89,8 +91,9 @@ type Server struct {
 	upgrader   websocket.Upgrader
 }
 
-// New builds the HTTP server.
-func New(cfg *config.Config, mgr *session.Manager, logger *slog.Logger) *Server {
+// New builds the HTTP server. queue may be nil in tests that do not exercise
+// webhooks.
+func New(cfg *config.Config, mgr *session.Manager, q queue.Store, logger *slog.Logger) *Server {
 	sub, _ := fs.Sub(webAssets, "web")
 	triggersByName := map[string]config.TriggerConfig{}
 	limiters := map[string]*ratelimit.Limiter{}
@@ -107,6 +110,7 @@ func New(cfg *config.Config, mgr *session.Manager, logger *slog.Logger) *Server 
 	return &Server{
 		cfg:        cfg,
 		mgr:        mgr,
+		queue:      q,
 		broker:     broker.New(cfg.LLM, logger),
 		logger:     logger,
 		triggers:   triggersByName,
@@ -153,6 +157,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sessions/{id}/attach-ticket", s.admin(s.createTicket))
 	mux.HandleFunc("GET /api/v1/sessions/{id}/artifact", s.admin(s.downloadArtifact))
 	mux.HandleFunc("GET /api/v1/config", s.admin(s.publicConfig))
+	mux.HandleFunc("GET /api/v1/queue", s.admin(s.queueStats))
 	mux.HandleFunc("GET /api/v1/sessions/{id}/ws", s.attachWebSocket)
 
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/events", s.internalEvents)

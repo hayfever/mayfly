@@ -30,6 +30,9 @@ First public release.
 - S3 artifact export can use the default AWS credential chain, including IAM roles for service accounts.
 - `sessions.connect_timeout` fails a session whose runtime never reaches the control plane, so a stuck container does not hold a capacity slot until TTL.
 - Artifact metadata outlives session retention, so downloads keep working after a session leaves the list.
+- Durable webhook queue with `memory`, `bbolt`, and Redis-protocol backends, delivery dedupe, retry backoff, dead-job counting, and `GET /api/v1/queue`.
+- `queue` configuration block with `max_jobs`, `max_attempts`, `retry_base`, `visibility_timeout`, `dedupe_ttl`, and `poll_interval`.
+- Helm `persistence` option that puts the queue database on a PersistentVolume.
 
 ### Changed
 
@@ -38,6 +41,8 @@ First public release.
 - The LLM broker accepts only the model assigned to the session and fills an empty model field with it.
 - The LLM and MCP proxy clients bound connection setup and response-header wait with `llm.timeout`.
 - Webhook rate limits count only verified requests.
+- Webhooks now accept and return before any pod exists; a queue worker creates the session. Responses carry `job_id`, `delivery`, and `duplicate` instead of a session id.
+- Slack slash commands answer `Mayfly session queued.` because the session link does not exist yet.
 - `/readyz` no longer calls the artifact store, and the probes set `timeoutSeconds: 3`.
 - The module path and published images use `github.com/hayfever/mayfly` and `ghcr.io/hayfever`.
 - The S3 store sends checksums only when required, for compatibility with R2, B2, and older MinIO.

@@ -18,6 +18,10 @@ sessions:
   allow_shell: true
   shell_timeout: 120s
 
+queue:
+  backend: memory        # bbolt or redis survive a restart
+  poll_interval: 500ms
+
 runtime:
   backend: local
   agent_binary: ./bin/mayfly-agent

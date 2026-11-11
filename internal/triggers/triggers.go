@@ -28,10 +28,12 @@ var ErrUnauthorized = errors.New("webhook signature verification failed")
 // ErrBadRequest means the payload cannot be turned into a session.
 var ErrBadRequest = errors.New("invalid webhook payload")
 
-// Result is the outcome of parsing a webhook.
+// Result is the outcome of parsing a webhook. DeliveryKey identifies the
+// sender's delivery so a retry does not create a second session.
 type Result struct {
-	Options   session.CreateOptions
-	Challenge map[string]any
+	Options     session.CreateOptions
+	Challenge   map[string]any
+	DeliveryKey string
 }
 
 // Data is the template context for a trigger prompt.
@@ -50,6 +52,20 @@ type Data struct {
 
 // Parse verifies and parses one webhook request.
 func Parse(cfg config.TriggerConfig, header http.Header, body []byte) (*Result, error) {
+	result, err := parse(cfg, header, body)
+	if err != nil {
+		return nil, err
+	}
+	if result.DeliveryKey == "" {
+		result.DeliveryKey = strings.TrimSpace(header.Get("Idempotency-Key"))
+	}
+	if result.DeliveryKey != "" {
+		result.Options.Trigger.Delivery = result.DeliveryKey
+	}
+	return result, nil
+}
+
+func parse(cfg config.TriggerConfig, header http.Header, body []byte) (*Result, error) {
 	switch cfg.Type {
 	case "github":
 		return parseGitHub(cfg, header, body)
@@ -222,7 +238,7 @@ func parseGitHub(cfg config.TriggerConfig, header http.Header, body []byte) (*Re
 			Delivery: delivery,
 			Actor:    actor,
 		},
-	}}, nil
+	}, DeliveryKey: delivery}, nil
 }
 
 func parseSlack(cfg config.TriggerConfig, header http.Header, body []byte) (*Result, error) {
@@ -280,7 +296,7 @@ func parseSlack(cfg config.TriggerConfig, header http.Header, body []byte) (*Res
 		Skills:     cfg.Skills,
 		MCPServers: cfg.MCPServers,
 		Trigger:    model.TriggerInfo{Kind: "slack", Name: cfg.Name, Event: "slash_command", Actor: user},
-	}}, nil
+	}, DeliveryKey: strings.TrimSpace(values.Get("trigger_id"))}, nil
 }
 
 func applyTemplate(cfg config.TriggerConfig, data Data, fallback string) (string, error) {

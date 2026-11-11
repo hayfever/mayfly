@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -27,6 +28,7 @@ import (
 	"github.com/hayfever/mayfly/internal/httpapi"
 	"github.com/hayfever/mayfly/internal/hub"
 	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/runner"
 	"github.com/hayfever/mayfly/internal/session"
 	"github.com/hayfever/mayfly/internal/stub"
@@ -93,7 +95,31 @@ func TestWebhookToArtifact(t *testing.T) {
 	}
 	defer mgr.Shutdown(context.Background())
 
-	ts.Config.Handler = httpapi.New(cfg, mgr, logger).Handler()
+	queueStore, err := queue.New(ctx, config.Default().Queue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer queueStore.Close()
+	worker := queue.NewWorker(queueStore, func(ctx context.Context, job queue.Job) error {
+		if _, err := mgr.Create(ctx, job.Options); err != nil {
+			if errors.Is(err, session.ErrCapacity) {
+				return fmt.Errorf("%w: %v", queue.ErrRetryLater, err)
+			}
+			return err
+		}
+		return nil
+	}, 2, mgr.FreeSlots, 50*time.Millisecond, logger)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		worker.Run(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-workerDone
+	}()
+
+	ts.Config.Handler = httpapi.New(cfg, mgr, queueStore, logger).Handler()
 	ts.Start()
 	defer ts.Close()
 
@@ -110,13 +136,15 @@ func TestWebhookToArtifact(t *testing.T) {
 		t.Fatal(err)
 	}
 	var hook struct {
-		SessionID string `json:"session_id"`
+		Accepted bool   `json:"accepted"`
+		JobID    string `json:"job_id"`
 	}
 	decode(t, resp, &hook)
-	if hook.SessionID == "" {
-		t.Fatal("webhook did not create a session")
+	if !hook.Accepted || hook.JobID == "" {
+		t.Fatalf("webhook was not accepted: %+v", hook)
 	}
-	id := hook.SessionID
+	// The worker creates the session after the webhook is answered.
+	id := waitForSession(t, base, 20*time.Second)
 
 	events := waitForAssistant(t, base, id, 1, 40*time.Second)
 	if !hasMCPResult(events) {
@@ -367,6 +395,28 @@ func decode(t *testing.T, resp *http.Response, dst any) {
 	if err := json.Unmarshal(raw, dst); err != nil {
 		t.Fatalf("decode: %v (%s)", err, raw)
 	}
+}
+
+// waitForSession polls until the worker has created a session.
+func waitForSession(t *testing.T, base string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp, err := admin(http.MethodGet, base+"/api/v1/sessions", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out struct {
+			Sessions []model.Session `json:"sessions"`
+		}
+		decode(t, resp, &out)
+		if len(out.Sessions) > 0 {
+			return out.Sessions[0].ID
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("worker did not create a session in time")
+	return ""
 }
 
 func waitForAssistant(t *testing.T, base, id string, want int, timeout time.Duration) []model.Event {

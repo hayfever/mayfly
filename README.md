@@ -7,6 +7,7 @@ Sessions are the unit of work. There is no always-on agent.
 ## What works
 
 - Webhook triggers: generic HMAC/token, GitHub, Slack slash commands, Datadog.
+- Durable webhook intake: verified deliveries are queued (`memory`, `bbolt`, or any Redis-protocol cache) and answered immediately, then a worker creates the session.
 - Raw API and CLI creation.
 - One Kubernetes pod per session, or a local process backend for development.
 - Selectable agent manifests: prompt, model, skills, MCP servers, limits, and an in-image harness name.
@@ -24,7 +25,9 @@ Sessions are the unit of work. There is no always-on agent.
 ```mermaid
 flowchart LR
   T[Webhook or API] --> C[mayflyd]
+  C -->|accept job| Q[(queue)]
   U[Web UI / CLI] <-->|WebSocket| C
+  Q -->|worker| C
   C -->|create pod| K[Kubernetes]
   K --> A[mayfly-agent]
   A -->|events + inbox| C

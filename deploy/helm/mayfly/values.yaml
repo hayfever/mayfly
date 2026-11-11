@@ -103,6 +103,22 @@ config:
   agents:
     dirs: [/etc/mayfly-agents]
     allowed_images: []
+  queue:
+    backend: bbolt
+    bbolt:
+      path: /var/lib/mayfly/queue.db
+    max_jobs: 1000
+    max_attempts: 5
+    retry_base: 5s
+    visibility_timeout: 5m
+    dedupe_ttl: 72h
+    poll_interval: 2s
+    redis:
+      url: ""
+      username: ""
+      password_env: ""
+      key_prefix: mayfly
+      cluster: false
   mcp:
     servers: []
   triggers: []
@@ -144,6 +160,14 @@ litellm:
     limits:
       cpu: "1"
       memory: 1Gi
+
+# The queue database and the local artifact store live under /var/lib/mayfly.
+# Enabling persistence keeps accepted webhook work across pod replacement.
+persistence:
+  enabled: false
+  size: 2Gi
+  storageClass: ""
+  accessMode: ReadWriteOnce
 
 controlPlane:
   resources:

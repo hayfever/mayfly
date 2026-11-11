@@ -45,6 +45,7 @@ type Config struct {
 	Skills    SkillsConfig    `yaml:"skills"`
 	MCP       MCPConfig       `yaml:"mcp"`
 	Agents    AgentsConfig    `yaml:"agents"`
+	Queue     QueueConfig     `yaml:"queue"`
 	Triggers  []TriggerConfig `yaml:"triggers"`
 
 	// AdminToken is resolved from the environment at load time and never
@@ -209,6 +210,36 @@ type MCPServerConfig struct {
 	ResolvedHeaders map[string]string `yaml:"-"`
 }
 
+// QueueConfig selects where accepted webhook work is stored and how it is
+// retried. The memory backend is for development; bbolt and redis survive a
+// control-plane restart.
+type QueueConfig struct {
+	Backend           string           `yaml:"backend"` // memory, bbolt, redis
+	MaxJobs           int              `yaml:"max_jobs"`
+	MaxAttempts       int              `yaml:"max_attempts"`
+	RetryBase         Duration         `yaml:"retry_base"`
+	VisibilityTimeout Duration         `yaml:"visibility_timeout"`
+	DedupeTTL         Duration         `yaml:"dedupe_ttl"`
+	PollInterval      Duration         `yaml:"poll_interval"`
+	Bolt              BoltQueueConfig  `yaml:"bbolt"`
+	Redis             RedisQueueConfig `yaml:"redis"`
+}
+
+// BoltQueueConfig points at the bbolt database file.
+type BoltQueueConfig struct {
+	Path string `yaml:"path"`
+}
+
+// RedisQueueConfig configures a Redis-protocol store. Redis, Valkey, KeyDB,
+// Dragonfly, ElastiCache, Memorystore, and Azure Managed Redis all speak it.
+type RedisQueueConfig struct {
+	URL         string `yaml:"url"`
+	Username    string `yaml:"username"`
+	PasswordEnv string `yaml:"password_env"`
+	KeyPrefix   string `yaml:"key_prefix"`
+	Cluster     bool   `yaml:"cluster"`
+}
+
 // TriggerConfig defines one webhook endpoint at /hooks/<name>.
 type TriggerConfig struct {
 	Name          string           `yaml:"name"`
@@ -286,6 +317,16 @@ func Default() *Config {
 		},
 		Skills: SkillsConfig{},
 		MCP:    MCPConfig{},
+		Queue: QueueConfig{
+			Backend:           "memory",
+			MaxJobs:           1000,
+			MaxAttempts:       5,
+			RetryBase:         Duration(5 * time.Second),
+			VisibilityTimeout: Duration(5 * time.Minute),
+			DedupeTTL:         Duration(72 * time.Hour),
+			PollInterval:      Duration(2 * time.Second),
+			Redis:             RedisQueueConfig{KeyPrefix: "mayfly"},
+		},
 	}
 }
 
@@ -340,6 +381,27 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Sessions.EventBuffer <= 0 {
 		c.Sessions.EventBuffer = 5000
+	}
+	if c.Queue.MaxJobs <= 0 {
+		c.Queue.MaxJobs = 1000
+	}
+	if c.Queue.MaxAttempts <= 0 {
+		c.Queue.MaxAttempts = 5
+	}
+	if c.Queue.RetryBase.Std() <= 0 {
+		c.Queue.RetryBase = Duration(5 * time.Second)
+	}
+	if c.Queue.VisibilityTimeout.Std() <= 0 {
+		c.Queue.VisibilityTimeout = Duration(5 * time.Minute)
+	}
+	if c.Queue.DedupeTTL.Std() <= 0 {
+		c.Queue.DedupeTTL = Duration(72 * time.Hour)
+	}
+	if c.Queue.PollInterval.Std() <= 0 {
+		c.Queue.PollInterval = Duration(2 * time.Second)
+	}
+	if c.Queue.Redis.KeyPrefix == "" {
+		c.Queue.Redis.KeyPrefix = "mayfly"
 	}
 	if c.Sessions.WorkspaceDir == "" {
 		c.Sessions.WorkspaceDir = "/workspace"
@@ -513,6 +575,23 @@ func (c *Config) Validate() error {
 		if !allowed {
 			return fmt.Errorf("llm.model %q is not in llm.allow_models", c.LLM.Model)
 		}
+	}
+	switch c.Queue.Backend {
+	case "", "memory":
+	case "bbolt":
+		if c.Queue.Bolt.Path == "" {
+			return fmt.Errorf("queue.bbolt.path is required")
+		}
+	case "redis":
+		u, err := url.Parse(c.Queue.Redis.URL)
+		if err != nil || u.Host == "" || (u.Scheme != "redis" && u.Scheme != "rediss") {
+			return fmt.Errorf("queue.redis.url must be redis:// or rediss:// with a host")
+		}
+	default:
+		return fmt.Errorf("queue.backend must be memory, bbolt, or redis, got %q", c.Queue.Backend)
+	}
+	if c.Queue.MaxJobs < 0 || c.Queue.MaxAttempts < 0 {
+		return fmt.Errorf("queue.max_jobs and queue.max_attempts must not be negative")
 	}
 	switch c.Artifacts.Store {
 	case "local":

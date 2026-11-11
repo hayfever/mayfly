@@ -153,9 +153,24 @@ For GCS interoperability, use the GCS XML endpoint and HMAC keys. Native GCS JSO
 
 The control plane writes and reads bundles. Session pods never receive storage credentials. Downloads still work through `GET /api/v1/sessions/{id}/artifact`; the API streams from the store.
 
+## Queue
+
+Webhooks are accepted into a queue before a pod exists. Choose the backend by what you already operate:
+
+- `bbolt` (chart default): one file at `/var/lib/mayfly/queue.db`. Enable `persistence` so the file survives pod replacement:
+
+  ```bash
+  helm upgrade mayfly deploy/helm/mayfly --set persistence.enabled=true --set persistence.size=2Gi
+  ```
+
+  One replica only: bbolt locks the file.
+- `redis`: any Redis-protocol service, including Valkey, ElastiCache, Memorystore, Azure Managed Redis, and Upstash. Set `queue.backend=redis` and `queue.redis.url`, and keep the cache non-evicting with AOF enabled. This is the option that allows more than one replica later.
+
+The `memory` backend loses accepted work on restart. Use it only for development.
+
 ## Operating notes
 
-- Run one control-plane replica. Session records, thread history, and the token index are in memory. Pod adoption after a restart works from ConfigMap and Secret, but pre-restart events are not replayed.
+- Run one control-plane replica. Session records, thread history, the token index, and the artifact index are in memory. Pod adoption after a restart works from ConfigMap and Secret, but pre-restart events are not replayed. Finalized sessions are removed from memory after `sessions.retention`; artifact metadata is kept until restart, so downloads keep working. Accepted webhook work is the exception: with `bbolt` or `redis` it survives a restart, and the worker resumes the backlog.
 - Remote skill archives require outbound network access from the control plane at startup. If you prefer GitOps, sync the skill repository to a volume and use `skills.dirs` instead; the platform then needs no fetch capability.
 
 For multiple model providers, deploy LiteLLM and point `llm.base_url` at its Service. A starting manifest is in [examples/litellm/deployment.yaml](../examples/litellm/deployment.yaml); see [providers.md](providers.md) for keys, IRSA, and model aliases.
