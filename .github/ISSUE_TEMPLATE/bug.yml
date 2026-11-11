@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a reproducible defect in Mayfly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials or customer data. Report security issues privately via SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - Kubernetes with kind
+        - Kubernetes (other)
+        - Local process backend
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      placeholder: Exact commands, manifests, and prompts.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and logs
+      description: Redact secrets, tokens, and private data.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Kubernetes version, CNI, OS, provider/gateway, and harness image.

@@ -39,6 +39,36 @@ The control plane owns lifecycle and the thread. The session runtime owns the ag
 
 See [docs/architecture.md](docs/architecture.md) for the sequence and state model.
 
+## Install with Helm
+
+Published images are `ghcr.io/hayden/mayflyd:v0.1.0` and `ghcr.io/hayden/mayfly-agent:v0.1.0`.
+
+```bash
+kubectl create namespace mayfly
+
+kubectl -n mayfly create secret generic mayfly-secrets \
+  --from-literal=MAYFLY_API_TOKEN="$(openssl rand -hex 24)" \
+  --from-literal=MAYFLY_WEBHOOK_SECRET="$(openssl rand -hex 24)" \
+  --from-literal=OPENAI_API_KEY="sk-..."
+
+helm install mayfly oci://ghcr.io/hayden/charts/mayfly \
+  --version 0.1.0 \
+  --namespace mayfly \
+  --set existingSecret=mayfly-secrets \
+  --set config.server.public_url=https://mayfly.example.com
+```
+
+For LiteLLM, set `litellm.enabled=true` and provide the provider keys in `litellm-secrets`. See [docs/providers.md](docs/providers.md) and [deploy/helm/mayfly/README.md](deploy/helm/mayfly/README.md).
+
+Local chart install:
+
+```bash
+helm install mayfly deploy/helm/mayfly \
+  --namespace mayfly \
+  --set existingSecret=mayfly-secrets \
+  --set config.server.public_url=https://mayfly.example.com
+```
+
 ## Quickstart with kind
 
 Requirements: Docker, kind, kubectl, Go 1.26+, jq, openssl.
@@ -115,7 +145,7 @@ curl -sS http://localhost:8080/hooks/generic \
   -d '{"prompt":"Check the latest deploy"}'
 ```
 
-Full endpoint list: [docs/api.md](docs/api.md). Provider auth: [docs/providers.md](docs/providers.md).
+Full endpoint list: [docs/api.md](docs/api.md). Provider auth: [docs/providers.md](docs/providers.md). Release process: [docs/release.md](docs/release.md).
 
 ## Configuration
 
@@ -146,6 +176,10 @@ mcp:
 skills:
   dirs: [/etc/mayfly-skills]
 ```
+
+## Status
+
+v0.1.0 is an experimental, single-tenant release. The API and harness protocol may change during 0.x. Read [docs/deployment.md](docs/deployment.md) and the known limitations in [CHANGELOG.md](CHANGELOG.md) before exposing it.
 
 ## Security model
 
@@ -197,6 +231,7 @@ Keep the credential boundary: new tool backends should be reached through the co
 | `internal/broker` | LLM and MCP credential proxy |
 | `internal/artifact` | local and S3-compatible stores |
 | `deploy/k8s` | base manifests and kind overlay |
+| `deploy/helm/mayfly` | Helm chart with optional LiteLLM |
 | `hack` | local run, kind deploy, e2e |
 
 ## License

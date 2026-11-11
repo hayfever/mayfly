@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose a capability or design change.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What cannot be done today, and who is affected?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the behavior and configuration you want.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include workarounds, simpler options, or why this belongs in core rather than MCP or a harness adapter.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Control plane
+        - Session runtime
+        - Kubernetes
+        - Artifacts
+        - Agents and harnesses
+        - MCP and skills
+        - Web UI and CLI
+        - Documentation
+    validations:
+      required: true

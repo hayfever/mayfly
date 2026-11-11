@@ -40,7 +40,36 @@ The e2e test ([hack/e2e-kind.sh](../hack/e2e-kind.sh)) checks:
 - close and artifact contents,
 - TTL expiry.
 
-## Real cluster
+## Helm
+
+The release chart is published to `oci://ghcr.io/hayden/charts/mayfly`.
+
+```bash
+kubectl create namespace mayfly
+kubectl -n mayfly create secret generic mayfly-secrets \
+  --from-literal=MAYFLY_API_TOKEN="$(openssl rand -hex 24)" \
+  --from-literal=MAYFLY_WEBHOOK_SECRET="$(openssl rand -hex 24)" \
+  --from-literal=OPENAI_API_KEY="sk-..."
+
+helm install mayfly oci://ghcr.io/hayden/charts/mayfly \
+  --version 0.1.0 \
+  --namespace mayfly \
+  --set existingSecret=mayfly-secrets \
+  --set config.server.public_url=https://mayfly.example.com
+```
+
+Or install the local chart:
+
+```bash
+helm install mayfly deploy/helm/mayfly \
+  --namespace mayfly \
+  --set existingSecret=mayfly-secrets \
+  --set config.server.public_url=https://mayfly.example.com
+```
+
+The chart creates the control-plane and agent ServiceAccounts, RBAC, ConfigMaps for skills and agent manifests, Service, optional Ingress, and optional LiteLLM deployment. Set `image.digest` and `agentImage.digest` for immutable images and `imagePullSecrets` for private registries. See [../deploy/helm/mayfly/README.md](../deploy/helm/mayfly/README.md).
+
+## Real cluster with Kustomize
 
 1. Build and push images:
 

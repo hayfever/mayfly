@@ -1,5 +1,7 @@
 # HTTP API
 
+The API paths are versioned (`/api/v1`, `/internal/v1`). During 0.x, request fields, response fields, and event types may change in minor releases. Pin a release and read the changelog before upgrading. The session runtime protocol is version 1 and should be treated as experimental until 1.0.
+
 All admin endpoints require `Authorization: Bearer <MAYFLY_API_TOKEN>`. Internal endpoints require the session token. JSON bodies use `Content-Type: application/json`.
 
 Error responses:
