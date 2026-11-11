@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -100,15 +99,7 @@ func TestWebhookToArtifact(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer queueStore.Close()
-	worker := queue.NewWorker(queueStore, func(ctx context.Context, job queue.Job) error {
-		if _, err := mgr.Create(ctx, job.Options); err != nil {
-			if errors.Is(err, session.ErrCapacity) {
-				return fmt.Errorf("%w: %v", queue.ErrRetryLater, err)
-			}
-			return err
-		}
-		return nil
-	}, 2, mgr.FreeSlots, 50*time.Millisecond, logger)
+	worker := queue.NewWorker(queueStore, queue.SessionHandler(mgr.Create), 2, mgr.FreeSlots, 50*time.Millisecond, logger)
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)

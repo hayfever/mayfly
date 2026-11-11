@@ -108,15 +108,7 @@ func main() {
 	if concurrency <= 0 {
 		concurrency = 8
 	}
-	worker := queue.NewWorker(queueStore, func(ctx context.Context, job queue.Job) error {
-		if _, err := mgr.Create(ctx, job.Options); err != nil {
-			if errors.Is(err, session.ErrCapacity) {
-				return fmt.Errorf("%w: %v", queue.ErrRetryLater, err)
-			}
-			return err
-		}
-		return nil
-	}, concurrency, mgr.FreeSlots, cfg.Queue.PollInterval.Std(), logger)
+	worker := queue.NewWorker(queueStore, queue.SessionHandler(mgr.Create), concurrency, mgr.FreeSlots, cfg.Queue.PollInterval.Std(), logger)
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)

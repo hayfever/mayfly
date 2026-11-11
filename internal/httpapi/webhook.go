@@ -56,6 +56,12 @@ func (s *Server) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "queue is not configured")
 		return
 	}
+	// Reject requests the worker could never run while the sender is still
+	// listening. Create repeats these checks when the job runs.
+	if err := s.mgr.Validate(result.Options); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	job := queue.NewJob(cfg.Name, result.DeliveryKey, result.Options, time.Now())
 	switch err := s.queue.Accept(r.Context(), job); {
 	case errors.Is(err, queue.ErrDuplicate):

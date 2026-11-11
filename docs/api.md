@@ -41,6 +41,7 @@ Responses:
 - Others: `202 {"accepted":true,"duplicate":false,"job_id":"...","delivery":"...","status":"queued"}`.
 - Duplicate delivery (same `X-GitHub-Delivery`, Slack `trigger_id`, or `Idempotency-Key`): `202` with `"duplicate":true`. No second job is stored.
 - Slack URL verification: `200 {"challenge":"..."}`.
+- Session options the control plane cannot run (unknown agent, skill, or MCP server; model not in `llm.allow_models`; empty prompt): `400` with the reason. Nothing is queued.
 - Over the trigger rate limit, or when `queue.max_jobs` is reached: `429` with `Retry-After`. The rate limit counts only requests that pass signature verification, so unauthenticated traffic cannot exhaust a trigger.
 
 Find the session created for a delivery through `GET /api/v1/sessions` (the trigger delivery key is stored on the session) or watch `GET /api/v1/queue` until the job leaves the queue.

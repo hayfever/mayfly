@@ -23,6 +23,19 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+func testManager(t *testing.T, cfg *config.Config) *session.Manager {
+	t.Helper()
+	store, err := artifact.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := session.New(cfg, store, hub.New(10), nil, nil, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mgr
+}
+
 func testQueue(t *testing.T) queue.Store {
 	t.Helper()
 	store, err := queue.New(context.Background(), config.Default().Queue)
@@ -110,9 +123,10 @@ func TestReadyReflectsManagerState(t *testing.T) {
 
 func TestWebhookDeduplicatesByDeliveryKey(t *testing.T) {
 	cfg := config.Default()
+	cfg.Runtime.Image = "example/agent:1"
 	cfg.Triggers = []config.TriggerConfig{{Name: "generic", Type: "generic", AllowUnsigned: true}}
 	store := testQueue(t)
-	s := New(cfg, nil, store, testLogger())
+	s := New(cfg, testManager(t, cfg), store, testLogger())
 	handler := s.Handler()
 
 	post := func() *httptest.ResponseRecorder {
@@ -148,5 +162,32 @@ func TestWebhookDeduplicatesByDeliveryKey(t *testing.T) {
 	}
 	if stats.Pending != 1 {
 		t.Fatalf("pending jobs = %d, want 1", stats.Pending)
+	}
+}
+
+func TestWebhookRejectsInvalidSessionOptions(t *testing.T) {
+	cfg := config.Default()
+	cfg.Runtime.Image = "example/agent:1"
+	cfg.Triggers = []config.TriggerConfig{{Name: "generic", Type: "generic", AllowUnsigned: true}}
+	store := testQueue(t)
+	s := New(cfg, testManager(t, cfg), store, testLogger())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/hooks/generic", strings.NewReader(`{"prompt":"x","agent":"no-such-agent"}`))
+	req.Header.Set("Content-Type", "application/json")
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "no-such-agent") {
+		t.Fatalf("body does not name the agent: %s", rec.Body.String())
+	}
+	stats, err := store.Stats(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Pending != 0 {
+		t.Fatalf("pending jobs = %d, want 0", stats.Pending)
 	}
 }

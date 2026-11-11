@@ -219,14 +219,27 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	m.wg.Wait()
 }
 
-// Create starts a new session.
-func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Session, error) {
+// request is a validated session request with its references resolved.
+type request struct {
+	prompt     string
+	ttl        time.Duration
+	agent      agents.Agent
+	model      string
+	skills     []sessioncfg.Skill
+	skillNames []string
+	mcp        []sessioncfg.MCPServer
+	mcpNames   []string
+}
+
+// resolveRequest checks opts and resolves every reference it names. It has no
+// side effects, so it can run before anything is created.
+func (m *Manager) resolveRequest(opts CreateOptions) (request, error) {
 	prompt := strings.TrimSpace(opts.Prompt)
 	if prompt == "" {
-		return nil, errors.New("prompt is required")
+		return request{}, errors.New("prompt is required")
 	}
 	if len(prompt) > maxPromptBytes {
-		return nil, fmt.Errorf("prompt exceeds %d bytes", maxPromptBytes)
+		return request{}, fmt.Errorf("prompt exceeds %d bytes", maxPromptBytes)
 	}
 	ttl := opts.TTL
 	if ttl <= 0 {
@@ -237,7 +250,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 	}
 	agent, err := m.resolveAgent(opts.Agent)
 	if err != nil {
-		return nil, err
+		return request{}, err
 	}
 	modelName := opts.Model
 	if modelName == "" {
@@ -247,7 +260,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		modelName = m.cfg.LLM.Model
 	}
 	if !m.modelAllowed(modelName) {
-		return nil, fmt.Errorf("model %q is not allowed", modelName)
+		return request{}, fmt.Errorf("model %q is not allowed", modelName)
 	}
 	requestedSkills := opts.Skills
 	if len(requestedSkills) == 0 {
@@ -255,7 +268,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 	}
 	resolvedSkills, skillNames, err := m.resolveSkills(requestedSkills)
 	if err != nil {
-		return nil, err
+		return request{}, err
 	}
 	requestedMCP := opts.MCPServers
 	if len(requestedMCP) == 0 {
@@ -263,8 +276,36 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 	}
 	resolvedMCP, mcpNames, err := m.resolveMCP(requestedMCP)
 	if err != nil {
+		return request{}, err
+	}
+	return request{
+		prompt:     prompt,
+		ttl:        ttl,
+		agent:      agent,
+		model:      modelName,
+		skills:     resolvedSkills,
+		skillNames: skillNames,
+		mcp:        resolvedMCP,
+		mcpNames:   mcpNames,
+	}, nil
+}
+
+// Validate reports whether Create would accept opts, without starting
+// anything. Webhooks call it before queueing so a bad request gets 400 while
+// the sender is still listening.
+func (m *Manager) Validate(opts CreateOptions) error {
+	_, err := m.resolveRequest(opts)
+	return err
+}
+
+// Create starts a new session.
+func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Session, error) {
+	req, err := m.resolveRequest(opts)
+	if err != nil {
 		return nil, err
 	}
+	prompt, ttl, agent, modelName := req.prompt, req.ttl, req.agent, req.model
+	resolvedSkills, skillNames, resolvedMCP, mcpNames := req.skills, req.skillNames, req.mcp, req.mcpNames
 	maxSteps := agent.MaxSteps
 	if maxSteps <= 0 {
 		maxSteps = m.cfg.Sessions.MaxSteps
