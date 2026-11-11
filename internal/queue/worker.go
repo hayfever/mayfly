@@ -54,9 +54,12 @@ func (w *Worker) Run(ctx context.Context) {
 			wg.Wait()
 			return
 		}
-		limit := w.concurrency
+		// Handlers still running may not have reserved their session yet,
+		// so count them against both the worker and the session cap.
+		inflight := len(sem)
+		limit := w.concurrency - inflight
 		if w.free != nil {
-			if available := w.free(); available < limit {
+			if available := w.free() - inflight; available < limit {
 				limit = available
 			}
 		}
@@ -87,13 +90,17 @@ func (w *Worker) Run(ctx context.Context) {
 			}
 			continue
 		}
-		for _, lease := range leases {
+		for i, lease := range leases {
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():
-				// Hand back work that was claimed but never started.
+				// Hand back every lease that was claimed but never started.
 				releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-				_ = w.store.Release(releaseCtx, lease, 0)
+				for _, unstarted := range leases[i:] {
+					if err := w.store.Release(releaseCtx, unstarted, 0); err != nil {
+						w.logger.Warn("queue release failed", "job", unstarted.ID, "error", err)
+					}
+				}
 				cancel()
 				wg.Wait()
 				return

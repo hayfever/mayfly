@@ -209,3 +209,53 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 	t.Fatal("condition not met before timeout")
 }
+
+func TestWorkerDoesNotClaimPastFreeSlots(t *testing.T) {
+	store, err := New(context.Background(), testConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for range 10 {
+		if err := store.Accept(context.Background(), testJob("")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const slots = 2
+	var mu sync.Mutex
+	running, peak, reserved, retries, done := 0, 0, 0, 0, 0
+	handler := func(_ context.Context, _ Job) error {
+		mu.Lock()
+		running++
+		if running > peak {
+			peak = running
+		}
+		mu.Unlock()
+		defer func() { mu.Lock(); running--; mu.Unlock() }()
+		time.Sleep(5 * time.Millisecond) // work done before the session is reserved
+		mu.Lock()
+		if reserved >= slots {
+			retries++
+			mu.Unlock()
+			return ErrRetryLater
+		}
+		reserved++
+		mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+		mu.Lock()
+		reserved--
+		done++
+		mu.Unlock()
+		return nil
+	}
+	free := func() int { mu.Lock(); defer mu.Unlock(); return slots - reserved }
+	cancel, stopped := startWorker(t, NewWorker(store, handler, 8, free, 5*time.Millisecond, workerLogger()))
+	waitFor(t, 3*time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return done == 10 })
+	cancel()
+	<-stopped
+	mu.Lock()
+	defer mu.Unlock()
+	if peak > slots || retries != 0 {
+		t.Fatalf("peak handlers = %d (want <= %d), capacity retries = %d (want 0)", peak, slots, retries)
+	}
+}
