@@ -1,0 +1,169 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/hayden/mayflyd
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+agentImage:
+  repository: ghcr.io/hayden/mayfly-agent
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+replicaCount: 1
+logLevel: info
+
+serviceAccount:
+  create: true
+  controlPlaneName: ""
+  agentName: ""
+  annotations: {}
+  agentAnnotations: {}
+
+rbac:
+  create: true
+
+service:
+  type: ClusterIP
+  port: 8080
+  nodePort: null
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: mayfly.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Either set existingSecret or enable secret.create and provide literals.
+existingSecret: ""
+secret:
+  create: false
+  name: ""
+  literals: {}
+
+# Mayfly configuration. The chart fills runtime.image, service accounts,
+# platform labels, internal URL, and LiteLLM defaults when empty.
+config:
+  server:
+    public_url: "http://localhost:8080"
+    token_env: MAYFLY_API_TOKEN
+    attach_ticket_ttl: 60s
+    max_body_bytes: 4194304
+  sessions:
+    namespace: "" # defaults to the release namespace
+    default_ttl: 30m
+    max_ttl: 2h
+    idle_timeout: 15m
+    close_grace: 90s
+    event_buffer: 5000
+    max_steps: 24
+    max_history_messages: 120
+    allow_shell: true
+    shell_timeout: 120s
+  runtime:
+    backend: kubernetes
+    network_policy: true
+    dns_namespace: kube-system
+    workspace_limit: 1Gi
+    artifact_volume_limit: 1Gi
+    poll_interval: 2s
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+  llm:
+    base_url: ""
+    api_key_env: OPENAI_API_KEY
+    model: gpt-4.1-mini
+    allow_models: [gpt-4.1-mini]
+    timeout: 180s
+  artifacts:
+    store: local
+    local:
+      dir: /var/lib/mayfly/artifacts
+    max_bytes: 268435456
+  skills:
+    dirs: [/etc/mayfly-skills]
+  agents:
+    dirs: [/etc/mayfly-agents]
+    allowed_images: []
+  mcp:
+    servers: []
+  triggers: []
+
+skills:
+  files: {}
+
+agents:
+  files: {}
+
+litellm:
+  enabled: false
+  image:
+    repository: ghcr.io/berriai/litellm
+    tag: main-stable
+    digest: ""
+  existingSecret: litellm-secrets
+  masterKeyEnv: LITELLM_MASTER_KEY
+  port: 4000
+  serviceAccount:
+    annotations: {}
+  models:
+    - model_name: gpt-4.1-mini
+      litellm_params:
+        model: openai/gpt-4.1-mini
+        api_key: os.environ/OPENAI_API_KEY
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+controlPlane:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  podLabels: {}
+  extraEnv: []
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    privileged: false
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault

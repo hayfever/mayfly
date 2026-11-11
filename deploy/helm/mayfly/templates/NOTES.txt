@@ -1,0 +1,23 @@
+Mayfly is installed.
+
+{{- if not .Values.ingress.enabled }}
+
+Reach the API locally:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "mayfly.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+{{- end }}
+
+Public URL: {{ .Values.config.server.public_url }}
+
+Create the admin secret if you have not already:
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.existingSecret | default (include "mayfly.secretName" .) }} \
+    --from-literal=MAYFLY_API_TOKEN="$(openssl rand -hex 24)" \
+    --from-literal=MAYFLY_WEBHOOK_SECRET="$(openssl rand -hex 24)"
+{{- if .Values.litellm.enabled }}
+
+LiteLLM is enabled. Its Secret {{ .Values.litellm.existingSecret }} must contain
+{{ .Values.litellm.masterKeyEnv }} and the provider keys referenced by the model list.
+The Mayfly Secret must contain the same {{ .Values.litellm.masterKeyEnv }} value.
+{{- end }}
+
+Logs:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "mayfly.fullname" . }}

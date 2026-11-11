@@ -1,0 +1,113 @@
+{{- if .Values.litellm.enabled -}}
+{{- $litellmName := include "mayfly.litellmName" . -}}
+{{- $litellmImage := printf "%s:%s" .Values.litellm.image.repository .Values.litellm.image.tag -}}
+{{- if .Values.litellm.image.digest -}}
+{{- $litellmImage = printf "%s@%s" .Values.litellm.image.repository .Values.litellm.image.digest -}}
+{{- end -}}
+{{- $litellmSecret := required "litellm.existingSecret is required when litellm.enabled is true" .Values.litellm.existingSecret -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $litellmName }}
+  labels:
+    {{- include "mayfly.labels" . | nindent 4 }}
+    app.kubernetes.io/component: litellm
+  {{- with .Values.litellm.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $litellmName }}
+  labels:
+    {{- include "mayfly.labels" . | nindent 4 }}
+    app.kubernetes.io/component: litellm
+data:
+  config.yaml: |
+    model_list:
+{{ toYaml .Values.litellm.models | indent 6 }}
+    general_settings:
+      master_key: os.environ/{{ .Values.litellm.masterKeyEnv }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $litellmName }}
+  labels:
+    {{- include "mayfly.labels" . | nindent 4 }}
+    app.kubernetes.io/component: litellm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "mayfly.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: litellm
+  template:
+    metadata:
+      labels:
+        {{- include "mayfly.labels" . | nindent 8 }}
+        app.kubernetes.io/component: litellm
+    spec:
+      serviceAccountName: {{ $litellmName }}
+      securityContext:
+        {{- toYaml .Values.litellm.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: litellm
+          image: {{ $litellmImage }}
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/litellm/config.yaml", "--port", {{ .Values.litellm.port | quote }}]
+          envFrom:
+            - secretRef:
+                name: {{ $litellmSecret }}
+          env:
+            - name: HOME
+              value: /tmp
+          ports:
+            - name: http
+              containerPort: {{ .Values.litellm.port }}
+          securityContext:
+            {{- toYaml .Values.litellm.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.litellm.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/litellm
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $litellmName }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $litellmName }}
+  labels:
+    {{- include "mayfly.labels" . | nindent 4 }}
+    app.kubernetes.io/component: litellm
+spec:
+  selector:
+    {{- include "mayfly.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: litellm
+  ports:
+    - name: http
+      port: {{ .Values.litellm.port }}
+      targetPort: http
+{{- end }}

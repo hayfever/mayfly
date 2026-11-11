@@ -1,0 +1,30 @@
+{{- $config := deepCopy .Values.config -}}
+{{- $fullname := include "mayfly.fullname" . -}}
+{{- $litellmName := include "mayfly.litellmName" . -}}
+{{- $_ := set $config.server "addr" (printf ":%v" .Values.service.port) -}}
+{{- $_ := set $config.server "internal_url" (default (printf "http://%s.%s.svc.cluster.local:%v" $fullname .Release.Namespace .Values.service.port) $config.server.internal_url) -}}
+{{- $_ := set $config.sessions "namespace" (default .Release.Namespace $config.sessions.namespace) -}}
+{{- $_ := set $config.runtime "image" (include "mayfly.agentImage" .) -}}
+{{- $_ := set $config.runtime "image_pull_policy" .Values.agentImage.pullPolicy -}}
+{{- $_ := set $config.runtime "service_account" (include "mayfly.agentServiceAccountName" .) -}}
+{{- $_ := set $config.runtime "platform_namespace" .Release.Namespace -}}
+{{- $_ := set $config.runtime "platform_labels" (dict "app.kubernetes.io/name" (include "mayfly.name" .) "app.kubernetes.io/component" "control-plane") -}}
+{{- if not $config.llm.base_url -}}
+{{- if .Values.litellm.enabled -}}
+{{- $_ := set $config.llm "base_url" (printf "http://%s:%v/v1" $litellmName .Values.litellm.port) -}}
+{{- else -}}
+{{- $_ := set $config.llm "base_url" "https://api.openai.com/v1" -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.litellm.enabled -}}
+{{- $_ := set $config.llm "api_key_env" .Values.litellm.masterKeyEnv -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mayfly.configMapName" . }}
+  labels:
+    {{- include "mayfly.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+{{ $config | toYaml | indent 4 }}

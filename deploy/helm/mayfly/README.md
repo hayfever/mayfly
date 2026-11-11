@@ -1,0 +1,117 @@
+# Mayfly Helm chart
+
+Installs the Mayfly control plane and optionally a LiteLLM gateway.
+
+## Prerequisites
+
+- Kubernetes 1.27+
+- A CNI that enforces NetworkPolicy
+- An agent image at `agentImage.repository:tag`
+- An existing Secret with `MAYFLY_API_TOKEN` and any webhook secrets
+
+```bash
+kubectl create namespace mayfly
+
+kubectl -n mayfly create secret generic mayfly-secrets \
+  --from-literal=MAYFLY_API_TOKEN="$(openssl rand -hex 24)" \
+  --from-literal=MAYFLY_WEBHOOK_SECRET="$(openssl rand -hex 24)" \
+  --from-literal=OPENAI_API_KEY="sk-..."
+```
+
+## Install
+
+```bash
+helm install mayfly deploy/helm/mayfly \
+  --namespace mayfly \
+  --set existingSecret=mayfly-secrets \
+  --set config.server.public_url=https://mayfly.example.com
+```
+
+The default images are `ghcr.io/hayden/mayflyd:v0.1.0` and `ghcr.io/hayden/mayfly-agent:v0.1.0`. Override `image` and `agentImage` for your registry.
+
+Check the token:
+
+```bash
+kubectl -n mayfly get secret mayfly-secrets -o jsonpath='{.data.MAYFLY_API_TOKEN}' | base64 -d
+```
+
+For local access:
+
+```bash
+kubectl -n mayfly port-forward svc/mayfly 8080:8080
+```
+
+Set `config.server.public_url=http://localhost:8080` when using port-forward. Ingress and TLS must use the external URL.
+
+## Agents and skills
+
+Inline files:
+
+```yaml
+skills:
+  files:
+    incident-triage.md: |
+      ---
+      name: incident-triage
+      description: Triage incidents.
+      ---
+      Check evidence before recommending action.
+
+agents:
+  files:
+    triage.yaml: |
+      schemaVersion: 1
+      name: mayfly/agents
+      agents:
+        - name: triage
+          description: Incident triage.
+          skills: [incident-triage]
+          runtime:
+            config:
+              triage: true
+```
+
+They are mounted at `/etc/mayfly-skills` and `/etc/mayfly-agents`.
+
+## LiteLLM
+
+```bash
+kubectl -n mayfly create secret generic litellm-secrets \
+  --from-literal=LITELLM_MASTER_KEY="$(openssl rand -hex 24)" \
+  --from-literal=OPENAI_API_KEY="sk-..." \
+  --from-literal=ANTHROPIC_API_KEY="sk-ant-..." \
+  --from-literal=OPENROUTER_API_KEY="sk-or-..."
+
+# Add the same LITELLM_MASTER_KEY to mayfly-secrets.
+kubectl -n mayfly patch secret mayfly-secrets \
+  -p "{\"stringData\":{\"LITELLM_MASTER_KEY\":\"$(kubectl -n mayfly get secret litellm-secrets -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)\"}}"
+
+helm upgrade --install mayfly deploy/helm/mayfly \
+  --namespace mayfly \
+  --set existingSecret=mayfly-secrets \
+  --set litellm.enabled=true \
+  --set config.server.public_url=https://mayfly.example.com
+```
+
+LiteLLM model aliases live in `litellm.models`. Mayfly `config.llm.model` and `config.llm.allow_models` must reference those aliases. See [docs/providers.md](../../../docs/providers.md).
+
+For Bedrock on EKS, annotate `litellm.serviceAccount.annotations` with your IRSA role and omit static AWS keys.
+
+## Key values
+
+| Value | Default | Meaning |
+|---|---|---|
+| `image.repository` | `ghcr.io/hayden/mayflyd` | Control-plane image |
+| `image.digest` | empty | Pin instead of tag |
+| `agentImage.repository` | `ghcr.io/hayden/mayfly-agent` | Agent image |
+| `agentImage.digest` | empty | Pin instead of tag |
+| `existingSecret` | empty | Secret with control-plane env |
+| `secret.create` | false | Create the Secret from `secret.literals` |
+| `config.server.public_url` | `http://localhost:8080` | External URL |
+| `config.llm.base_url` | empty | OpenAI by default; LiteLLM URL when enabled |
+| `config.agents.allowed_images` | empty | Image allowlist for manifests |
+| `ingress.enabled` | false | Create an Ingress |
+| `controlPlane.resources` | small | Control-plane resources |
+| `litellm.enabled` | false | Deploy LiteLLM |
+
+The control plane runs one replica. Session history is in memory; artifacts are durable. See [docs/deployment.md](../../../docs/deployment.md).
