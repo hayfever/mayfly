@@ -18,7 +18,14 @@ var (
 	bucketReady = []byte("ready")
 	bucketSeen  = []byte("seen")
 	bucketDead  = []byte("dead")
+	// bucketSeenExpiry indexes dedupe keys by expiry (8-byte big-endian unix
+	// nanoseconds, then the dedupe key) so expired keys purge in order.
+	bucketSeenExpiry = []byte("seen_expiry")
 )
+
+// purgeBatch bounds the extra work each Accept does to remove expired dedupe
+// keys.
+const purgeBatch = 256
 
 // boltStore is a single-file durable queue. Dedupe and enqueue happen in one
 // transaction, so an accepted job is either fully stored or not stored at all.
@@ -38,7 +45,21 @@ func newBolt(cfg config.QueueConfig) (*boltStore, error) {
 				return err
 			}
 		}
-		return nil
+		if tx.Bucket(bucketSeenExpiry) != nil {
+			return nil
+		}
+		index, err := tx.CreateBucket(bucketSeenExpiry)
+		if err != nil {
+			return err
+		}
+		// An upgraded database indexes its existing dedupe keys once, so the
+		// keys written before the index existed purge like new ones.
+		return tx.Bucket(bucketSeen).ForEach(func(dedupeKey, expiry []byte) error {
+			if len(expiry) != 8 {
+				return nil
+			}
+			return index.Put(seenExpiryKey(expiry, dedupeKey), nil)
+		})
 	})
 	if err != nil {
 		_ = db.Close()
@@ -82,11 +103,15 @@ func (s *boltStore) Accept(_ context.Context, job Job) error {
 		if job.Delivery != "" {
 			expiry := make([]byte, 8)
 			binary.BigEndian.PutUint64(expiry, uint64(now.Add(s.cfg.DedupeTTL.Std()).UnixNano()))
-			if err := seen.Put([]byte(job.ID), expiry); err != nil {
+			dedupeKey := []byte(job.ID)
+			if err := seen.Put(dedupeKey, expiry); err != nil {
+				return err
+			}
+			if err := tx.Bucket(bucketSeenExpiry).Put(seenExpiryKey(expiry, dedupeKey), nil); err != nil {
 				return err
 			}
 		}
-		return nil
+		return purgeSeen(tx, now, purgeBatch)
 	})
 }
 
@@ -257,6 +282,45 @@ func splitReadyKey(key []byte) (time.Time, string) {
 		return time.Time{}, ""
 	}
 	return time.Unix(0, int64(binary.BigEndian.Uint64(key[:8]))).UTC(), string(key[8:])
+}
+
+// seenExpiryKey orders dedupe keys by expiry.
+func seenExpiryKey(expiry, dedupeKey []byte) []byte {
+	key := make([]byte, 0, len(expiry)+len(dedupeKey))
+	return append(append(key, expiry...), dedupeKey...)
+}
+
+// purgeSeen deletes up to limit dedupe keys whose expiry is before now. A
+// dedupe key re-recorded with a later expiry keeps its newer entry, because
+// the stored value no longer equals the expired index key's prefix.
+func purgeSeen(tx *bolt.Tx, now time.Time, limit int) error {
+	seen := tx.Bucket(bucketSeen)
+	index := tx.Bucket(bucketSeenExpiry)
+	if seen == nil || index == nil {
+		return nil
+	}
+	cutoff := make([]byte, 8)
+	binary.BigEndian.PutUint64(cutoff, uint64(now.UTC().UnixNano()))
+	var expired [][]byte
+	cursor := index.Cursor()
+	for key, _ := cursor.First(); key != nil && len(expired) < limit; key, _ = cursor.Next() {
+		if len(key) < 8 || bytes.Compare(key[:8], cutoff) >= 0 {
+			break
+		}
+		expired = append(expired, append([]byte(nil), key...))
+	}
+	for _, key := range expired {
+		dedupeKey := key[8:]
+		if bytes.Equal(seen.Get(dedupeKey), key[:8]) {
+			if err := seen.Delete(dedupeKey); err != nil {
+				return err
+			}
+		}
+		if err := index.Delete(key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 var _ Store = (*boltStore)(nil)

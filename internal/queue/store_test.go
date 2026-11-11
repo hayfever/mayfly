@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+	bolt "go.etcd.io/bbolt"
 
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/model"
@@ -356,6 +358,89 @@ func TestBoltSurvivesReopen(t *testing.T) {
 	}
 	if stats.Pending != 1 {
 		t.Fatalf("pending after reopen = %+v", stats)
+	}
+}
+
+func TestBoltPurgesExpiredDedupeKeys(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Backend = "bbolt"
+	cfg.MaxJobs = 0
+	cfg.Bolt.Path = filepath.Join(t.TempDir(), "queue.db")
+	cfg.DedupeTTL = config.Duration(20 * time.Millisecond)
+	store, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for i := range 50 {
+		if err := store.Accept(ctx, testJob(fmt.Sprintf("old-%d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(40 * time.Millisecond)
+	if err := store.Accept(ctx, testJob("fresh")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Accept(ctx, testJob("fresh")); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("fresh duplicate = %v, want ErrDuplicate", err)
+	}
+	var seen int
+	_ = store.(*boltStore).db.View(func(tx *bolt.Tx) error {
+		seen = tx.Bucket(bucketSeen).Stats().KeyN
+		return nil
+	})
+	if seen != 1 {
+		t.Fatalf("dedupe keys after purge = %d, want 1", seen)
+	}
+}
+
+func TestBoltBackfillsDedupeIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queue.db")
+	expiry := make([]byte, 8)
+	binary.BigEndian.PutUint64(expiry, uint64(time.Now().Add(-time.Hour).UnixNano()))
+	db, err := bolt.Open(path, 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		seen, err := tx.CreateBucket(bucketSeen)
+		if err != nil {
+			return err
+		}
+		for _, key := range []string{"d-old-1", "d-old-2"} {
+			if err := seen.Put([]byte(key), expiry); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testConfig(t)
+	cfg.Backend = "bbolt"
+	cfg.MaxJobs = 0
+	cfg.Bolt.Path = path
+	store, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Accept(context.Background(), testJob("upgrade")); err != nil {
+		t.Fatal(err)
+	}
+	var seen int
+	_ = store.(*boltStore).db.View(func(tx *bolt.Tx) error {
+		seen = tx.Bucket(bucketSeen).Stats().KeyN
+		return nil
+	})
+	if seen != 1 {
+		t.Fatalf("dedupe keys after backfill purge = %d, want 1", seen)
 	}
 }
 
