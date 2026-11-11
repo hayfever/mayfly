@@ -29,6 +29,7 @@ func testSpec() *SessionSpec {
 		Token:               "secret-token",
 		Command:             []string{"/usr/local/bin/agent"},
 		Args:                []string{"--mode", "rpc"},
+		ImagePullSecrets:    []string{"registry-credentials"},
 		Env:                 map[string]string{"AGENT_MODE": "rpc"},
 		Resources: ResourceConfig{
 			Requests: map[string]string{"cpu": "100m"},
@@ -82,6 +83,9 @@ func TestPodSecurityDefaults(t *testing.T) {
 	}
 	if len(container.Command) != 1 || container.Command[0] != "/usr/local/bin/agent" || len(container.Args) != 2 {
 		t.Fatalf("command = %v args=%v", container.Command, container.Args)
+	}
+	if len(pod.Spec.ImagePullSecrets) != 1 || pod.Spec.ImagePullSecrets[0].Name != "registry-credentials" {
+		t.Fatalf("image pull secrets = %v", pod.Spec.ImagePullSecrets)
 	}
 	envFound := false
 	for _, item := range container.Env {

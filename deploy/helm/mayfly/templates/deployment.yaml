@@ -26,6 +26,8 @@ spec:
         app.kubernetes.io/component: control-plane
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/skills: {{ include (print $.Template.BasePath "/skills-configmap.yaml") . | sha256sum }}
+        checksum/agents: {{ include (print $.Template.BasePath "/agents-configmap.yaml") . | sha256sum }}
         {{- with .Values.controlPlane.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

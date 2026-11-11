@@ -48,6 +48,7 @@ type SessionSpec struct {
 	ConfigMapName       string
 	Image               string
 	ImagePullPolicy     string
+	ImagePullSecrets    []string
 	ServiceAccount      string
 	TTL                 time.Duration
 	WorkspaceLimit      string
@@ -200,6 +201,7 @@ func (s *SessionSpec) Pod() *corev1.Pod {
 			AutomountServiceAccountToken:  &no,
 			EnableServiceLinks:            &no,
 			ServiceAccountName:            s.ServiceAccount,
+			ImagePullSecrets:              imagePullSecrets(s.ImagePullSecrets),
 			TerminationGracePeriodSeconds: new(int64(20)),
 			ActiveDeadlineSeconds:         &deadline,
 			SecurityContext: &corev1.PodSecurityContext{
@@ -331,6 +333,16 @@ func (s *SessionSpec) NetworkPolicy() *networkingv1.NetworkPolicy {
 			Egress:      egress,
 		},
 	}
+}
+
+func imagePullSecrets(names []string) []corev1.LocalObjectReference {
+	out := make([]corev1.LocalObjectReference, 0, len(names))
+	for _, name := range names {
+		if strings.TrimSpace(name) != "" {
+			out = append(out, corev1.LocalObjectReference{Name: name})
+		}
+	}
+	return out
 }
 
 func quantities(in map[string]string) corev1.ResourceList {

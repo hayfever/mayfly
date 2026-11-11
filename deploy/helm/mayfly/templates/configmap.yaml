@@ -6,6 +6,9 @@
 {{- $_ := set $config.sessions "namespace" (default .Release.Namespace $config.sessions.namespace) -}}
 {{- $_ := set $config.runtime "image" (include "mayfly.agentImage" .) -}}
 {{- $_ := set $config.runtime "image_pull_policy" .Values.agentImage.pullPolicy -}}
+{{- $pullSecretNames := list -}}
+{{- range .Values.imagePullSecrets -}}{{- $pullSecretNames = append $pullSecretNames .name -}}{{- end -}}
+{{- $_ := set $config.runtime "image_pull_secrets" $pullSecretNames -}}
 {{- $_ := set $config.runtime "service_account" (include "mayfly.agentServiceAccountName" .) -}}
 {{- $_ := set $config.runtime "platform_namespace" .Release.Namespace -}}
 {{- $_ := set $config.runtime "platform_labels" (dict "app.kubernetes.io/name" (include "mayfly.name" .) "app.kubernetes.io/component" "control-plane") -}}

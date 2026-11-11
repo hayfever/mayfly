@@ -39,6 +39,7 @@ Complete example: [examples/config.local.yaml](../examples/config.local.yaml). K
 | `backend` | `kubernetes` | `kubernetes` or `local` |
 | `image` | — | Agent image (required for Kubernetes) |
 | `image_pull_policy` | `IfNotPresent` | Kubernetes pull policy |
+| `image_pull_secrets` | `[]` | Secret names attached to session pods for private images |
 | `agent_binary` | — | Agent binary path (required for local) |
 | `state_dir` | `.mayfly` | Local backend state and workspace directory |
 | `service_account` | `mayfly-agent` | Service account for session pods |

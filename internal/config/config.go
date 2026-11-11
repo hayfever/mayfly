@@ -81,6 +81,7 @@ type RuntimeConfig struct {
 	Backend           string            `yaml:"backend"` // kubernetes or local
 	Image             string            `yaml:"image"`
 	ImagePullPolicy   string            `yaml:"image_pull_policy"`
+	ImagePullSecrets  []string          `yaml:"image_pull_secrets"`
 	AgentBinary       string            `yaml:"agent_binary"`
 	StateDir          string            `yaml:"state_dir"`
 	ServiceAccount    string            `yaml:"service_account"`

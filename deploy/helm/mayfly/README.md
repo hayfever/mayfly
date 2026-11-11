@@ -105,6 +105,7 @@ For Bedrock on EKS, annotate `litellm.serviceAccount.annotations` with your IRSA
 | `image.digest` | empty | Pin instead of tag |
 | `agentImage.repository` | `ghcr.io/hayden/mayfly-agent` | Agent image |
 | `agentImage.digest` | empty | Pin instead of tag |
+| `imagePullSecrets` | empty | Secrets for control-plane, LiteLLM, and session images |
 | `existingSecret` | empty | Secret with control-plane env |
 | `secret.create` | false | Create the Secret from `secret.literals` |
 | `config.server.public_url` | `http://localhost:8080` | External URL |

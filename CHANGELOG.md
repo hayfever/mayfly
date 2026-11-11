@@ -35,7 +35,7 @@ First public release.
 - Per-agent provider credentials and LiteLLM virtual keys are not supported.
 - Remote skill archives are fetched at control-plane startup. There is no cache; private GitHub archive redirects may drop authorization headers.
 - Harness images and the session runtime protocol are documented but should be treated as experimental in 0.x.
-- Private image pull secrets are supported by the Helm chart, not by the raw API.
+- Image pull secrets must be configured explicitly (`runtime.image_pull_secrets`); no registry credentials are discovered automatically.
 - No artifact encryption, image signing, or admission policy is provided by the platform itself.
 
 ### Security
