@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
-FROM golang:1.27-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -9,12 +12,12 @@ ARG VERSION=dev
 ARG COMMIT=none
 ARG DATE=unknown
 RUN LDFLAGS="-s -w -X github.com/hayden/mayfly/internal/version.Version=${VERSION} -X github.com/hayden/mayfly/internal/version.Commit=${COMMIT} -X github.com/hayden/mayfly/internal/version.Date=${DATE}" \
- && CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o /out/mayflyd ./cmd/mayflyd \
- && CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o /out/mayfly-agent ./cmd/mayfly-agent \
- && CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o /out/mayfly ./cmd/mayfly \
- && CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o /out/mayfly-harness ./cmd/mayfly-harness \
- && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/llmstub ./cmd/llmstub \
- && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/mcpstub ./cmd/mcpstub
+ && go build -trimpath -ldflags "$LDFLAGS" -o /out/mayflyd ./cmd/mayflyd \
+ && go build -trimpath -ldflags "$LDFLAGS" -o /out/mayfly-agent ./cmd/mayfly-agent \
+ && go build -trimpath -ldflags "$LDFLAGS" -o /out/mayfly ./cmd/mayfly \
+ && go build -trimpath -ldflags "$LDFLAGS" -o /out/mayfly-harness ./cmd/mayfly-harness \
+ && go build -trimpath -ldflags "$LDFLAGS" -o /out/llmstub ./cmd/llmstub \
+ && go build -trimpath -ldflags "$LDFLAGS" -o /out/mcpstub ./cmd/mcpstub
 
 FROM gcr.io/distroless/static-debian12:nonroot AS mayflyd
 COPY --from=build /out/mayflyd /mayflyd
