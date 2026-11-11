@@ -44,7 +44,7 @@ Responses:
 - Session options the control plane cannot run (unknown agent, skill, or MCP server; model not in `llm.allow_models`; empty prompt): `400` with the reason. Nothing is queued.
 - Over the trigger rate limit, or when `queue.max_jobs` is reached: `429` with `Retry-After`. The rate limit counts only requests that pass signature verification, so unauthenticated traffic cannot exhaust a trigger.
 
-Find the session created for a delivery through `GET /api/v1/sessions` (the trigger delivery key is stored on the session) or watch `GET /api/v1/queue` until the job leaves the queue.
+Find the session created for a delivery through `GET /api/v1/sessions` (the trigger delivery key is stored on the session) or watch `GET /api/v1/queue` until the job leaves the queue. Jobs accepted without a delivery key have no stable link to their session; send `Idempotency-Key` if you need to correlate.
 
 ## Sessions
 
@@ -155,7 +155,7 @@ Accepted work that has not run yet.
 {"queue":{"pending":2,"leased":1,"dead":0,"oldest":"2026-11-11T13:41:49Z"}}
 ```
 
-`pending` jobs are claimable, `leased` jobs are running, and `dead` jobs exhausted `queue.max_attempts`.
+`pending` jobs are claimable now. `leased` jobs are not claimable yet: a worker holds them, or they are waiting out a retry backoff or a capacity delay. `dead` jobs exhausted `queue.max_attempts`.
 
 ### `GET /api/v1/config`
 

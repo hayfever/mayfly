@@ -52,7 +52,7 @@ Properties:
 - Delivery key: `X-GitHub-Delivery`, Slack `trigger_id`, or an `Idempotency-Key` header. The same key accepted twice stores one job; the second response reports `duplicate: true`.
 - Capacity: a worker claims only when `sessions.max_concurrent` has a free slot. A race returns `ErrCapacity`, which releases the job without counting an attempt.
 - Retry: failures back off from `queue.retry_base`, doubling to ten minutes. A job that reaches `queue.max_attempts` is buried and appears in `queue.dead`.
-- Visibility: a worker that dies mid-job loses its lease after `queue.visibility_timeout`; the job becomes claimable again.
+- Visibility: a worker that dies mid-job loses its lease after `queue.visibility_timeout`; the job becomes claimable again. Delivery is at least once: if a worker creates the session and stops before acknowledging the job, the job runs again after the timeout. A lease that expired cannot reschedule a job another worker now holds.
 - Crash safety: `bbolt` and `redis` survive a control-plane restart. The `memory` backend does not.
 
 ## Lifecycle
@@ -120,7 +120,7 @@ One in-memory stream per session holds ordered events with a monotonic sequence.
 
 The runtime receives only `user_message` and `control` events on its inbox. This prevents the agent from re-processing its own messages.
 
-Retention is bounded per session (`sessions.event_buffer`, default 5000 events). Session records and thread buffers live until the control plane restarts. Durable history is in the artifact bundle, not in the control plane database.
+Retention is bounded per session (`sessions.event_buffer`, default 5000 events). Finalized sessions are dropped from memory after `sessions.retention` (default `30m`); live session records and thread buffers are lost on restart. Durable history is in the artifact bundle, not in the control plane database.
 
 ## Artifact format
 
@@ -154,6 +154,6 @@ The local backend uses a child process, a per-session state directory, and the s
 ## Concurrency
 
 - One control plane process owns each session; there is no leader election. Run one replica.
-- The runtime executes one agent turn at a time. Additional human messages queue.
+- The runtime executes one agent turn at a time. Up to 32 additional human messages are buffered; beyond that, messages are dropped and an `error` event says so.
 - WebSocket clients share the session thread; every user message is broadcast to other clients and delivered to the runtime once.
 - Subscribers have bounded buffers. Slow attach clients can miss live events; reconnect replays the retained backlog.

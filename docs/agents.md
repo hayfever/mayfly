@@ -210,7 +210,7 @@ Do not run arbitrary plugin code in `mayflyd`.
 
 Mayfly does not install harness packages or build images during a session. Kubernetes pulls the referenced image automatically. If the image is absent, not allowlisted, or the command inside it is missing, the session fails with the container reason. Build and publish the harness image once, then reference it by digest. Installing packages at session start would require mutable egress, a writable root filesystem, and trust in the package source; the session contract deliberately avoids that.
 
-Private registry credentials and image pull secrets are not managed by Mayfly yet. Configure node-level registry access or add an `imagePullSecrets` field before relying on private harness images.
+Set `runtime.image_pull_secrets` to the names of registry Secrets in the sessions namespace; Mayfly attaches them to every session pod. Per-agent pull secrets are not supported.
 
 ## Bundled example
 

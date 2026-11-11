@@ -71,7 +71,7 @@ Remote skill archives are fetched by the control plane at startup, verified by S
 
 ## Webhook intake
 
-A verified webhook becomes one queued job and is answered immediately. Replay protection uses the sender's delivery identifier (`X-GitHub-Delivery`, Slack `trigger_id`, or an `Idempotency-Key` header); a repeated delivery returns `202` with `duplicate: true` and creates nothing. Queued jobs are retried with backoff and buried after `queue.max_attempts`; `GET /api/v1/queue` shows the backlog and dead count. The queue stores the prompt and session options, so protect the queue backend like the rest of the session data: no public network access, authentication enabled, and no eviction policy that can drop keys.
+A verified webhook becomes one queued job and is answered immediately. Replay protection uses the sender's delivery identifier (`X-GitHub-Delivery`, Slack `trigger_id`, or an `Idempotency-Key` header); a repeated delivery within `queue.dedupe_ttl` returns `202` with `duplicate: true` and stores no second job. Queued jobs are retried with backoff and buried after `queue.max_attempts`; `GET /api/v1/queue` shows the backlog and dead count. The queue stores the prompt and session options, so protect the queue backend like the rest of the session data: no public network access, authentication enabled, and no eviction policy that can drop keys.
 
 ## What is intentionally permissive
 

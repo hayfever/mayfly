@@ -119,7 +119,7 @@ queue:
 | Key | Default | Meaning |
 |---|---|---|
 | `backend` | `memory` in config, `bbolt` in the Helm chart | `memory`, `bbolt`, or `redis` |
-| `max_jobs` | `1000` | Maximum undelivered jobs; further webhooks get `429` |
+| `max_jobs` | `1000` | Maximum live (not buried) jobs; further webhooks get `429` |
 | `max_attempts` | `5` | Failed attempts before a job is buried |
 | `retry_base` | `5s` | First retry delay; doubles per attempt up to ten minutes |
 | `visibility_timeout` | `5m` | How long a claimed job stays invisible before it is retried. Minimum `2m` |
