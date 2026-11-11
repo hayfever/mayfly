@@ -36,6 +36,8 @@ First public release.
 - Remote skill archives are fetched at control-plane startup. There is no cache; private GitHub archive redirects may drop authorization headers.
 - Harness images and the session runtime protocol are documented but should be treated as experimental in 0.x.
 - Image pull secrets must be configured explicitly (`runtime.image_pull_secrets`); no registry credentials are discovered automatically.
+- No Prometheus metrics or tracing endpoint; structured logs only.
+- No OpenAPI schema. The HTTP API is documented manually and may change in 0.x.
 - No artifact encryption, image signing, or admission policy is provided by the platform itself.
 
 ### Security

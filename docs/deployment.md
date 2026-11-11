@@ -153,6 +153,7 @@ The control plane needs RBAC for pods, pod logs, secrets, configmaps, and networ
 - Add ResourceQuota and LimitRange to cap concurrent sessions.
 - Each session creates one Secret, ConfigMap, NetworkPolicy, and Pod. Cleanup happens on finalize. If the control plane dies mid-close, the pod remains until its `activeDeadlineSeconds` backstop.
 - Local artifacts on an EmptyDir volume are lost when the control-plane pod restarts. Use S3 for durability.
+- There is no Prometheus metrics endpoint yet; use structured logs and Kubernetes probes.
 - Artifact bundles can contain sensitive data. Apply bucket encryption, retention, and access policy.
 - The web UI stores the token in localStorage. Treat the browser profile accordingly.
 - `kubectl delete namespace mayfly` removes all sessions and control-plane state. Artifacts in S3 remain.
