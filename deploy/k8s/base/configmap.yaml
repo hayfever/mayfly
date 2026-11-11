@@ -17,7 +17,9 @@ data:
       max_ttl: 2h
       idle_timeout: 15m
       close_grace: 90s
-      allow_shell: true
+      max_concurrent: 50
+      retention: 30m
+      allow_shell: false
       shell_timeout: 120s
     runtime:
       backend: kubernetes

@@ -27,7 +27,10 @@ Complete example: [examples/config.local.yaml](../examples/config.local.yaml). K
 | `event_buffer` | `5000` | Retained thread events per session in memory |
 | `max_steps` | `24` | Maximum model/tool iterations per user message |
 | `max_history_messages` | `120` | Messages sent to the model; oldest are trimmed at a user boundary |
-| `allow_shell` | `true` | Enables the `run_command` tool inside the container |
+| `max_concurrent` | `50` | Maximum sessions that have not finalized. Webhook work waits in the queue; direct API calls get `429` and `Retry-After`. `0` removes the cap |
+| `retention` | `30m` | How long a finalized session stays in memory for status and events. Artifact metadata is kept separately. `0` keeps sessions forever |
+| `connect_timeout` | `2m` | A pending session whose runtime has not reached the control plane in this time is failed. Measured from container start on Kubernetes and from process start locally. `0` disables |
+| `allow_shell` | `false` | Enables the `run_command` tool inside the container |
 | `shell_timeout` | `120s` | Maximum command duration |
 | `workspace_dir` | `/workspace` | Container workspace path; overridden for the local backend |
 | `artifacts_dir` | `/var/lib/mayfly/artifacts` | Container bundle staging path; overridden for the local backend |
@@ -52,7 +55,7 @@ Complete example: [examples/config.local.yaml](../examples/config.local.yaml). K
 | `artifact_volume_limit` | `1Gi` | EmptyDir artifact staging size |
 | `resources.requests` | `{}` | Container requests, for example `cpu: 100m` |
 | `resources.limits` | `{}` | Container limits |
-| `env` | `{}` | Literal environment variables added to the session pod. Do not put secrets here; pod specs are readable in the namespace |
+| `env` | `{}` | Literal environment variables added to the session pod. Do not put secrets here; pod specs are readable in the namespace. `MAYFLY_CONFIG` and `MAYFLY_SESSION_TOKEN` are owned by the control plane and are rejected at startup |
 | `poll_interval` | `2s` | Pod state polling interval |
 | `pod_labels` | `{}` | Extra labels for session objects |
 
@@ -64,7 +67,7 @@ Complete example: [examples/config.local.yaml](../examples/config.local.yaml). K
 | `api_key_env` | — | Control-plane environment variable with the upstream key |
 | `model` | — | Default model |
 | `allow_models` | `[]` | Additional models that requests may select. An empty list allows only the default |
-| `timeout` | `180s` | Per-request model timeout |
+| `timeout` | `180s` | Time allowed for the upstream connection and response headers. A stalled provider is dropped at this point; streamed bodies continue until the session disconnects |
 | `headers` | `{}` | Extra upstream headers |
 | `max_body_bytes` | `16777216` | Maximum broker request size |
 

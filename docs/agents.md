@@ -64,7 +64,7 @@ agents:
 | `systemPromptFile` | Prompt template file relative to the manifest; mutually exclusive with `systemPrompt` |
 | `skills` | Skill names from the global registry (local directories or verified remote sources) |
 | `mcpServers` | MCP server names from the global MCP registry |
-| `allowShell` | Enables the `run_command` tool for this agent |
+| `allowShell` | Enables the `run_command` tool for this agent; overrides `sessions.allow_shell` |
 | `maxSteps` | Model/tool iterations per user message |
 | `maxHistoryMessages` | Messages sent to the model |
 | `runtime` | Optional harness image, command, environment, and harness-specific config |

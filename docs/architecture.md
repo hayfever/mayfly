@@ -59,7 +59,7 @@ sequenceDiagram
 
 | Status | Meaning |
 |---|---|
-| `pending` | Pod created; runtime not yet running |
+| `pending` | Pod created; runtime not yet connected |
 | `running` | Runtime connected and accepting messages |
 | `closing` | Close requested; waiting for finalize |
 | `completed` | Artifact exported and runtime reported success |
@@ -75,6 +75,8 @@ running -> failed | expired
 ```
 
 `Complete` is idempotent. The manager maps a successful runtime finalize to `expired` when the close reason was TTL or expiry.
+
+A `pending` session moves to `running` only when its runtime authenticates to the control plane. If the runtime never connects within `sessions.connect_timeout`, the manager stops the container, exports a partial artifact, and marks the session `failed`, which releases its capacity slot.
 
 ## Thread model
 

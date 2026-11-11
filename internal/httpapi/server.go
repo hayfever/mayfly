@@ -128,9 +128,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
-	})
+	mux.HandleFunc("GET /readyz", s.ready)
 
 	mux.HandleFunc("GET /{$}", s.serveIndex)
 	mux.HandleFunc("GET /app.js", s.serveStatic("app.js", "text/javascript; charset=utf-8"))
@@ -158,6 +156,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/internal/v1/mcp/{server}", s.internalMCP)
 
 	return s.commonHeaders(s.recoverPanics(s.logRequests(mux)))
+}
+
+// ready reports whether this replica has finished starting. It checks local
+// state only: the artifact store and other remote dependencies stay out of the
+// probe, because removing the only replica from the Service would drop every
+// live session that reaches the control plane through it.
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	if err := s.mgr.Ready(); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready", "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func (s *Server) commonHeaders(next http.Handler) http.Handler {

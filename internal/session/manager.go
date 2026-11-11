@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hayfever/mayfly/internal/agents"
@@ -40,6 +41,9 @@ var ErrClosed = errors.New("session is closed")
 
 // ErrUnauthorized is returned for a missing or wrong session token.
 var ErrUnauthorized = errors.New("unauthorized")
+
+// ErrCapacity is returned when sessions.max_concurrent is reached.
+var ErrCapacity = errors.New("session capacity reached")
 
 const maxPromptBytes = 64 << 10
 const maxMessageBytes = 32 << 10
@@ -67,6 +71,8 @@ type instance struct {
 	closeRequestedAt time.Time
 	finalized        bool
 	resourcesDeleted bool
+	launchedAt       time.Time
+	podRunningSince  time.Time
 	podTerminalSince time.Time
 	podMissingSince  time.Time
 }
@@ -93,10 +99,14 @@ type Manager struct {
 	mu         sync.Mutex
 	sessions   map[string]*instance
 	tokenIndex map[string]string
+	// artifacts survives session retention so a stored bundle stays
+	// downloadable after the session record is gone.
+	artifacts map[string]model.ArtifactInfo
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	started atomic.Bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 }
 
 // New builds a manager. kube may be nil for the local backend.
@@ -137,6 +147,7 @@ func New(cfg *config.Config, store artifact.Store, h *hub.Hub, r runner.Runner, 
 		mcpByName:   map[string]config.MCPServerConfig{},
 		sessions:    map[string]*instance{},
 		tokenIndex:  map[string]string{},
+		artifacts:   map[string]model.ArtifactInfo{},
 	}
 	for _, s := range loaded {
 		m.skillByName[s.Name] = s
@@ -185,11 +196,13 @@ func (m *Manager) Start(ctx context.Context) error {
 		defer m.wg.Done()
 		m.maintenance()
 	}()
+	m.started.Store(true)
 	return nil
 }
 
 // Shutdown stops maintenance and local agent processes.
 func (m *Manager) Shutdown(ctx context.Context) {
+	m.started.Store(false)
 	if m.cancel != nil {
 		m.cancel()
 	}
@@ -343,6 +356,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		},
 		tokenHash:  hash,
 		runtimeCfg: runtimeCfg,
+		launchedAt: now,
 	}
 
 	if m.cfg.Runtime.Backend == "local" && agent.Runtime.Image != "" {
@@ -354,8 +368,10 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 	}
 
 	m.mu.Lock()
-	m.sessions[id] = inst
-	m.tokenIndex[hash] = id
+	if err := m.reserveLocked(inst); err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
 	m.mu.Unlock()
 	m.hub.Create(id)
 	m.appendEvent(inst, model.Event{
@@ -400,14 +416,11 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		return &snapshot, err
 	}
 
-	started := time.Now().UTC()
 	inst.mu.Lock()
 	inst.handle = h
-	inst.sess.Status = model.StatusRunning
-	inst.sess.StartedAt = &started
-	inst.sess.LastActivity = started
+	inst.sess.LastActivity = time.Now().UTC()
 	inst.mu.Unlock()
-	m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session running.", Data: map[string]any{"status": string(model.StatusRunning)}})
+	m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session container started.", Data: map[string]any{"status": string(model.StatusPending)}})
 
 	if h.Done != nil {
 		m.wg.Add(1)
@@ -452,17 +465,18 @@ func (m *Manager) prepare(_ context.Context, inst *instance, podName, token stri
 	}
 	port := platformPort(m.cfg.Server.Addr)
 	spec := &k8s.SessionSpec{
-		Namespace:       m.cfg.Sessions.Namespace,
-		SessionID:       id,
-		PodName:         podName,
-		SecretName:      podName,
-		ConfigMapName:   podName,
-		Image:           image,
-		ImagePullPolicy: m.cfg.Runtime.ImagePullPolicy,
-		ServiceAccount:  m.cfg.Runtime.ServiceAccount,
-		TTL:             ttl,
-		WorkspaceLimit:  m.cfg.Runtime.WorkspaceLimit,
-		ArtifactLimit:   m.cfg.Runtime.ArtifactLimit,
+		Namespace:        m.cfg.Sessions.Namespace,
+		SessionID:        id,
+		PodName:          podName,
+		SecretName:       podName,
+		ConfigMapName:    podName,
+		Image:            image,
+		ImagePullPolicy:  m.cfg.Runtime.ImagePullPolicy,
+		ImagePullSecrets: m.cfg.Runtime.ImagePullSecrets,
+		ServiceAccount:   m.cfg.Runtime.ServiceAccount,
+		TTL:              ttl,
+		WorkspaceLimit:   m.cfg.Runtime.WorkspaceLimit,
+		ArtifactLimit:    m.cfg.Runtime.ArtifactLimit,
 		Resources: k8s.ResourceConfig{
 			Requests: m.cfg.Runtime.Resources.Requests,
 			Limits:   m.cfg.Runtime.Resources.Limits,
@@ -490,6 +504,100 @@ func (m *Manager) prepare(_ context.Context, inst *instance, podName, token stri
 
 func (m *Manager) modelAllowed(name string) bool {
 	return m.cfg.LLM.ModelAllowed(name)
+}
+
+// reserveLocked registers a new session and enforces sessions.max_concurrent.
+// The caller must hold m.mu.
+func (m *Manager) reserveLocked(inst *instance) error {
+	id := inst.sess.ID
+	if _, exists := m.sessions[id]; exists {
+		return fmt.Errorf("session id %q is already in use", id)
+	}
+	if max := m.cfg.Sessions.MaxConcurrent; max > 0 {
+		active := 0
+		for _, other := range m.sessions {
+			if !other.done() {
+				active++
+			}
+		}
+		if active >= max {
+			return fmt.Errorf("%w: %d sessions are already active", ErrCapacity, active)
+		}
+	}
+	m.sessions[id] = inst
+	m.tokenIndex[inst.tokenHash] = id
+	return nil
+}
+
+// RuntimeConnected records that the session runtime reached the control plane.
+// A session becomes running here, not when its container starts.
+func (m *Manager) RuntimeConnected(id string) {
+	inst, ok := m.instance(id)
+	if !ok {
+		return
+	}
+	inst.mu.Lock()
+	if inst.sess.Status != model.StatusPending {
+		inst.mu.Unlock()
+		return
+	}
+	now := time.Now().UTC()
+	inst.sess.Status = model.StatusRunning
+	inst.sess.StartedAt = &now
+	inst.sess.LastActivity = now
+	inst.mu.Unlock()
+	m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session running.", Data: map[string]any{"status": string(model.StatusRunning)}})
+	m.logger.Info("session runtime connected", "session", id)
+}
+
+// forget drops a finished session from memory. Its artifact stays in the
+// configured store.
+func (m *Manager) forget(id string) {
+	m.mu.Lock()
+	inst := m.sessions[id]
+	delete(m.sessions, id)
+	m.mu.Unlock()
+	if inst == nil {
+		return
+	}
+	inst.mu.Lock()
+	hash := inst.tokenHash
+	inst.mu.Unlock()
+	m.removeToken(hash)
+	m.hub.Remove(id)
+	// The artifact index outlives the session so downloads keep working.
+	m.logger.Info("session removed from memory", "session", id)
+}
+
+// FreeSlots reports how many sessions may start before sessions.max_concurrent.
+// A worker uses it to hold queued work instead of racing the cap.
+func (m *Manager) FreeSlots() int {
+	max := m.cfg.Sessions.MaxConcurrent
+	if max <= 0 {
+		return 1 << 20
+	}
+	m.mu.Lock()
+	active := 0
+	for _, inst := range m.sessions {
+		if !inst.done() {
+			active++
+		}
+	}
+	m.mu.Unlock()
+	if active >= max {
+		return 0
+	}
+	return max - active
+}
+
+// Ready reports whether the control plane can serve traffic. It checks the
+// lifecycle engine only: the artifact store is remote and a slow or failed
+// store must not take the replica out of the Service that live sessions use.
+func (m *Manager) Ready() error {
+	if !m.started.Load() {
+		return errors.New("lifecycle engine is not running")
+	}
+	return nil
 }
 
 func (m *Manager) resolveSkills(requested []string) ([]sessioncfg.Skill, []string, error) {
@@ -572,6 +680,9 @@ func (m *Manager) Get(id string) (*model.Session, bool) {
 		return nil, false
 	}
 	snapshot := m.copySession(inst)
+	if info, ok := m.artifactFor(id); ok {
+		snapshot.Artifact = &info
+	}
 	return &snapshot, true
 }
 
@@ -585,10 +696,21 @@ func (m *Manager) List() []model.Session {
 	m.mu.Unlock()
 	out := make([]model.Session, 0, len(insts))
 	for _, inst := range insts {
-		out = append(out, m.copySession(inst))
+		snapshot := m.copySession(inst)
+		if info, ok := m.artifactFor(inst.sess.ID); ok {
+			snapshot.Artifact = &info
+		}
+		out = append(out, snapshot)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out
+}
+
+// done reports whether the session has finished.
+func (inst *instance) done() bool {
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+	return inst.finalized
 }
 
 func (m *Manager) snapshot() []*instance {
@@ -601,17 +723,31 @@ func (m *Manager) snapshot() []*instance {
 	return out
 }
 
+// copySession returns a snapshot without the artifact; callers attach it with
+// artifactFor so the two locks are never held together.
 func (m *Manager) copySession(inst *instance) model.Session {
 	inst.mu.Lock()
 	defer inst.mu.Unlock()
 	out := inst.sess
 	out.Skills = append([]string(nil), inst.sess.Skills...)
 	out.MCPServers = append([]string(nil), inst.sess.MCPServers...)
-	if inst.sess.Artifact != nil {
-		a := *inst.sess.Artifact
-		out.Artifact = &a
-	}
 	return out
+}
+
+// setArtifact records the latest bundle for a session.
+func (m *Manager) setArtifact(id string, info model.ArtifactInfo) {
+	m.mu.Lock()
+	m.artifacts[id] = info
+	m.mu.Unlock()
+}
+
+// artifactFor returns the latest bundle for a session, including sessions that
+// retention already removed from memory.
+func (m *Manager) artifactFor(id string) (model.ArtifactInfo, bool) {
+	m.mu.Lock()
+	info, ok := m.artifacts[id]
+	m.mu.Unlock()
+	return info, ok
 }
 
 // Authenticate checks a scoped session token.

@@ -96,6 +96,7 @@ func (m *Manager) EmitRuntimeEvents(id, token string, events []model.Event) ([]m
 	if !ok {
 		return nil, ErrNotFound
 	}
+	m.RuntimeConnected(id)
 	out := make([]model.Event, 0, len(events))
 	for _, ev := range events {
 		switch ev.Type {
@@ -131,19 +132,14 @@ func (m *Manager) instance(id string) (*instance, bool) {
 	return inst, inst != nil
 }
 
-// ArtifactInfo returns exported artifact metadata.
+// ArtifactInfo returns exported artifact metadata. The bundle stays available
+// after the session is removed from memory.
 func (m *Manager) ArtifactInfo(id string) (*model.ArtifactInfo, bool) {
-	inst, ok := m.instance(id)
+	info, ok := m.artifactFor(id)
 	if !ok {
 		return nil, false
 	}
-	inst.mu.Lock()
-	defer inst.mu.Unlock()
-	if inst.sess.Artifact == nil {
-		return nil, false
-	}
-	out := *inst.sess.Artifact
-	return &out, true
+	return &info, true
 }
 
 // OpenArtifact opens a stored bundle for download.
@@ -207,10 +203,7 @@ func (m *Manager) UploadArtifact(ctx context.Context, id, token string, body io.
 		CreatedAt: time.Now().UTC(),
 		Partial:   partial,
 	}
-	inst, _ := m.instance(id)
-	inst.mu.Lock()
-	inst.sess.Artifact = &info
-	inst.mu.Unlock()
+	m.setArtifact(id, info)
 	m.logger.Info("artifact stored", "session", id, "key", key, "bytes", size)
 	return info, nil
 }
@@ -449,9 +442,9 @@ func (m *Manager) fallback(id, reason string) {
 		Partial:   true,
 	}
 	inst.mu.Lock()
-	inst.sess.Artifact = &art
 	closeReason := inst.closeReason
 	inst.mu.Unlock()
+	m.setArtifact(id, art)
 	m.hub.Append(id, model.Event{
 		Type:  model.EventArtifact,
 		Actor: "mayfly",
@@ -502,18 +495,11 @@ func (m *Manager) adopt(ctx context.Context) error {
 			m.logger.Warn("adopt: read token", "pod", pod.Name, "error", err)
 			continue
 		}
-		status := model.StatusPending
-		var started *time.Time
-		if pod.Status.Phase == "Running" {
-			status = model.StatusRunning
-			t := pod.CreationTimestamp.Time
-			started = &t
-		}
 		inst := &instance{
 			sess: model.Session{
 				ID:           id,
 				Title:        cfg.Title,
-				Status:       status,
+				Status:       model.StatusPending,
 				Prompt:       cfg.Prompt,
 				Model:        cfg.Model,
 				Skills:       skillNames(cfg.Skills),
@@ -523,12 +509,12 @@ func (m *Manager) adopt(ctx context.Context) error {
 				PodName:      pod.Name,
 				TTLSeconds:   cfg.TTLSeconds,
 				CreatedAt:    cfg.CreatedAt,
-				StartedAt:    started,
 				ExpiresAt:    cfg.CreatedAt.Add(time.Duration(cfg.TTLSeconds) * time.Second),
 				LastActivity: now,
 			},
 			tokenHash:  hashToken(token),
 			runtimeCfg: cfg,
+			launchedAt: now,
 			handle: runner.Handle{
 				Backend:       "kubernetes",
 				SessionID:     id,
@@ -592,30 +578,48 @@ func (m *Manager) maintenance() {
 
 func (m *Manager) reap() {
 	now := time.Now().UTC()
+	retention := m.cfg.Sessions.Retention.Std()
 	for _, inst := range m.snapshot() {
 		inst.mu.Lock()
+		id := inst.sess.ID
 		status := inst.sess.Status
 		expires := inst.sess.ExpiresAt
 		last := inst.sess.LastActivity
 		closeAt := inst.closeRequestedAt
 		finalized := inst.finalized
+		closedAt := inst.sess.ClosedAt
+		connectFrom := inst.podRunningSince
+		if inst.sess.Backend != "kubernetes" {
+			connectFrom = inst.launchedAt
+		}
 		inst.mu.Unlock()
 		if finalized {
+			if retention > 0 && closedAt != nil && now.Sub(*closedAt) > retention {
+				m.forget(id)
+			}
 			continue
 		}
 		switch status {
-		case model.StatusPending, model.StatusRunning:
+		case model.StatusPending:
 			if now.After(expires) {
-				_ = m.Close(inst.sess.ID, "expired")
+				_ = m.Close(id, "expired")
+				continue
+			}
+			if connect := m.cfg.Sessions.ConnectTimeout.Std(); connect > 0 && !connectFrom.IsZero() && now.Sub(connectFrom) > connect {
+				m.fallback(id, "runtime did not connect")
+			}
+		case model.StatusRunning:
+			if now.After(expires) {
+				_ = m.Close(id, "expired")
 				continue
 			}
 			idle := m.cfg.Sessions.IdleTimeout.Std()
-			if idle > 0 && status == model.StatusRunning && now.Sub(last) > idle+2*time.Minute {
-				_ = m.Close(inst.sess.ID, "idle")
+			if idle > 0 && now.Sub(last) > idle+2*time.Minute {
+				_ = m.Close(id, "idle")
 			}
 		case model.StatusClosing:
 			if !closeAt.IsZero() && now.Sub(closeAt) > m.cfg.Sessions.CloseGrace.Std() {
-				m.fallback(inst.sess.ID, "close grace period exceeded")
+				m.fallback(id, "close grace period exceeded")
 			}
 		}
 	}
@@ -652,6 +656,9 @@ func (m *Manager) pollPods(ctx context.Context) {
 		} else {
 			inst.podTerminalSince = time.Time{}
 		}
+		if pod.Status.Phase == "Running" && inst.podRunningSince.IsZero() {
+			inst.podRunningSince = now
+		}
 		failureDetail := ""
 		if pod.Status.Phase == "Pending" || pod.Status.Phase == "Failed" {
 			if reason, message := podFailureDetail(pod); reason != "" {
@@ -677,23 +684,9 @@ func (m *Manager) pollPods(ctx context.Context) {
 				}
 			}
 		}
-		becameRunning := false
-		if pod.Status.Phase == "Running" {
-			if inst.sess.StartedAt == nil {
-				t := now
-				inst.sess.StartedAt = &t
-			}
-			if inst.sess.Status == model.StatusPending {
-				inst.sess.Status = model.StatusRunning
-				becameRunning = true
-			}
-		}
 		terminalSince := inst.podTerminalSince
 		finalized := inst.finalized
 		inst.mu.Unlock()
-		if becameRunning {
-			m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session running.", Data: map[string]any{"status": string(model.StatusRunning)}})
-		}
 		if !finalized && waitingFailure {
 			m.fallback(id, "session container cannot start: "+failureDetail)
 			continue

@@ -172,6 +172,31 @@ func validBase() *Config {
 	return cfg
 }
 
+func TestSessionDefaultsDisableShellAndBoundSessions(t *testing.T) {
+	cfg := Default()
+	if Bool(cfg.Sessions.AllowShell, true) {
+		t.Fatal("allow_shell must be off by default")
+	}
+	if cfg.Sessions.MaxConcurrent <= 0 {
+		t.Fatal("max_concurrent must default to a positive cap")
+	}
+	if cfg.Sessions.Retention.Std() <= 0 {
+		t.Fatal("retention must default to a positive duration")
+	}
+}
+
+func TestValidateRejectsReservedRuntimeEnv(t *testing.T) {
+	cfg := validBase()
+	cfg.Runtime.Env = map[string]string{"MAYFLY_SESSION_TOKEN": "spoofed"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected reserved env validation error")
+	}
+	cfg.Runtime.Env = map[string]string{"HF_HOME": "/opt/cache"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("literal env must be allowed: %v", err)
+	}
+}
+
 func TestValidateS3CredentialSources(t *testing.T) {
 	s3Base := func() *Config {
 		cfg := validBase()

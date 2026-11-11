@@ -68,7 +68,10 @@ config:
     event_buffer: 5000
     max_steps: 24
     max_history_messages: 120
-    allow_shell: true
+    max_concurrent: 50
+    retention: 30m
+    connect_timeout: 2m
+    allow_shell: false
     shell_timeout: 120s
   runtime:
     backend: kubernetes

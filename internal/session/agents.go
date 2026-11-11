@@ -9,6 +9,7 @@ import (
 	"github.com/hayfever/mayfly/internal/agents"
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
 // AgentInfo is the public description of a selectable agent.
@@ -69,6 +70,11 @@ func (m *Manager) loadAgents() error {
 		}
 		if agent.Runtime.Image != "" && !imageAllowed(agent.Runtime.Image, m.cfg.Agents.AllowedImages) {
 			return fmt.Errorf("%s: agent %q image %q is not in agents.allowed_images", agent.Source, agent.Name, agent.Runtime.Image)
+		}
+		for name := range agent.Runtime.Env {
+			if sessioncfg.IsReservedEnv(name) {
+				return fmt.Errorf("%s: agent %q runtime.env must not set %s; the control plane injects it into every session", agent.Source, agent.Name, name)
+			}
 		}
 		if agent.Default {
 			m.defaultAgent = agent.Name
@@ -156,7 +162,7 @@ func agentAllowShell(agent agents.Agent, cfg *config.Config) bool {
 	if agent.AllowShell != nil {
 		return *agent.AllowShell
 	}
-	return config.Bool(cfg.Sessions.AllowShell, true)
+	return config.Bool(cfg.Sessions.AllowShell, false)
 }
 
 func harnessName(agent agents.Agent) string {

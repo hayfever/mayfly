@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -30,7 +31,7 @@ func TestLLMProxyAndModelPolicy(t *testing.T) {
 	body := `{"model":"stub","messages":[{"role":"user","content":"hello"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/internal/v1/llm/chat/completions", strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	b.ServeLLM(rec, req)
+	b.ServeLLM(rec, req, "stub")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -38,11 +39,37 @@ func TestLLMProxyAndModelPolicy(t *testing.T) {
 		t.Fatalf("unexpected body: %s", rec.Body.String())
 	}
 
-	bad := `{"model":"expensive","messages":[]}`
+	// "extra" is allowlisted but not assigned to this session.
+	other := `{"model":"extra","messages":[]}`
 	rec = httptest.NewRecorder()
-	b.ServeLLM(rec, httptest.NewRequest(http.MethodPost, "/internal/v1/llm/chat/completions", strings.NewReader(bad)))
+	b.ServeLLM(rec, httptest.NewRequest(http.MethodPost, "/internal/v1/llm/chat/completions", strings.NewReader(other)), "stub")
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("bad model status = %d", rec.Code)
+		t.Fatalf("unassigned model status = %d", rec.Code)
+	}
+}
+
+func TestLLMFillsMissingModelFromSession(t *testing.T) {
+	var gotModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotModel = body.Model
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+	cfg := config.LLMConfig{BaseURL: upstream.URL + "/v1", Model: "stub", MaxBodyBytes: 1 << 20}
+	b := New(cfg, testLogger())
+	body := `{"messages":[{"role":"user","content":"hello"}]}`
+	rec := httptest.NewRecorder()
+	b.ServeLLM(rec, httptest.NewRequest(http.MethodPost, "/internal/v1/llm/chat/completions", strings.NewReader(body)), "stub")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotModel != "stub" {
+		t.Fatalf("upstream model = %q, want the session model", gotModel)
 	}
 }
 
@@ -53,7 +80,7 @@ func TestLLMStreamingPassthrough(t *testing.T) {
 	b := New(cfg, testLogger())
 	body := `{"model":"stub","stream":true,"messages":[{"role":"user","content":"stream"}]}`
 	rec := httptest.NewRecorder()
-	b.ServeLLM(rec, httptest.NewRequest(http.MethodPost, "/internal/v1/llm/chat/completions", strings.NewReader(body)))
+	b.ServeLLM(rec, httptest.NewRequest(http.MethodPost, "/internal/v1/llm/chat/completions", strings.NewReader(body)), "stub")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}

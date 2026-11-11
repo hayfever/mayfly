@@ -23,7 +23,7 @@ Error responses:
 
 ### `GET /healthz`, `GET /readyz`
 
-Return `{"status":"ok"}` / `{"status":"ready"}`. No authentication.
+`/healthz` returns `{"status":"ok"}` whenever the process is alive. `/readyz` returns `200 {"status":"ready"}` once the lifecycle engine has started, and `503` before that or during shutdown. It checks local state only: the artifact store and other remote dependencies stay out of the probe, because this replica also serves live session traffic through the same Service. No authentication.
 
 ### `GET /`
 
@@ -76,7 +76,7 @@ If the pod fails to start, the response is `500` with both `error` and the faile
 
 ### `DELETE /api/v1/sessions/{id}`
 
-Force-stops the session, marks it failed, and keeps the record. `204`.
+Force-stops the session, marks it failed, and keeps the record until `sessions.retention` expires. `204`.
 
 ### `GET /api/v1/sessions/{id}/events?after=<seq>`
 
@@ -152,7 +152,7 @@ These endpoints accept the scoped session token, never the admin token.
 | `GET /internal/v1/sessions/{id}/inbox?after=<seq>` | SSE stream of human messages and close controls |
 | `POST /internal/v1/sessions/{id}/artifacts` | Upload a tar.gz bundle. Requires `Content-Length` and `X-Mayfly-SHA256`. Optional `X-Mayfly-Partial: true` |
 | `POST /internal/v1/sessions/{id}/finalize` | `{"status":"completed"\|"failed","reason":"...","error":"..."}` |
-| `POST /internal/v1/llm/chat/completions` | OpenAI-compatible proxy; model checked against the allowlist |
+| `POST /internal/v1/llm/chat/completions` | OpenAI-compatible proxy. The model must be the one assigned to the session; an empty model field is filled with it |
 | `POST\|GET\|DELETE /internal/v1/mcp/{server}` | HTTP MCP proxy; server must be assigned to the session |
 
 Inbox events use SSE `event: message` frames whose data is the event JSON. Comments (`: ping`) are keepalives. If `after` is greater than the control plane's current sequence (for example after a control-plane restart), the inbox sends `event: reset`; the runtime reconnects with `after=0`.

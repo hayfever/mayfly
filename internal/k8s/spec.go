@@ -11,6 +11,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+
+	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
 const (
@@ -169,12 +171,12 @@ func (s *SessionSpec) Pod() *corev1.Pod {
 	deadline := int64(s.TTL.Seconds()) + 300
 
 	env := []corev1.EnvVar{
-		{Name: "MAYFLY_CONFIG", Value: ConfigFile},
+		{Name: sessioncfg.EnvConfig, Value: ConfigFile},
 		{Name: "HOME", Value: "/tmp"},
 		{Name: "XDG_CACHE_HOME", Value: "/tmp/cache"},
 		{Name: "NPM_CONFIG_CACHE", Value: "/tmp/npm"},
 		{
-			Name: "MAYFLY_SESSION_TOKEN",
+			Name: sessioncfg.EnvToken,
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: s.SecretName},
@@ -184,6 +186,10 @@ func (s *SessionSpec) Pod() *corev1.Pod {
 		},
 	}
 	for k, v := range s.Env {
+		if sessioncfg.IsReservedEnv(k) {
+			// A repeated name would let the later value win.
+			continue
+		}
 		env = append(env, corev1.EnvVar{Name: k, Value: v})
 	}
 

@@ -51,9 +51,8 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := s.mgr.Create(r.Context(), opts)
 	if err != nil {
-		status := http.StatusBadRequest
 		if created == nil {
-			writeError(w, status, err.Error())
+			writeSessionError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "session": created})
@@ -197,6 +196,9 @@ func writeSessionError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, session.ErrClosed):
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, session.ErrCapacity):
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, err.Error())
 	default:
 		writeError(w, http.StatusBadRequest, err.Error())
 	}

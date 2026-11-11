@@ -12,6 +12,19 @@ import (
 
 const Version = 1
 
+// Environment variables that every session runtime receives from the control
+// plane. Configuration must not set them, so a session cannot be pointed at a
+// different config file or handed a token the control plane did not issue.
+const (
+	EnvConfig = "MAYFLY_CONFIG"
+	EnvToken  = "MAYFLY_SESSION_TOKEN"
+)
+
+// IsReservedEnv reports whether name is owned by the control plane.
+func IsReservedEnv(name string) bool {
+	return name == EnvConfig || name == EnvToken
+}
+
 // Skill is a named instruction block injected into the agent system prompt.
 type Skill struct {
 	Name        string `json:"name"`

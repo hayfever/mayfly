@@ -7,12 +7,16 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/hayfever/mayfly/internal/config"
 )
+
+const defaultUpstreamTimeout = 180 * time.Second
 
 // Broker serves the internal credential-proxy endpoints.
 type Broker struct {
@@ -21,14 +25,35 @@ type Broker struct {
 	client *http.Client
 }
 
-// New builds a broker.
+// New builds a broker. The client bounds connection setup and the wait for
+// upstream response headers, so a stuck provider cannot pin control-plane
+// goroutines. Streamed bodies stay open until the caller disconnects.
 func New(cfg config.LLMConfig, logger *slog.Logger) *Broker {
-	return &Broker{cfg: cfg, logger: logger, client: &http.Client{}}
+	timeout := cfg.Timeout.Std()
+	if timeout <= 0 {
+		timeout = defaultUpstreamTimeout
+	}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   16,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		ResponseHeaderTimeout: timeout,
+	}
+	return &Broker{cfg: cfg, logger: logger, client: &http.Client{Transport: transport}}
 }
 
 // ServeLLM handles POST /internal/v1/llm/chat/completions. The session token is
-// validated by the caller.
-func (b *Broker) ServeLLM(w http.ResponseWriter, r *http.Request) {
+// validated by the caller, which also passes the model assigned to the session.
+// A session cannot select a different model, even an allowlisted one.
+func (b *Broker) ServeLLM(w http.ResponseWriter, r *http.Request, sessionModel string) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -50,10 +75,20 @@ func (b *Broker) ServeLLM(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if probe.Model == "" {
-		probe.Model = b.cfg.Model
+	switch probe.Model {
+	case "":
+		// Fill in the session model so the upstream cannot pick another one.
+		body, err = setModel(body, sessionModel)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+	case sessionModel:
+	default:
+		writeError(w, http.StatusForbidden, "model is not assigned to this session")
+		return
 	}
-	if !b.cfg.ModelAllowed(probe.Model) {
+	if !b.cfg.ModelAllowed(sessionModel) {
 		writeError(w, http.StatusForbidden, "model is not allowed")
 		return
 	}
@@ -131,6 +166,20 @@ func (b *Broker) ServeMCP(w http.ResponseWriter, r *http.Request, def config.MCP
 	copyHeaders(w.Header(), resp.Header, "Content-Type", "Cache-Control", "Mcp-Session-Id", "MCP-Protocol-Version")
 	w.WriteHeader(resp.StatusCode)
 	streamCopy(w, resp.Body)
+}
+
+// setModel returns the request body with the model field set to name.
+func setModel(body []byte, name string) ([]byte, error) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(name)
+	if err != nil {
+		return nil, err
+	}
+	doc["model"] = encoded
+	return json.Marshal(doc)
 }
 
 func copyHeaders(dst, src http.Header, names ...string) {

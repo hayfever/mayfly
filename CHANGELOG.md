@@ -24,20 +24,30 @@ First public release.
 - Versioned CLI, control-plane, and agent builds with commit and date metadata.
 - Kind e2e test covering webhook creation, pod isolation, MCP tools, WebSocket replay, close, artifacts, and TTL expiry.
 - CI and release workflows: tests, Helm lint, kind e2e, multi-arch GHCR images, SBOMs, provenance, CLI archives, and OCI chart publishing.
+- `sessions.retention` expires finished sessions from memory and releases their thread state.
+- `/readyz` reports lifecycle state instead of always returning ready.
 - S3 artifact export can use the default AWS credential chain, including IAM roles for service accounts.
+- `sessions.connect_timeout` fails a session whose runtime never reaches the control plane, so a stuck container does not hold a capacity slot until TTL.
+- Artifact metadata outlives session retention, so downloads keep working after a session leaves the list.
 
 ### Changed
 
+- `sessions.allow_shell` defaults to `false`. Enable the shell tool per deployment or per agent manifest.
+- A session becomes `running` when its runtime connects, not when the container starts.
+- The LLM broker accepts only the model assigned to the session and fills an empty model field with it.
+- The LLM and MCP proxy clients bound connection setup and response-header wait with `llm.timeout`.
+- `/readyz` no longer calls the artifact store, and the probes set `timeoutSeconds: 3`.
 - The module path and published images use `github.com/hayfever/mayfly` and `ghcr.io/hayfever`.
 - The S3 store sends checksums only when required, for compatibility with R2, B2, and older MinIO.
 
 ### Fixed
 
+- `runtime.env` and agent `runtime.env` cannot set `MAYFLY_CONFIG` or `MAYFLY_SESSION_TOKEN`; startup fails and the pod builder drops them.
 - GitHub triggers no longer accept the static `X-Mayfly-Token` header, which could be replayed.
 
 ### Known limitations
 
-- The control plane runs one replica. Session records and thread history are in memory; artifacts are durable.
+- The control plane runs one replica. Session records and thread history are in memory; artifacts are durable. Finished sessions are dropped after `sessions.retention`.
 - Single tenant. No SSO, per-user authorization, or audit log.
 - The admin token is a shared bearer token. The web UI stores it in browser localStorage.
 - No TLS or ingress authentication is provided; put Mayfly behind an authenticated ingress.

@@ -40,6 +40,7 @@ func (s *Server) internalInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+	s.mgr.RuntimeConnected(id)
 	if last, ok := s.mgr.LastSeq(id); !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -149,11 +150,17 @@ func (s *Server) internalFinalize(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) internalLLM(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.mgr.SessionIDForToken(bearerToken(r)); !ok {
+	id, ok := s.mgr.SessionIDForToken(bearerToken(r))
+	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	s.broker.ServeLLM(w, r)
+	sess, ok := s.mgr.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	s.broker.ServeLLM(w, r, sess.Model)
 }
 
 func (s *Server) internalMCP(w http.ResponseWriter, r *http.Request) {

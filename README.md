@@ -190,7 +190,8 @@ Default session pod:
 - `automountServiceAccountToken: false`, service links disabled.
 - EmptyDir workspace, artifact, and tmp volumes with size limits.
 - NetworkPolicy: no ingress; egress only to the control plane, cluster DNS, and explicit CIDRs.
-- One random session token. It can only write that session's events, upload its artifact, read its inbox, and use models or MCP servers assigned to the session.
+- One random session token. It can only write that session's events, upload its artifact, read its inbox, and use the model and MCP servers assigned to the session.
+- `run_command` is off unless `sessions.allow_shell` or an agent manifest enables it.
 - No LLM key, object-store credential, or MCP credential in the container.
 
 Read [docs/security.md](docs/security.md) before exposing the platform beyond localhost. The short version: this is a single-tenant core, not a multi-tenant SaaS. Use SSO/auth proxy, TLS, per-cluster RBAC, and a CNI that enforces NetworkPolicy.

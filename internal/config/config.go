@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
 // Duration accepts Go duration strings in YAML ("30m", "1h").
@@ -70,6 +72,9 @@ type SessionsConfig struct {
 	EventBuffer        int      `yaml:"event_buffer"`
 	MaxSteps           int      `yaml:"max_steps"`
 	MaxHistoryMessages int      `yaml:"max_history_messages"`
+	MaxConcurrent      int      `yaml:"max_concurrent"`
+	Retention          Duration `yaml:"retention"`
+	ConnectTimeout     Duration `yaml:"connect_timeout"`
 	AllowShell         *bool    `yaml:"allow_shell"`
 	ShellTimeout       Duration `yaml:"shell_timeout"`
 	WorkspaceDir       string   `yaml:"workspace_dir"`
@@ -238,7 +243,10 @@ func Default() *Config {
 			EventBuffer:        5000,
 			MaxSteps:           24,
 			MaxHistoryMessages: 120,
-			AllowShell:         new(true),
+			MaxConcurrent:      50,
+			Retention:          Duration(30 * time.Minute),
+			ConnectTimeout:     Duration(2 * time.Minute),
+			AllowShell:         new(false),
 			ShellTimeout:       Duration(120 * time.Second),
 			WorkspaceDir:       "/workspace",
 			ArtifactsDir:       "/var/lib/mayfly/artifacts",
@@ -422,6 +430,20 @@ func (c *Config) Validate() error {
 	}
 	if c.Sessions.CloseGrace.Std() <= 0 {
 		return fmt.Errorf("sessions.close_grace must be positive")
+	}
+	if c.Sessions.MaxConcurrent < 0 {
+		return fmt.Errorf("sessions.max_concurrent must not be negative")
+	}
+	if c.Sessions.Retention.Std() < 0 {
+		return fmt.Errorf("sessions.retention must not be negative")
+	}
+	if c.Sessions.ConnectTimeout.Std() < 0 {
+		return fmt.Errorf("sessions.connect_timeout must not be negative")
+	}
+	for name := range c.Runtime.Env {
+		if sessioncfg.IsReservedEnv(name) {
+			return fmt.Errorf("runtime.env must not set %s; the control plane injects it into every session", name)
+		}
 	}
 	switch c.Runtime.Backend {
 	case "kubernetes":

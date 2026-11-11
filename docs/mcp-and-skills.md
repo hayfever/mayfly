@@ -111,7 +111,7 @@ curl -sS http://localhost:8080/api/v1/sessions \
 | `read_file` | Reads up to 512 KiB from the workspace; paths are confined with `os.Root` |
 | `write_file` | Writes up to 4 MiB; creates parent directories |
 | `list_files` | Lists up to 500 entries in one directory |
-| `run_command` | Runs `/bin/sh -c` with the workspace as cwd and a timeout; output is capped; can be disabled |
+| `run_command` | Runs `/bin/sh -c` with the workspace as cwd and a timeout; output is capped; off unless `sessions.allow_shell` or an agent `allowShell` enables it |
 
 `run_command` is not a sandbox. The container is the boundary.
 

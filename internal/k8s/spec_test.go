@@ -152,3 +152,29 @@ func TestSecretAndConfigMap(t *testing.T) {
 		t.Fatal("session config missing from configmap")
 	}
 }
+
+func TestPodIgnoresReservedEnv(t *testing.T) {
+	spec := testSpec()
+	spec.Env = map[string]string{
+		"MAYFLY_SESSION_TOKEN": "attacker-token",
+		"MAYFLY_CONFIG":        "/tmp/other.json",
+		"AGENT_MODE":           "rpc",
+	}
+	pod := spec.Pod()
+	env := map[string]corev1.EnvVar{}
+	for _, item := range pod.Spec.Containers[0].Env {
+		if _, exists := env[item.Name]; exists {
+			t.Fatalf("duplicate env %s", item.Name)
+		}
+		env[item.Name] = item
+	}
+	if token, ok := env["MAYFLY_SESSION_TOKEN"]; !ok || token.Value != "" || token.ValueFrom == nil {
+		t.Fatalf("session token must come from the secret: %+v", token)
+	}
+	if cfg, ok := env["MAYFLY_CONFIG"]; !ok || cfg.Value != ConfigFile {
+		t.Fatalf("config path was overridden: %+v", cfg)
+	}
+	if env["AGENT_MODE"].Value != "rpc" {
+		t.Fatal("literal env was dropped")
+	}
+}
