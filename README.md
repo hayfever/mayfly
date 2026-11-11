@@ -87,7 +87,7 @@ helm install mayfly deploy/helm/mayfly \
 Requirements: Docker, kind, kubectl, Go 1.26+, jq, openssl.
 
 ```bash
-git clone <repo> mayfly
+git clone https://github.com/hayfever/mayfly.git
 cd mayfly
 make build
 ./hack/kind-up.sh
