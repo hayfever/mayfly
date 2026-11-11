@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mayflyd
+  namespace: mayfly
+  labels:
+    app.kubernetes.io/name: mayflyd
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mayflyd
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mayflyd
+        app.kubernetes.io/component: control-plane
+    spec:
+      serviceAccountName: mayflyd
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mayflyd
+          image: mayflyd:dev
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/mayfly-config/config.yaml"]
+          envFrom:
+            - secretRef:
+                name: mayfly-secrets
+          env:
+            - name: MAYFLY_LOG_LEVEL
+              value: info
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/mayfly-config
+              readOnly: true
+            - name: skills
+              mountPath: /etc/mayfly-skills
+              readOnly: true
+            - name: agents
+              mountPath: /etc/mayfly-agents
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: state
+              mountPath: /var/lib/mayfly
+      volumes:
+        - name: config
+          configMap:
+            name: mayfly-config
+        - name: skills
+          configMap:
+            name: mayfly-skills
+            optional: true
+        - name: agents
+          configMap:
+            name: mayfly-agents
+            optional: true
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: state
+          emptyDir:
+            sizeLimit: 2Gi

@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llmstub
+  namespace: mayfly
+  labels:
+    app.kubernetes.io/name: llmstub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llmstub
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llmstub
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: llmstub
+          image: mayfly-llmstub:dev
+          imagePullPolicy: IfNotPresent
+          args: ["--addr", ":9099"]
+          ports:
+            - containerPort: 9099
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9099
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llmstub
+  namespace: mayfly
+spec:
+  selector:
+    app.kubernetes.io/name: llmstub
+  ports:
+    - name: http
+      port: 9099
+      targetPort: 9099

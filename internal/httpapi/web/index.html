@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mayfly</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">mayfly<span class="dot">.</span></div>
+    <div class="spacer"></div>
+    <span id="conn" class="conn">disconnected</span>
+    <button id="settings" class="ghost" type="button">Settings</button>
+  </header>
+
+  <main>
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <button id="new-session" class="primary" type="button">New session</button>
+        <button id="refresh" class="ghost" type="button" title="Refresh">Refresh</button>
+      </div>
+      <div id="sessions" class="sessions"></div>
+    </aside>
+
+    <section class="workspace">
+      <div id="empty" class="empty">
+        <h1>Ephemeral agent sessions</h1>
+        <p>Create a session or open one from the list. Sessions self-destruct and export their transcript.</p>
+      </div>
+
+      <div id="session" class="session" hidden>
+        <header class="session-head">
+          <div class="session-title">
+            <h2 id="session-title"></h2>
+            <div class="meta"><span id="session-status" class="badge"></span><span id="session-agent" class="badge"></span><span id="session-harness" class="badge"></span><code id="session-id"></code></div>
+          </div>
+          <div class="actions">
+            <button id="download" class="ghost" type="button" hidden>Artifact</button>
+            <button id="close" class="danger" type="button">Close</button>
+          </div>
+        </header>
+        <div id="events" class="events" aria-live="polite"></div>
+        <form id="composer" class="composer">
+          <textarea id="message" placeholder="Message the agent… (Enter to send, Shift+Enter for newline)" rows="2"></textarea>
+          <button class="primary" type="submit">Send</button>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="auth-dialog">
+    <form method="dialog" id="auth-form">
+      <h2>Connection</h2>
+      <label>Admin token
+        <input id="token-input" type="password" autocomplete="off" required>
+      </label>
+      <label>Display name
+        <input id="name-input" type="text" autocomplete="off" placeholder="web">
+      </label>
+      <p class="hint">Stored in this browser only. The token is required for the admin API.</p>
+      <menu>
+        <button id="auth-cancel" class="ghost" value="cancel">Cancel</button>
+        <button class="primary" value="save">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="create-dialog">
+    <form method="dialog" id="create-form">
+      <h2>New session</h2>
+      <label>Prompt
+        <textarea id="create-prompt" rows="5" required></textarea>
+      </label>
+      <div class="grid">
+        <label>Title
+          <input id="create-title" type="text" placeholder="optional">
+        </label>
+        <label>TTL
+          <input id="create-ttl" type="text" value="30m">
+        </label>
+        <label>Model
+          <select id="create-model"></select>
+        </label>
+        <label>Agent
+          <select id="create-agent"></select>
+        </label>
+      </div>
+      <fieldset>
+        <legend>Skills</legend>
+        <div id="create-skills" class="checks"></div>
+      </fieldset>
+      <fieldset>
+        <legend>MCP servers</legend>
+        <div id="create-mcp" class="checks"></div>
+      </fieldset>
+      <menu>
+        <button id="create-cancel" class="ghost" value="cancel">Cancel</button>
+        <button class="primary" value="create">Create</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>

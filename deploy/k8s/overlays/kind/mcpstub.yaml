@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcpstub
+  namespace: mayfly
+  labels:
+    app.kubernetes.io/name: mcpstub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcpstub
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mcpstub
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcpstub
+          image: mayfly-mcpstub:dev
+          imagePullPolicy: IfNotPresent
+          args: ["--addr", ":9100"]
+          ports:
+            - containerPort: 9100
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9100
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcpstub
+  namespace: mayfly
+spec:
+  selector:
+    app.kubernetes.io/name: mcpstub
+  ports:
+    - name: http
+      port: 9100
+      targetPort: 9100

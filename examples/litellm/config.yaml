@@ -1,0 +1,32 @@
+# LiteLLM proxy configuration. Provider keys live in the LiteLLM deployment,
+# never in Mayfly sessions. Use a commit-pinned image in production.
+model_list:
+  - model_name: mayfly-default
+    litellm_params:
+      model: openai/gpt-4.1-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: claude-sonnet
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: bedrock-claude
+    litellm_params:
+      model: bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0
+      aws_region_name: us-east-1
+
+  - model_name: openrouter-qwen
+    litellm_params:
+      model: openrouter/qwen/qwen3-coder
+      api_base: https://openrouter.ai/api/v1
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  - model_name: agent-backend
+    litellm_params:
+      model: openai/agent-model
+      api_base: https://agent-backend.internal/v1
+      api_key: os.environ/AGENT_BACKEND_TOKEN
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

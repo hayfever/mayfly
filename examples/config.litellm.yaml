@@ -1,0 +1,58 @@
+server:
+  addr: ":8080"
+  public_url: "http://localhost:8080"
+  internal_url: "http://mayfly.mayfly.svc.cluster.local:8080"
+  token_env: MAYFLY_API_TOKEN
+
+sessions:
+  namespace: mayfly
+  default_ttl: 30m
+  max_ttl: 2h
+  idle_timeout: 15m
+  close_grace: 90s
+
+runtime:
+  backend: kubernetes
+  image: ghcr.io/your-org/mayfly-agent:v0.1.0
+  image_pull_policy: IfNotPresent
+  service_account: mayfly-agent
+  platform_namespace: mayfly
+  platform_labels:
+    app.kubernetes.io/name: mayflyd
+  network_policy: true
+  dns_namespace: kube-system
+
+# Mayfly talks only to LiteLLM. LiteLLM holds the provider keys.
+llm:
+  base_url: http://litellm.litellm.svc.cluster.local:4000/v1
+  api_key_env: LITELLM_MASTER_KEY
+  model: mayfly-default
+  allow_models:
+    - mayfly-default
+    - claude-sonnet
+    - bedrock-claude
+    - openrouter-qwen
+    - agent-backend
+  timeout: 180s
+
+artifacts:
+  store: local
+  local:
+    dir: /var/lib/mayfly/artifacts
+  max_bytes: 268435456
+
+skills:
+  dirs: [/etc/mayfly-skills]
+
+agents:
+  dirs: [/etc/mayfly-agents]
+  allowed_images:
+    - ghcr.io/your-org/mayfly-agent:*
+
+mcp:
+  servers: []
+
+triggers:
+  - name: generic
+    type: generic
+    secret_env: MAYFLY_WEBHOOK_SECRET

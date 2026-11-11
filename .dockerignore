@@ -1,0 +1,8 @@
+bin/
+.mayfly/
+artifacts/
+.git/
+.gitignore
+*.md
+!README.md
+docs/

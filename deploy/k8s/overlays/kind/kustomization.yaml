@@ -1,0 +1,96 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mayfly
+resources:
+  - ../../base
+  - llmstub.yaml
+  - mcpstub.yaml
+configMapGenerator:
+  - name: mayfly-skills
+    options:
+      disableNameSuffixHash: true
+    files:
+      - ../../../../examples/skills/incident-triage.md
+      - ../../../../examples/skills/reporting.md
+  - name: mayfly-agents
+    options:
+      disableNameSuffixHash: true
+    files:
+      - ../../../../examples/agents/triage.yaml
+patches:
+  - target:
+      kind: ConfigMap
+      name: mayfly-config
+    patch: |-
+      - op: replace
+        path: /data/config.yaml
+        value: |
+          server:
+            addr: ":8080"
+            public_url: "http://localhost:8080"
+            internal_url: "http://mayfly.mayfly.svc.cluster.local:8080"
+            token_env: MAYFLY_API_TOKEN
+            attach_ticket_ttl: 60s
+          sessions:
+            namespace: mayfly
+            default_ttl: 30m
+            max_ttl: 2h
+            idle_timeout: 15m
+            close_grace: 60s
+            event_buffer: 5000
+            max_steps: 24
+            allow_shell: true
+            shell_timeout: 120s
+          runtime:
+            backend: kubernetes
+            image: mayfly-agent:dev
+            image_pull_policy: IfNotPresent
+            service_account: mayfly-agent
+            platform_namespace: mayfly
+            platform_labels:
+              app.kubernetes.io/name: mayflyd
+            network_policy: true
+            dns_namespace: kube-system
+            workspace_limit: 512Mi
+            artifact_volume_limit: 1Gi
+            poll_interval: 2s
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                cpu: "1"
+                memory: 1Gi
+          llm:
+            base_url: http://llmstub.mayfly.svc.cluster.local:9099/v1
+            model: stub
+            allow_models: [stub]
+            timeout: 120s
+          artifacts:
+            store: local
+            local:
+              dir: /var/lib/mayfly/artifacts
+            max_bytes: 134217728
+          skills:
+            dirs: [/etc/mayfly-skills]
+          agents:
+            dirs: [/etc/mayfly-agents]
+            allowed_images: [mayfly-agent:dev]
+          mcp:
+            servers:
+              - name: echo
+                transport: http
+                url: http://mcpstub.mayfly.svc.cluster.local:9100/mcp
+          triggers:
+            - name: generic
+              type: generic
+              allow_unsigned: true
+            - name: github
+              type: github
+              allow_unsigned: true
+            - name: datadog
+              type: datadog
+              allow_unsigned: true
+            - name: slack
+              type: slack
+              allow_unsigned: true

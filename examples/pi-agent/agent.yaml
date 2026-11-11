@@ -1,0 +1,26 @@
+# This manifest is not loaded by the default configurations. It shows how to
+# select a Pi harness that exists inside the agent image as `--agent pi`.
+#
+# 1. Build an agent image that contains /opt/mayfly/harnesses/pi.
+# 2. Add this directory (or this file) under agents.dirs.
+# 3. Restart mayflyd.
+schemaVersion: 1
+name: acme/pi-agent
+version: 0.1.0
+agents:
+  - name: pi
+    description: Pi coding agent through a Mayfly runtime adapter.
+    harness: pi
+    systemPrompt: |
+      You are the Pi agent. Use your harness tools, keep edits inside the workspace,
+      and finish with a short summary.
+    skills:
+      - incident-triage
+    runtime:
+      protocol: 1
+      args: ["--mode", "rpc"]
+      env:
+        PI_LOG_LEVEL: info
+      config:
+        thinking: high
+        maxTurns: 80

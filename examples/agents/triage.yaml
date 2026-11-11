@@ -1,0 +1,18 @@
+schemaVersion: 1
+name: mayfly/examples
+version: 0.1.0
+agents:
+  - name: triage
+    description: Incident triage with evidence, impact, and next actions.
+    systemPrompt: |
+      You are the Mayfly triage agent. Investigate before you recommend.
+      Separate facts from assumptions, state the impact, and give the smallest safe mitigation first.
+      Write findings to triage.md in the workspace.
+    skills:
+      - incident-triage
+    maxSteps: 40
+    runtime:
+      env:
+        MAYFLY_AGENT_EXAMPLE: triage
+      config:
+        triage: true
