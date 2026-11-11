@@ -125,7 +125,7 @@ queue:
 | `retry_base` | `5s` | First retry delay; doubles per attempt up to ten minutes |
 | `visibility_timeout` | `5m` | How long a claimed job stays invisible before it is retried. Minimum `2m` |
 | `dedupe_ttl` | `72h` | How long a delivery key is remembered. Keep it at or above the sender's redelivery window (GitHub redelivers for three days). Minimum `1s` |
-| `tombstone_ttl` | `1h` | How long a completed job keeps its session link for `GET /api/v1/queue/jobs/{id}`. `0` keeps it until the process restarts |
+| `tombstone_ttl` | `1h` | How long a completed job keeps its session link for `GET /api/v1/queue/jobs/{id}`. `0` disables expiry: `memory` keeps records until the process restarts; `bbolt` (`done` bucket) and `redis` (`{<key_prefix>}:done:<job id>` keys) keep them indefinitely; nothing in Mayfly removes them |
 | `poll_interval` | `2s` | Worker polling delay when the queue is empty or capacity is full |
 | `bbolt.path` | — | Database file. Put it on a PersistentVolume for durability across pod replacement |
 | `redis.url` | — | `redis://` or `rediss://` URL. Host, port, user, password, and TLS come from it |
