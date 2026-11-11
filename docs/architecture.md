@@ -94,24 +94,32 @@ sequenceDiagram
 
 | Status | Meaning |
 |---|---|
-| `pending` | Pod created; runtime not yet connected |
-| `running` | Runtime connected and accepting messages |
-| `closing` | Close requested; waiting for finalize |
-| `completed` | Artifact exported and runtime reported success |
-| `expired` | TTL elapsed before finalize |
-| `failed` | Startup failure, runtime failure, delete, or fallback export |
+| `pending` | Session reserved and container started (or starting); runtime not yet connected |
+| `running` | Runtime opened its inbox stream and accepts messages |
+| `closing` | Close requested (API, TTL expiry, or control-plane idle timeout); waiting for finalize |
+| `completed` | Runtime uploaded its bundle and reported success |
+| `expired` | Finalized after the TTL ran out: a success report with reason `ttl`/`expired`, or a fallback export after an `expired` close |
+| `failed` | Start failure, runtime failure report, delete, or fallback export |
 
-Allowed transitions:
+Transitions:
 
 ```text
-pending -> running -> closing -> completed | expired | failed
-pending -> failed
-running -> failed | expired
+pending  -> running                        runtime opens GET /internal/v1/sessions/{id}/inbox
+pending  -> closing                        TTL runs out before the runtime connects, or POST close
+running  -> closing                        POST close, TTL runs out, or idle for idle_timeout + 2m
+pending | running | closing -> completed | expired | failed
+                                           runtime finalize (POST /internal/v1/sessions/{id}/finalize)
+pending | running | closing -> failed | expired
+                                           fallback export (no connect, pod failed or missing,
+                                           runtime exited, close grace exceeded)
+pending | running | closing -> failed      DELETE /api/v1/sessions/{id}
 ```
 
-`Complete` is idempotent. The manager maps a successful runtime finalize to `expired` when the close reason was TTL or expiry.
+A runtime can finalize straight from `running` without a close request. The built-in runtime does this on its own idle timer (`idle_timeout`, reported as `completed`), on its own TTL timer (TTL + 60 s, reported as `expired`), and on SIGTERM (reported as `completed`). Because the runtime's idle timer fires before the control plane's `idle_timeout + 2m` check, an idle session normally ends without passing through `closing`.
 
-A `pending` session moves to `running` only when its runtime authenticates to the control plane. If the runtime never connects within `sessions.connect_timeout`, the manager stops the container, exports a partial artifact, and marks the session `failed`, which releases its capacity slot.
+`finalize` runs once per session; later reports are ignored. The manager maps a successful runtime finalize to `expired` when the close reason was `expired` or the reported reason is `ttl` or `expired`. A fallback export ends in `expired` when the close reason was `expired`, otherwise `failed`.
+
+If `runner.Start` fails, `Create` marks the session `failed` immediately and returns the error; a queued webhook job is then retried (`Nack`). A `pending` session moves to `running` only when its runtime authenticates to the control plane. If the runtime has not connected within `sessions.connect_timeout` (default `2m`, measured from when the pod reaches `Running`, or from launch on the local backend), the manager exports a partial artifact, stops the container, and marks the session `failed`, which releases its capacity slot.
 
 ## Thread model
 
@@ -144,11 +152,11 @@ Retention is bounded per session (`sessions.event_buffer`, default 5000 events).
 
 | Failure | Behavior |
 |---|---|
-| Pod cannot start | Session becomes `failed`; error event recorded |
-| Runtime exits without finalize | After a 20 s grace, the control plane exports logs and retained events as a partial bundle |
+| Pod cannot start | `runner.Start` error: session `failed` immediately, no bundle. Image pull or container-config errors on a pending pod: fallback export after 30 s (`InvalidImageName` at once) |
+| Runtime exits without finalize | 20 s after the pod reaches `Succeeded`/`Failed` (5 s after process exit on the local backend), the control plane exports logs and retained events as a partial bundle |
 | Pod disappears | After 30 s, same fallback |
 | Close does not finalize | After `sessions.close_grace` (default 90 s), force stop and fallback export |
-| Artifact upload fails | Runtime retries 3 times, reports failure; control plane falls back to logs |
+| Artifact upload fails | Runtime retries 3 times, then finalizes as `failed` with no bundle. The control-plane fallback runs only if that finalize report also fails and the runtime exits |
 | Control plane restarts | Running pods labeled `mayfly.io/managed=true` are adopted from their ConfigMap and Secret; new events continue but the pre-restart thread buffer is lost |
 | TTL elapses | Close with reason `expired`; runtime finalizes; status becomes `expired` |
 
