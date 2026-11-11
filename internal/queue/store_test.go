@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
+
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/model"
 	"github.com/hayfever/mayfly/internal/session"
@@ -33,11 +36,17 @@ func testJob(delivery string) Job {
 	}, time.Now().UTC())
 }
 
-// backends returns every available store for the conformance suite.
+// backends returns every available store with the default test configuration.
 func backends(t *testing.T) map[string]Store {
 	t.Helper()
+	return backendsWith(t, testConfig(t))
+}
+
+// backendsWith returns every available store for the conformance suite. Redis
+// runs against an in-process miniredis unless MAYFLY_REDIS_TEST_URL names one.
+func backendsWith(t *testing.T, cfg config.QueueConfig) map[string]Store {
+	t.Helper()
 	stores := map[string]Store{}
-	cfg := testConfig(t)
 	memory, err := New(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -53,23 +62,25 @@ func backends(t *testing.T) map[string]Store {
 	}
 	stores["bbolt"] = bolt
 
-	if url := os.Getenv("MAYFLY_REDIS_TEST_URL"); url != "" {
-		redisCfg := cfg
-		redisCfg.Backend = "redis"
-		redisCfg.Redis.URL = url
-		// A fresh prefix keeps repeat runs independent.
-		redisCfg.Redis.KeyPrefix = fmt.Sprintf("mayfly-test-%d", time.Now().UnixNano())
-		redisBackend, err := New(context.Background(), redisCfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		// Clear keys from an earlier run so counts start at zero.
-		if store, ok := redisBackend.(*redisStore); ok {
-			ctx := context.Background()
-			_ = store.client.Del(ctx, store.queue, store.jobs, store.dead).Err()
-		}
-		stores["redis"] = redisBackend
+	url := os.Getenv("MAYFLY_REDIS_TEST_URL")
+	if url == "" {
+		url = "redis://" + miniredis.RunT(t).Addr()
 	}
+	redisCfg := cfg
+	redisCfg.Backend = "redis"
+	redisCfg.Redis.URL = url
+	// A fresh prefix keeps repeat runs independent.
+	redisCfg.Redis.KeyPrefix = fmt.Sprintf("mayfly-test-%d", time.Now().UnixNano())
+	redisBackend, err := New(context.Background(), redisCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Clear keys from an earlier run so counts start at zero.
+	if store, ok := redisBackend.(*redisStore); ok {
+		ctx := context.Background()
+		_ = store.client.Del(ctx, store.queue, store.jobs, store.dead).Err()
+	}
+	stores["redis"] = redisBackend
 	for name, store := range stores {
 		t.Cleanup(func() {
 			if err := store.Close(); err != nil {
@@ -233,6 +244,56 @@ func TestStoreReleaseDefers(t *testing.T) {
 				t.Fatalf("released job = %s, want %s", got.ID, lease.ID)
 			}
 		})
+	}
+}
+
+func TestStoreDeadJobsDoNotCountTowardMaxJobs(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.MaxJobs = 1
+	cfg.MaxAttempts = 1
+	for name, store := range backendsWith(t, cfg) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			if err := store.Accept(ctx, testJob("")); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Nack(ctx, claimOne(t, store), errors.New("boom")); err != nil {
+				t.Fatal(err)
+			}
+			if stats, _ := store.Stats(ctx); stats.Dead != 1 {
+				t.Fatalf("stats = %+v, want one dead job", stats)
+			}
+			if err := store.Accept(ctx, testJob("")); err != nil {
+				t.Fatalf("accept after a burial = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestRedisBuriesUndecodableJob(t *testing.T) {
+	store, ok := backends(t)["redis"].(*redisStore)
+	if !ok {
+		t.Fatal("redis backend is not a *redisStore")
+	}
+	ctx := context.Background()
+	if err := store.client.HSet(ctx, store.jobs, "bad", "{not json").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.client.ZAdd(ctx, store.queue, redis.Z{Score: 0, Member: "bad"}).Err(); err != nil {
+		t.Fatal(err)
+	}
+	leases, err := store.Claim(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leases) != 0 {
+		t.Fatalf("claim = %+v, want no leases", leases)
+	}
+	if stats, _ := store.Stats(ctx); stats.Dead != 1 {
+		t.Fatalf("stats = %+v, want one dead job", stats)
+	}
+	if again, _ := store.Claim(ctx, 10); len(again) != 0 {
+		t.Fatalf("second claim = %+v, want no leases", again)
 	}
 }
 

@@ -34,7 +34,7 @@ if dedupe and redis.call('EXISTS', KEYS[3]) == 1 then
   return 0
 end
 local max = tonumber(ARGV[4])
-if max > 0 and (redis.call('ZCARD', KEYS[1]) + redis.call('HLEN', KEYS[4])) >= max then
+if max > 0 and redis.call('ZCARD', KEYS[1]) >= max then
   return -1
 end
 if dedupe then
@@ -160,6 +160,13 @@ func (s *redisStore) Claim(ctx context.Context, max int) ([]Lease, error) {
 		payload, _ := values[i+1].(string)
 		var job Job
 		if err := json.Unmarshal([]byte(payload), &job); err != nil {
+			pipe := s.client.TxPipeline()
+			pipe.ZRem(ctx, s.queue, id)
+			pipe.HDel(ctx, s.jobs, id)
+			pipe.HSet(ctx, s.dead, id, payload)
+			if _, perr := pipe.Exec(ctx); perr != nil {
+				return leases, fmt.Errorf("queue bury undecodable job %s: %w", id, perr)
+			}
 			continue
 		}
 		leases = append(leases, Lease{ID: id, Job: job, Deadline: deadline})
