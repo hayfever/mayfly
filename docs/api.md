@@ -14,7 +14,7 @@ Error responses:
 |---|---|
 | 400 | Invalid request, unknown skill/server, bad TTL |
 | 401 | Missing or wrong token, invalid webhook signature |
-| 404 | Unknown session, trigger, or artifact |
+| 404 | Unknown session, trigger, artifact, job, or dead job |
 | 409 | Session is closed |
 | 413 | Body or artifact too large |
 | 429 | Trigger rate limit, `queue.max_jobs` reached, or `sessions.max_concurrent` reached on the admin API; `Retry-After` is set |
@@ -44,7 +44,7 @@ Responses:
 - Session options the control plane cannot run (unknown agent, skill, or MCP server; model not in `llm.allow_models`; empty prompt): `400` with the reason. Nothing is queued.
 - Over the trigger rate limit, or when `queue.max_jobs` is reached: `429` with `Retry-After`. The rate limit counts only requests that pass signature verification, so unauthenticated traffic cannot exhaust a trigger.
 
-Find the session created for a delivery through `GET /api/v1/sessions` (the trigger delivery key is stored on the session) or watch `GET /api/v1/queue` until the job leaves the queue. Jobs accepted without a delivery key have no stable link to their session; send `Idempotency-Key` if you need to correlate.
+Find the session created for a delivery with `GET /api/v1/queue/jobs/{job_id}`: it reports `state` and, once the worker runs, `session_id`. The session also carries the same id in `trigger.job_id`. Jobs accepted without a delivery key can still be looked up by `job_id` from the response, for `queue.tombstone_ttl` after completion.
 
 ## Sessions
 
@@ -156,6 +156,32 @@ Accepted work that has not run yet.
 ```
 
 `pending` jobs are claimable now. `leased` jobs are not claimable yet: a worker holds them, or they are waiting out a retry backoff or a capacity delay. `dead` jobs exhausted `queue.max_attempts`.
+
+### `GET /api/v1/queue/jobs/{id}`
+
+One accepted job by id, including a completed job for `queue.tombstone_ttl`.
+
+```json
+{"job":{"id":"d-...","trigger":"github","state":"done","attempts":0,"accepted_at":"...","finished_at":"...","session_id":"abc123","prompt":"..."}}
+```
+
+`state` is `queued`, `leased`, `dead`, or `done`. A job that created a session reports `session_id`; the session reports the same id in `trigger.job_id`. Unknown or expired ids return `404`.
+
+### `GET /api/v1/queue/dead?limit=50`
+
+Buried jobs, newest first. `limit` defaults to 50 and is capped at 500. The prompt is omitted from the list; use the job lookup for the full record.
+
+```json
+{"dead":[{"id":"d-...","trigger":"generic","state":"dead","attempts":5,"accepted_at":"...","failed_at":"...","error":"unknown agent "triage""}]}
+```
+
+### `POST /api/v1/queue/dead/{id}/retry`
+
+Puts a buried job back on the queue with its attempt count reset. `202 {"retried":true,"id":"..."}`. Unknown job: `404`.
+
+### `DELETE /api/v1/queue/dead/{id}`
+
+Drops a buried job without running it. `204`. Unknown job: `404`.
 
 ### `GET /api/v1/config`
 

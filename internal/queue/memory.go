@@ -19,9 +19,14 @@ type memoryStore struct {
 }
 
 type memEntry struct {
-	job     Job
-	readyAt time.Time
-	dead    bool
+	job        Job
+	readyAt    time.Time
+	dead       bool
+	deadErr    string
+	deadAt     time.Time
+	done       bool
+	sessionID  string
+	finishedAt time.Time
 }
 
 func newMemory(cfg config.QueueConfig) *memoryStore {
@@ -36,6 +41,7 @@ func (s *memoryStore) Accept(_ context.Context, job Job) error {
 	now := time.Now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sweepLocked(now)
 	for key, expiry := range s.seen {
 		if now.After(expiry) {
 			delete(s.seen, key)
@@ -46,7 +52,7 @@ func (s *memoryStore) Accept(_ context.Context, job Job) error {
 			return ErrDuplicate
 		}
 	}
-	if s.cfg.MaxJobs > 0 && s.live() >= s.cfg.MaxJobs {
+	if s.cfg.MaxJobs > 0 && s.liveLocked() >= s.cfg.MaxJobs {
 		return ErrFull
 	}
 	s.jobs[job.ID] = &memEntry{job: job, readyAt: now}
@@ -56,15 +62,29 @@ func (s *memoryStore) Accept(_ context.Context, job Job) error {
 	return nil
 }
 
-// live counts jobs that are not buried. The caller holds mu.
-func (s *memoryStore) live() int {
+// liveLocked counts jobs that are neither buried nor finished. The caller
+// holds mu.
+func (s *memoryStore) liveLocked() int {
 	n := 0
 	for _, entry := range s.jobs {
-		if !entry.dead {
+		if !entry.dead && !entry.done {
 			n++
 		}
 	}
 	return n
+}
+
+// sweepLocked drops finished jobs whose tombstone expired. The caller holds mu.
+func (s *memoryStore) sweepLocked(now time.Time) {
+	ttl := s.cfg.TombstoneTTL.Std()
+	if ttl <= 0 {
+		return
+	}
+	for id, entry := range s.jobs {
+		if entry.done && now.Sub(entry.finishedAt) > ttl {
+			delete(s.jobs, id)
+		}
+	}
 }
 
 func (s *memoryStore) Claim(_ context.Context, max int) ([]Lease, error) {
@@ -77,7 +97,7 @@ func (s *memoryStore) Claim(_ context.Context, max int) ([]Lease, error) {
 	}
 	ready := make([]candidate, 0, max)
 	for id, entry := range s.jobs {
-		if entry.dead || !due(entry.readyAt, now) {
+		if entry.dead || entry.done || !due(entry.readyAt, now) {
 			continue
 		}
 		ready = append(ready, candidate{id: id, readyAt: entry.readyAt})
@@ -95,14 +115,20 @@ func (s *memoryStore) Claim(_ context.Context, max int) ([]Lease, error) {
 	return leases, nil
 }
 
-func (s *memoryStore) Ack(_ context.Context, lease Lease) error {
+func (s *memoryStore) Ack(_ context.Context, lease Lease, result Result) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.jobs, lease.ID)
+	entry, ok := s.jobs[lease.ID]
+	if !ok {
+		return nil
+	}
+	entry.done = true
+	entry.sessionID = result.SessionID
+	entry.finishedAt = time.Now().UTC()
 	return nil
 }
 
-func (s *memoryStore) Nack(_ context.Context, lease Lease, _ error) error {
+func (s *memoryStore) Nack(_ context.Context, lease Lease, cause error) error {
 	now := time.Now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -110,12 +136,14 @@ func (s *memoryStore) Nack(_ context.Context, lease Lease, _ error) error {
 	if !ok {
 		return nil
 	}
-	if entry.dead || !entry.readyAt.Equal(lease.Deadline) {
+	if entry.done || entry.dead || !entry.readyAt.Equal(lease.Deadline) {
 		return ErrLeaseLost
 	}
 	entry.job.Attempts++
 	if max := s.cfg.MaxAttempts; max > 0 && entry.job.Attempts >= max {
 		entry.dead = true
+		entry.deadErr = causeString(cause)
+		entry.deadAt = now
 		return nil
 	}
 	entry.readyAt = now.Add(Backoff(entry.job.Attempts, s.cfg.RetryBase.Std()))
@@ -129,10 +157,86 @@ func (s *memoryStore) Release(_ context.Context, lease Lease, after time.Duratio
 	if !ok {
 		return nil
 	}
-	if entry.dead || !entry.readyAt.Equal(lease.Deadline) {
+	if entry.done || entry.dead || !entry.readyAt.Equal(lease.Deadline) {
 		return ErrLeaseLost
 	}
 	entry.readyAt = time.Now().UTC().Add(after)
+	return nil
+}
+
+func (s *memoryStore) Get(_ context.Context, id string) (Record, bool, error) {
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked(now)
+	entry, ok := s.jobs[id]
+	if !ok {
+		return Record{}, false, nil
+	}
+	record := Record{Job: entry.job}
+	switch {
+	case entry.done:
+		record.State = StateDone
+		record.SessionID = entry.sessionID
+		record.FinishedAt = entry.finishedAt
+	case entry.dead:
+		record.State = StateDead
+		record.Error = entry.deadErr
+		record.FailedAt = entry.deadAt
+	case due(entry.readyAt, now):
+		record.State = StateQueued
+	default:
+		record.State = StateLeased
+	}
+	return record, true, nil
+}
+
+func (s *memoryStore) Dead(_ context.Context, limit int) ([]Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Record, 0)
+	for _, entry := range s.jobs {
+		if !entry.dead {
+			continue
+		}
+		out = append(out, Record{
+			Job:      entry.job,
+			State:    StateDead,
+			Error:    entry.deadErr,
+			FailedAt: entry.deadAt,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].FailedAt.After(out[j].FailedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *memoryStore) Retry(_ context.Context, id string) error {
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.jobs[id]
+	if !ok || !entry.dead {
+		return ErrNotFound
+	}
+	entry.dead = false
+	entry.deadErr = ""
+	entry.deadAt = time.Time{}
+	entry.job.Attempts = 0
+	entry.readyAt = now
+	return nil
+}
+
+func (s *memoryStore) Delete(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.jobs[id]
+	if !ok || !entry.dead {
+		return ErrNotFound
+	}
+	delete(s.jobs, id)
 	return nil
 }
 
@@ -140,17 +244,20 @@ func (s *memoryStore) Stats(_ context.Context) (Stats, error) {
 	now := time.Now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sweepLocked(now)
 	var stats Stats
 	for _, entry := range s.jobs {
 		switch {
 		case entry.dead:
 			stats.Dead++
+		case entry.done:
+			continue
 		case due(entry.readyAt, now):
 			stats.Pending++
 		default:
 			stats.Leased++
 		}
-		if !entry.dead && (stats.Oldest.IsZero() || entry.job.AcceptedAt.Before(stats.Oldest)) {
+		if !entry.dead && !entry.done && (stats.Oldest.IsZero() || entry.job.AcceptedAt.Before(stats.Oldest)) {
 			stats.Oldest = entry.job.AcceptedAt
 		}
 	}

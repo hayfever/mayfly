@@ -25,6 +25,8 @@ var (
 	// ErrLeaseLost means the lease expired and the job was claimed again, so
 	// this holder may no longer reschedule it.
 	ErrLeaseLost = errors.New("queue lease lost")
+	// ErrNotFound means the job is unknown, or its record has expired.
+	ErrNotFound = errors.New("job not found")
 )
 
 // Job is one accepted session request.
@@ -35,6 +37,36 @@ type Job struct {
 	Options    session.CreateOptions `json:"options"`
 	AcceptedAt time.Time             `json:"accepted_at"`
 	Attempts   int                   `json:"attempts"`
+}
+
+// Result records what a completed job produced. The session ID is kept in the
+// job record after acknowledgement so a sender can find its session.
+type Result struct {
+	SessionID string `json:"session_id,omitempty"`
+}
+
+// State is the lifecycle state of an accepted job.
+type State string
+
+const (
+	// StateQueued means the job is claimable.
+	StateQueued State = "queued"
+	// StateLeased means a worker holds the job or it waits out a retry delay.
+	StateLeased State = "leased"
+	// StateDead means the job exhausted max_attempts.
+	StateDead State = "dead"
+	// StateDone means the job created a session and was acknowledged.
+	StateDone State = "done"
+)
+
+// Record is one job as seen by lookup and dead-letter tooling.
+type Record struct {
+	Job        Job       `json:"job"`
+	State      State     `json:"state"`
+	Error      string    `json:"error,omitempty"`
+	FailedAt   time.Time `json:"failed_at,omitempty"`
+	SessionID  string    `json:"session_id,omitempty"`
+	FinishedAt time.Time `json:"finished_at,omitempty"`
 }
 
 // Lease is a claim on a job. It remains invisible to other workers until Ack,
@@ -59,13 +91,21 @@ type Store interface {
 	Accept(ctx context.Context, job Job) error
 	// Claim leases up to max due jobs.
 	Claim(ctx context.Context, max int) ([]Lease, error)
-	// Ack removes a completed job.
-	Ack(ctx context.Context, lease Lease) error
+	// Ack completes a job and keeps a short-lived record of its session.
+	Ack(ctx context.Context, lease Lease, result Result) error
 	// Nack records a failed attempt, requeues with backoff, or buries the job
 	// when max_attempts is reached.
 	Nack(ctx context.Context, lease Lease, cause error) error
 	// Release requeues a job without counting an attempt.
 	Release(ctx context.Context, lease Lease, after time.Duration) error
+	// Get returns a job record, including recently completed jobs.
+	Get(ctx context.Context, id string) (Record, bool, error)
+	// Dead returns buried jobs, newest first.
+	Dead(ctx context.Context, limit int) ([]Record, error)
+	// Retry moves a buried job back to the queue with its attempt count reset.
+	Retry(ctx context.Context, id string) error
+	// Delete removes a buried job.
+	Delete(ctx context.Context, id string) error
 	Stats(ctx context.Context) (Stats, error)
 	Close() error
 }
@@ -93,6 +133,7 @@ func NewJob(trigger, delivery string, options session.CreateOptions, now time.Ti
 		id = "d-" + hex.EncodeToString(sum[:16])
 	}
 	options.Trigger.Delivery = delivery
+	options.Trigger.JobID = id
 	return Job{
 		ID:         id,
 		Delivery:   delivery,

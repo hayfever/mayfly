@@ -53,7 +53,10 @@ Properties:
 - Capacity: a worker claims only when `sessions.max_concurrent` has a free slot. A race returns `ErrCapacity`, which releases the job without counting an attempt.
 - Retry: failures back off from `queue.retry_base`, doubling to ten minutes. A job that reaches `queue.max_attempts` is buried and appears in `queue.dead`.
 - Visibility: a worker that dies mid-job loses its lease after `queue.visibility_timeout`; the job becomes claimable again. Delivery is at least once: if a worker creates the session and stops before acknowledging the job, the job runs again after the timeout. A lease that expired cannot reschedule a job another worker now holds.
+- Correlation: the job id is stored on the session (`trigger.job_id`), and the queue keeps a completed record for `queue.tombstone_ttl`, so either side can be found from the other.
+- Dead letters: a job that exhausts `queue.max_attempts` is buried with its last error. `GET /api/v1/queue/dead` lists buried jobs; the admin API can retry or delete them.
 - Crash safety: `bbolt` and `redis` survive a control-plane restart. The `memory` backend does not.
+- Deferred: lease renewal. `queue.visibility_timeout` is still a duration guess; a heartbeat on the store would turn it into a crash detector and is required before running more than one replica against a shared Redis. It is not implemented in 0.1.
 
 ## Lifecycle
 

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -38,7 +39,12 @@ func testManager(t *testing.T, cfg *config.Config) *session.Manager {
 
 func testQueue(t *testing.T) queue.Store {
 	t.Helper()
-	store, err := queue.New(context.Background(), config.Default().Queue)
+	return testQueueWith(t, config.Default().Queue)
+}
+
+func testQueueWith(t *testing.T, cfg config.QueueConfig) queue.Store {
+	t.Helper()
+	store, err := queue.New(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,5 +195,103 @@ func TestWebhookRejectsInvalidSessionOptions(t *testing.T) {
 	}
 	if stats.Pending != 0 {
 		t.Fatalf("pending jobs = %d, want 0", stats.Pending)
+	}
+}
+
+func TestQueueAdminEndpoints(t *testing.T) {
+	cfg := config.Default()
+	cfg.AdminToken = "test-admin"
+	qcfg := config.Default().Queue
+	qcfg.Backend = "memory"
+	qcfg.MaxAttempts = 1
+	store := testQueueWith(t, qcfg)
+	s := New(cfg, nil, store, testLogger())
+	handler := s.Handler()
+	ctx := context.Background()
+
+	do := func(method, target string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, target, nil)
+		req.Header.Set("Authorization", "Bearer test-admin")
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	job := queue.NewJob("generic", "", session.CreateOptions{Prompt: "will fail"}, time.Now())
+	if err := store.Accept(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	leases, err := store.Claim(ctx, 1)
+	if err != nil || len(leases) != 1 {
+		t.Fatalf("claim = %v, %v", leases, err)
+	}
+	if err := store.Nack(ctx, leases[0], errors.New("provider said no")); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(http.MethodGet, "/api/v1/queue/dead")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dead list status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var list struct {
+		Dead []queueRecord `json:"dead"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Dead) != 1 || list.Dead[0].ID != job.ID || list.Dead[0].State != queue.StateDead {
+		t.Fatalf("dead list = %+v", list.Dead)
+	}
+	if !strings.Contains(list.Dead[0].Error, "provider said no") {
+		t.Fatalf("dead error = %q", list.Dead[0].Error)
+	}
+
+	if rec = do(http.MethodPost, "/api/v1/queue/dead/"+job.ID+"/retry"); rec.Code != http.StatusAccepted {
+		t.Fatalf("retry status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec = do(http.MethodGet, "/api/v1/queue/dead"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"dead":[]`) {
+		t.Fatalf("dead list after retry = %d %s", rec.Code, rec.Body.String())
+	}
+
+	leases, err = store.Claim(ctx, 1)
+	if err != nil || len(leases) != 1 {
+		t.Fatalf("claim retried job = %+v, %v", leases, err)
+	}
+	if err := store.Nack(ctx, leases[0], errors.New("still failing")); err != nil {
+		t.Fatal(err)
+	}
+	if rec = do(http.MethodDelete, "/api/v1/queue/dead/"+job.ID); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec = do(http.MethodDelete, "/api/v1/queue/dead/"+job.ID); rec.Code != http.StatusNotFound {
+		t.Fatalf("second delete status = %d", rec.Code)
+	}
+
+	done := queue.NewJob("generic", "", session.CreateOptions{Prompt: "works"}, time.Now())
+	if err := store.Accept(ctx, done); err != nil {
+		t.Fatal(err)
+	}
+	leases, err = store.Claim(ctx, 1)
+	if err != nil || len(leases) != 1 {
+		t.Fatalf("claim done job = %+v, %v", leases, err)
+	}
+	if err := store.Ack(ctx, leases[0], queue.Result{SessionID: "session-7"}); err != nil {
+		t.Fatal(err)
+	}
+	rec = do(http.MethodGet, "/api/v1/queue/jobs/"+done.ID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("job lookup status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var lookup struct {
+		Job queueRecord `json:"job"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &lookup); err != nil {
+		t.Fatal(err)
+	}
+	if lookup.Job.State != queue.StateDone || lookup.Job.SessionID != "session-7" || lookup.Job.Prompt != "works" {
+		t.Fatalf("job lookup = %+v", lookup.Job)
+	}
+	if rec = do(http.MethodGet, "/api/v1/queue/jobs/missing"); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown job status = %d", rec.Code)
 	}
 }

@@ -158,6 +158,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/sessions/{id}/artifact", s.admin(s.downloadArtifact))
 	mux.HandleFunc("GET /api/v1/config", s.admin(s.publicConfig))
 	mux.HandleFunc("GET /api/v1/queue", s.admin(s.queueStats))
+	mux.HandleFunc("GET /api/v1/queue/jobs/{id}", s.admin(s.queueJob))
+	mux.HandleFunc("GET /api/v1/queue/dead", s.admin(s.queueDead))
+	mux.HandleFunc("POST /api/v1/queue/dead/{id}/retry", s.admin(s.queueRetryDead))
+	mux.HandleFunc("DELETE /api/v1/queue/dead/{id}", s.admin(s.queueDeleteDead))
 	mux.HandleFunc("GET /api/v1/sessions/{id}/ws", s.attachWebSocket)
 
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/events", s.internalEvents)

@@ -8,10 +8,11 @@ import (
 	"time"
 )
 
-// Handler turns one job into a session. Returning ErrRetryLater requeues the
-// job without counting an attempt, which is how a worker backs off when the
-// session cap is full.
-type Handler func(ctx context.Context, job Job) error
+// Handler turns one job into a session. The result is stored with the job so a
+// sender can find the session. Returning ErrRetryLater requeues the job without
+// counting an attempt, which is how a worker backs off when the session cap is
+// full.
+type Handler func(ctx context.Context, job Job) (Result, error)
 
 // Worker claims jobs and runs them with bounded concurrency. Run blocks until
 // the context is cancelled and every in-flight job has finished.
@@ -119,13 +120,13 @@ func (w *Worker) handle(ctx context.Context, lease Lease) {
 	// Keep working on shutdown: a half-created session is worse than a slow one.
 	jobCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.timeout)
 	defer cancel()
-	err := w.handler(jobCtx, lease.Job)
+	result, err := w.handler(jobCtx, lease.Job)
 
 	settleCtx, settleCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer settleCancel()
 	switch {
 	case err == nil:
-		if ackErr := w.store.Ack(settleCtx, lease); ackErr != nil {
+		if ackErr := w.store.Ack(settleCtx, lease, result); ackErr != nil {
 			w.logger.Warn("queue ack failed", "job", lease.ID, "error", ackErr)
 		}
 		w.logger.Info("job completed", "job", lease.ID, "trigger", lease.Job.Trigger)

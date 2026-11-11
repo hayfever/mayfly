@@ -168,6 +168,8 @@ Webhooks are accepted into a queue before a pod exists. Choose the backend by wh
 
 The `memory` backend loses accepted work on restart. Use it only for development.
 
+A job that exhausts `queue.max_attempts` is buried. List it with `GET /api/v1/queue/dead`, inspect it with `GET /api/v1/queue/jobs/{id}`, then retry (`POST /api/v1/queue/dead/{id}/retry`) or delete it. Buried jobs are kept until you act; size the queue volume or cache for that. Completed jobs keep a session link for `queue.tombstone_ttl`.
+
 ## Operating notes
 
 - Run one control-plane replica. Session records, thread history, the token index, and the artifact index are in memory. Pod adoption after a restart works from ConfigMap and Secret, but pre-restart events are not replayed. Finalized sessions are removed from memory after `sessions.retention`; artifact metadata is kept until restart, so downloads keep working. Accepted webhook work is the exception: with `bbolt` or `redis` it survives a restart, and the worker resumes the backlog.

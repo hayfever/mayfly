@@ -31,6 +31,8 @@ First public release.
 - `sessions.connect_timeout` fails a session whose runtime never reaches the control plane, so a stuck container does not hold a capacity slot until TTL.
 - Artifact metadata outlives session retention, so downloads keep working after a session leaves the list.
 - Durable webhook queue with `memory`, `bbolt`, and Redis-protocol backends, delivery dedupe, retry backoff, dead-job counting, and `GET /api/v1/queue`.
+- Dead-letter tooling: list buried jobs, inspect one, retry it with a fresh attempt count, or delete it.
+- Job-to-session correlation: `trigger.job_id` on the session and `GET /api/v1/queue/jobs/{id}` backed by a `queue.tombstone_ttl` record.
 - `queue` configuration block with `max_jobs`, `max_attempts`, `retry_base`, `visibility_timeout`, `dedupe_ttl`, and `poll_interval`.
 - Helm `persistence` option that puts the queue database on a PersistentVolume.
 

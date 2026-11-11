@@ -107,6 +107,7 @@ queue:
   retry_base: 5s
   visibility_timeout: 5m
   dedupe_ttl: 72h
+  tombstone_ttl: 1h
   poll_interval: 2s
   bbolt:
     path: /var/lib/mayfly/queue.db
@@ -124,12 +125,13 @@ queue:
 | `retry_base` | `5s` | First retry delay; doubles per attempt up to ten minutes |
 | `visibility_timeout` | `5m` | How long a claimed job stays invisible before it is retried. Minimum `2m` |
 | `dedupe_ttl` | `72h` | How long a delivery key is remembered. Keep it at or above the sender's redelivery window (GitHub redelivers for three days). Minimum `1s` |
+| `tombstone_ttl` | `1h` | How long a completed job keeps its session link for `GET /api/v1/queue/jobs/{id}`. `0` keeps it until the process restarts |
 | `poll_interval` | `2s` | Worker polling delay when the queue is empty or capacity is full |
 | `bbolt.path` | — | Database file. Put it on a PersistentVolume for durability across pod replacement |
 | `redis.url` | — | `redis://` or `rediss://` URL. Host, port, user, password, and TLS come from it |
 | `redis.password_env` | — | Environment variable that overrides the URL password |
 | `redis.username` | — | ACL user name |
-| `redis.key_prefix` | `mayfly` | Keys are written as `{<prefix>}:queue`, `:jobs`, `:dead`, `:seen:<id>` |
+| `redis.key_prefix` | `mayfly` | Keys are written as `{<prefix>}:queue`, `:jobs`, `:dead`, `:seen:<id>`, `:done:<id>` |
 | `redis.cluster` | `false` | Use the cluster client for Redis Cluster or ElastiCache cluster mode |
 
 Backend requirements:
@@ -137,7 +139,7 @@ Backend requirements:
 - `bbolt` locks its file, so only one control-plane replica can use it. Back up the file; it is the only copy.
 - `redis` runs two Lua scripts for atomic accept and claim, so the cache must support `EVAL`. Redis, Valkey, KeyDB, Dragonfly, ElastiCache, Memorystore, Azure Managed Redis, and Upstash do.
 - `redis` must not evict keys: set `maxmemory-policy noeviction` on a dedicated instance or database, and enable AOF (`appendonly yes`, `everysec`) or snapshots. An `allkeys-lru` cache silently drops accepted jobs.
-- Dedupe keys live for `dedupe_ttl`, so size the cache for roughly one key per accepted delivery in that window.
+- Dedupe keys live for `dedupe_ttl`, so size the cache for roughly one key per accepted delivery in that window. Completed jobs keep a tombstone for `tombstone_ttl`; buried jobs stay until retried or deleted.
 
 ## agents
 

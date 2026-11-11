@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -18,9 +19,13 @@ var (
 	bucketReady = []byte("ready")
 	bucketSeen  = []byte("seen")
 	bucketDead  = []byte("dead")
+	bucketDone  = []byte("done")
 	// bucketSeenExpiry indexes dedupe keys by expiry (8-byte big-endian unix
 	// nanoseconds, then the dedupe key) so expired keys purge in order.
 	bucketSeenExpiry = []byte("seen_expiry")
+	// bucketDoneExpiry indexes acknowledged jobs by tombstone expiry so their
+	// job-to-session records do not accumulate.
+	bucketDoneExpiry = []byte("done_expiry")
 )
 
 // purgeBatch bounds the extra work each Accept does to remove expired dedupe
@@ -40,7 +45,7 @@ func newBolt(cfg config.QueueConfig) (*boltStore, error) {
 		return nil, fmt.Errorf("open queue database: %w", err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bucketJobs, bucketReady, bucketSeen, bucketDead} {
+		for _, name := range [][]byte{bucketJobs, bucketReady, bucketSeen, bucketDead, bucketDone, bucketDoneExpiry} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -58,7 +63,7 @@ func newBolt(cfg config.QueueConfig) (*boltStore, error) {
 			if len(expiry) != 8 {
 				return nil
 			}
-			return index.Put(seenExpiryKey(expiry, dedupeKey), nil)
+			return index.Put(expiryKey(expiry, dedupeKey), nil)
 		})
 	})
 	if err != nil {
@@ -107,11 +112,14 @@ func (s *boltStore) Accept(_ context.Context, job Job) error {
 			if err := seen.Put(dedupeKey, expiry); err != nil {
 				return err
 			}
-			if err := tx.Bucket(bucketSeenExpiry).Put(seenExpiryKey(expiry, dedupeKey), nil); err != nil {
+			if err := tx.Bucket(bucketSeenExpiry).Put(expiryKey(expiry, dedupeKey), nil); err != nil {
 				return err
 			}
 		}
-		return purgeSeen(tx, now, purgeBatch)
+		if err := purgeSeen(tx, now, purgeBatch); err != nil {
+			return err
+		}
+		return purgeDone(tx, now, purgeBatch)
 	})
 }
 
@@ -161,16 +169,32 @@ func (s *boltStore) Claim(_ context.Context, max int) ([]Lease, error) {
 	return leases, nil
 }
 
-func (s *boltStore) Ack(_ context.Context, lease Lease) error {
+func (s *boltStore) Ack(_ context.Context, lease Lease, result Result) error {
+	now := time.Now().UTC()
+	payload, err := json.Marshal(doneRecord{Job: lease.Job, SessionID: result.SessionID, FinishedAt: now})
+	if err != nil {
+		return err
+	}
 	return s.db.Update(func(tx *bolt.Tx) error {
 		if err := tx.Bucket(bucketJobs).Delete([]byte(lease.ID)); err != nil {
 			return err
 		}
-		return tx.Bucket(bucketReady).Delete(readyKey(lease.Deadline, lease.ID))
+		if err := tx.Bucket(bucketReady).Delete(readyKey(lease.Deadline, lease.ID)); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketDone).Put([]byte(lease.ID), payload); err != nil {
+			return err
+		}
+		if s.cfg.TombstoneTTL.Std() <= 0 {
+			return nil
+		}
+		expiry := make([]byte, 8)
+		binary.BigEndian.PutUint64(expiry, uint64(now.Add(s.cfg.TombstoneTTL.Std()).UnixNano()))
+		return tx.Bucket(bucketDoneExpiry).Put(expiryKey(expiry, []byte(lease.ID)), nil)
 	})
 }
 
-func (s *boltStore) Nack(_ context.Context, lease Lease, _ error) error {
+func (s *boltStore) Nack(_ context.Context, lease Lease, cause error) error {
 	now := time.Now().UTC()
 	return s.db.Update(func(tx *bolt.Tx) error {
 		jobs := tx.Bucket(bucketJobs)
@@ -187,7 +211,7 @@ func (s *boltStore) Nack(_ context.Context, lease Lease, _ error) error {
 		}
 		job.Attempts++
 		if max := s.cfg.MaxAttempts; max > 0 && job.Attempts >= max {
-			buried, err := json.Marshal(job)
+			buried, err := json.Marshal(deadRecord{Job: job, Error: causeString(cause), FailedAt: now})
 			if err != nil {
 				return err
 			}
@@ -227,6 +251,95 @@ func (s *boltStore) Release(_ context.Context, lease Lease, after time.Duration)
 			return err
 		}
 		return ready.Put(readyKey(now, lease.ID), nil)
+	})
+}
+
+func (s *boltStore) Get(_ context.Context, id string) (Record, bool, error) {
+	now := time.Now().UTC()
+	var record Record
+	var found bool
+	err := s.db.View(func(tx *bolt.Tx) error {
+		if payload := tx.Bucket(bucketJobs).Get([]byte(id)); payload != nil {
+			var job Job
+			if err := json.Unmarshal(payload, &job); err != nil {
+				return err
+			}
+			record = Record{Job: job, State: StateQueued}
+			if deadline, ok := readyFor(tx.Bucket(bucketReady), id); ok && deadline.After(now) {
+				record.State = StateLeased
+			}
+			found = true
+			return nil
+		}
+		if payload := tx.Bucket(bucketDead).Get([]byte(id)); payload != nil {
+			dead := decodeDead(payload)
+			record = Record{Job: dead.Job, State: StateDead, Error: dead.Error, FailedAt: dead.FailedAt}
+			found = true
+			return nil
+		}
+		if payload := tx.Bucket(bucketDone).Get([]byte(id)); payload != nil {
+			var done doneRecord
+			if err := json.Unmarshal(payload, &done); err != nil {
+				return err
+			}
+			record = Record{Job: done.Job, State: StateDone, SessionID: done.SessionID, FinishedAt: done.FinishedAt}
+			found = true
+		}
+		return nil
+	})
+	return record, found, err
+}
+
+func (s *boltStore) Dead(_ context.Context, limit int) ([]Record, error) {
+	var out []Record
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketDead).ForEach(func(_, payload []byte) error {
+			dead := decodeDead(payload)
+			out = append(out, Record{Job: dead.Job, State: StateDead, Error: dead.Error, FailedAt: dead.FailedAt})
+			return nil
+		})
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].FailedAt.After(out[j].FailedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, err
+}
+
+func (s *boltStore) Retry(_ context.Context, id string) error {
+	now := time.Now().UTC()
+	return s.db.Update(func(tx *bolt.Tx) error {
+		payload := tx.Bucket(bucketDead).Get([]byte(id))
+		if payload == nil {
+			return ErrNotFound
+		}
+		dead := decodeDead(payload)
+		job := dead.Job
+		if job.ID == "" {
+			job.ID = id
+		}
+		job.Attempts = 0
+		encoded, err := json.Marshal(job)
+		if err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketJobs).Put([]byte(id), encoded); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketReady).Put(readyKey(now, id), nil); err != nil {
+			return err
+		}
+		return tx.Bucket(bucketDead).Delete([]byte(id))
+	})
+}
+
+func (s *boltStore) Delete(_ context.Context, id string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		dead := tx.Bucket(bucketDead)
+		if dead.Get([]byte(id)) == nil {
+			return ErrNotFound
+		}
+		return dead.Delete([]byte(id))
 	})
 }
 
@@ -277,6 +390,32 @@ func readyKey(at time.Time, id string) []byte {
 	return key
 }
 
+// readyFor finds the ready entry for one job. Only admin lookups use it.
+func readyFor(ready *bolt.Bucket, id string) (time.Time, bool) {
+	cursor := ready.Cursor()
+	for key, _ := cursor.First(); key != nil; key, _ = cursor.Next() {
+		at, keyID := splitReadyKey(key)
+		if keyID == id {
+			return at, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// decodeDead reads a buried job, accepting records written before the error
+// and timestamp were stored.
+func decodeDead(payload []byte) deadRecord {
+	var dead deadRecord
+	if json.Unmarshal(payload, &dead) == nil && dead.Job.ID != "" {
+		return dead
+	}
+	var job Job
+	if json.Unmarshal(payload, &job) == nil {
+		return deadRecord{Job: job}
+	}
+	return dead
+}
+
 func splitReadyKey(key []byte) (time.Time, string) {
 	if len(key) < 8 {
 		return time.Time{}, ""
@@ -284,8 +423,8 @@ func splitReadyKey(key []byte) (time.Time, string) {
 	return time.Unix(0, int64(binary.BigEndian.Uint64(key[:8]))).UTC(), string(key[8:])
 }
 
-// seenExpiryKey orders dedupe keys by expiry.
-func seenExpiryKey(expiry, dedupeKey []byte) []byte {
+// expiryKey orders records by expiry, then by key.
+func expiryKey(expiry, dedupeKey []byte) []byte {
 	key := make([]byte, 0, len(expiry)+len(dedupeKey))
 	return append(append(key, expiry...), dedupeKey...)
 }
@@ -315,6 +454,35 @@ func purgeSeen(tx *bolt.Tx, now time.Time, limit int) error {
 			if err := seen.Delete(dedupeKey); err != nil {
 				return err
 			}
+		}
+		if err := index.Delete(key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// purgeDone deletes up to limit acknowledged job records whose tombstone
+// expired.
+func purgeDone(tx *bolt.Tx, now time.Time, limit int) error {
+	done := tx.Bucket(bucketDone)
+	index := tx.Bucket(bucketDoneExpiry)
+	if done == nil || index == nil {
+		return nil
+	}
+	cutoff := make([]byte, 8)
+	binary.BigEndian.PutUint64(cutoff, uint64(now.UTC().UnixNano()))
+	var expired [][]byte
+	cursor := index.Cursor()
+	for key, _ := cursor.First(); key != nil && len(expired) < limit; key, _ = cursor.Next() {
+		if len(key) < 8 || bytes.Compare(key[:8], cutoff) >= 0 {
+			break
+		}
+		expired = append(expired, append([]byte(nil), key...))
+	}
+	for _, key := range expired {
+		if err := done.Delete(key[8:]); err != nil {
+			return err
 		}
 		if err := index.Delete(key); err != nil {
 			return err

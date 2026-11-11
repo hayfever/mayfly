@@ -42,7 +42,7 @@ func TestSessionHandler(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := SessionHandler(tc.create)(context.Background(), job)
+			result, err := SessionHandler(tc.create)(context.Background(), job)
 			if tc.want != nil {
 				if !errors.Is(err, tc.want) {
 					t.Fatalf("error = %v, want %v", err, tc.want)
@@ -60,6 +60,9 @@ func TestSessionHandler(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("error = %v, want nil", err)
+			}
+			if result.SessionID != sess.ID {
+				t.Fatalf("session id = %q, want %q", result.SessionID, sess.ID)
 			}
 		})
 	}

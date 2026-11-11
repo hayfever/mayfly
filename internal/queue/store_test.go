@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,7 +67,11 @@ func backendsWith(t *testing.T, cfg config.QueueConfig) map[string]Store {
 
 	url := os.Getenv("MAYFLY_REDIS_TEST_URL")
 	if url == "" {
-		url = "redis://" + miniredis.RunT(t).Addr()
+		server := miniredis.RunT(t)
+		// Expire keys as the wall clock advances; miniredis otherwise only
+		// expires on FastForward.
+		server.ClockTTL(true)
+		url = "redis://" + server.Addr()
 	}
 	redisCfg := cfg
 	redisCfg.Backend = "redis"
@@ -122,7 +127,7 @@ func TestStoreLifecycle(t *testing.T) {
 			if stats.Pending != 0 || stats.Leased != 1 {
 				t.Fatalf("stats after claim = %+v", stats)
 			}
-			if err := store.Ack(ctx, leases[0]); err != nil {
+			if err := store.Ack(ctx, leases[0], Result{SessionID: "session-1"}); err != nil {
 				t.Fatal(err)
 			}
 			stats, _ = store.Stats(ctx)
@@ -199,7 +204,7 @@ func TestStoreVisibilityExpiryReclaims(t *testing.T) {
 			if len(second) != 1 {
 				t.Fatal("expired lease was not reclaimed")
 			}
-			if err := store.Ack(ctx, second[0]); err != nil {
+			if err := store.Ack(ctx, second[0], Result{}); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -481,6 +486,127 @@ func TestStoreStaleLeaseCannotSettle(t *testing.T) {
 			time.Sleep(40 * time.Millisecond)
 			if retry := claimOne(t, store); retry.Job.Attempts != 1 {
 				t.Fatalf("attempts = %d, want 1", retry.Job.Attempts)
+			}
+		})
+	}
+}
+
+func TestStoreRecordsAndDeadLetters(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.MaxJobs = 0
+	cfg.MaxAttempts = 1
+	cfg.TombstoneTTL = config.Duration(time.Hour)
+	for name, store := range backendsWith(t, cfg) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			job := testJob("lookup")
+			if err := store.Accept(ctx, job); err != nil {
+				t.Fatal(err)
+			}
+			record, ok, err := store.Get(ctx, job.ID)
+			if err != nil || !ok {
+				t.Fatalf("get accepted job = %+v, %v, %v", record, ok, err)
+			}
+			if record.State != StateQueued {
+				t.Fatalf("state = %s, want queued", record.State)
+			}
+			if record.Job.Options.Trigger.JobID != job.ID {
+				t.Fatalf("trigger job id = %q, want %q", record.Job.Options.Trigger.JobID, job.ID)
+			}
+
+			lease := claimOne(t, store)
+			if record, _, _ = store.Get(ctx, job.ID); record.State != StateLeased {
+				t.Fatalf("state after claim = %s, want leased", record.State)
+			}
+			if err := store.Ack(ctx, lease, Result{SessionID: "session-42"}); err != nil {
+				t.Fatal(err)
+			}
+			record, ok, err = store.Get(ctx, job.ID)
+			if err != nil || !ok {
+				t.Fatalf("get completed job = %+v, %v, %v", record, ok, err)
+			}
+			if record.State != StateDone || record.SessionID != "session-42" {
+				t.Fatalf("completed record = %+v", record)
+			}
+			if _, ok, err := store.Get(ctx, "missing"); ok || err != nil {
+				t.Fatalf("unknown job = %v, %v", ok, err)
+			}
+
+			doomed := testJob("doomed")
+			if err := store.Accept(ctx, doomed); err != nil {
+				t.Fatal(err)
+			}
+			failure := claimOne(t, store)
+			if err := store.Nack(ctx, failure, errors.New("provider rejected the prompt")); err != nil {
+				t.Fatal(err)
+			}
+			dead, err := store.Dead(ctx, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(dead) != 1 || dead[0].Job.ID != doomed.ID {
+				t.Fatalf("dead list = %+v", dead)
+			}
+			if dead[0].State != StateDead || !strings.Contains(dead[0].Error, "provider rejected") {
+				t.Fatalf("dead record = %+v", dead[0])
+			}
+
+			if err := store.Retry(ctx, doomed.ID); err != nil {
+				t.Fatal(err)
+			}
+			record, ok, err = store.Get(ctx, doomed.ID)
+			if err != nil || !ok {
+				t.Fatalf("get retried job = %+v, %v, %v", record, ok, err)
+			}
+			if record.State != StateQueued || record.Job.Attempts != 0 {
+				t.Fatalf("retried record = %+v", record)
+			}
+			if dead, _ := store.Dead(ctx, 10); len(dead) != 0 {
+				t.Fatalf("dead list after retry = %+v", dead)
+			}
+			if err := store.Retry(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("retry unknown job = %v, want ErrNotFound", err)
+			}
+
+			failure = claimOne(t, store)
+			if err := store.Nack(ctx, failure, errors.New("second failure")); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Delete(ctx, doomed.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok, _ := store.Get(ctx, doomed.ID); ok {
+				t.Fatal("deleted job is still readable")
+			}
+			if err := store.Delete(ctx, doomed.ID); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("second delete = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
+func TestStoreExpiresDoneTombstones(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.MaxJobs = 0
+	cfg.MaxAttempts = 1
+	cfg.TombstoneTTL = config.Duration(100 * time.Millisecond)
+	for name, store := range backendsWith(t, cfg) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			job := testJob("tombstone")
+			if err := store.Accept(ctx, job); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Ack(ctx, claimOne(t, store), Result{SessionID: "sess"}); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(150 * time.Millisecond)
+			// bbolt and memory purge on the next accept; Redis expires the key.
+			if err := store.Accept(ctx, testJob("")); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok, err := store.Get(ctx, job.ID); ok || err != nil {
+				t.Fatalf("expired tombstone = %v, %v; want absent", ok, err)
 			}
 		})
 	}

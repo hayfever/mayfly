@@ -223,6 +223,7 @@ type QueueConfig struct {
 	RetryBase         Duration         `yaml:"retry_base"`
 	VisibilityTimeout Duration         `yaml:"visibility_timeout"`
 	DedupeTTL         Duration         `yaml:"dedupe_ttl"`
+	TombstoneTTL      Duration         `yaml:"tombstone_ttl"`
 	PollInterval      Duration         `yaml:"poll_interval"`
 	Bolt              BoltQueueConfig  `yaml:"bbolt"`
 	Redis             RedisQueueConfig `yaml:"redis"`
@@ -327,6 +328,7 @@ func Default() *Config {
 			RetryBase:         Duration(5 * time.Second),
 			VisibilityTimeout: Duration(5 * time.Minute),
 			DedupeTTL:         Duration(72 * time.Hour),
+			TombstoneTTL:      Duration(time.Hour),
 			PollInterval:      Duration(2 * time.Second),
 			Redis:             RedisQueueConfig{KeyPrefix: "mayfly"},
 		},
@@ -409,6 +411,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Queue.DedupeTTL.Std() <= 0 {
 		c.Queue.DedupeTTL = Duration(72 * time.Hour)
+	}
+	if c.Queue.TombstoneTTL.Std() < 0 {
+		c.Queue.TombstoneTTL = 0
 	}
 	if c.Queue.PollInterval.Std() <= 0 {
 		c.Queue.PollInterval = Duration(2 * time.Second)
@@ -605,6 +610,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Queue.MaxJobs < 0 || c.Queue.MaxAttempts < 0 {
 		return fmt.Errorf("queue.max_jobs and queue.max_attempts must not be negative")
+	}
+	if c.Queue.TombstoneTTL.Std() < 0 {
+		return fmt.Errorf("queue.tombstone_ttl must not be negative")
 	}
 	// A session start can take up to 90s (runner start timeout); a shorter
 	// lease would expire while the first worker is still creating the session.

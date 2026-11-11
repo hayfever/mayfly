@@ -240,6 +240,11 @@ func TestValidateQueueBounds(t *testing.T) {
 	if err := shortDedupe.Validate(); err == nil {
 		t.Fatal("expected a dedupe_ttl lower bound error")
 	}
+	negativeTombstone := validBase()
+	negativeTombstone.Queue.TombstoneTTL = Duration(-time.Second)
+	if err := negativeTombstone.Validate(); err == nil {
+		t.Fatal("expected a tombstone_ttl error")
+	}
 }
 
 func TestTriggerRateLimitDefaults(t *testing.T) {

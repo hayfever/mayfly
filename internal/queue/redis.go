@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -23,6 +24,7 @@ type redisStore struct {
 	jobs   string
 	dead   string
 	seen   string
+	done   string
 
 	accept *redis.Script
 	claim  *redis.Script
@@ -102,6 +104,7 @@ func newRedis(ctx context.Context, cfg config.QueueConfig) (*redisStore, error) 
 		jobs:   tag + ":jobs",
 		dead:   tag + ":dead",
 		seen:   tag + ":seen:",
+		done:   tag + ":done:",
 		accept: redis.NewScript(acceptScript),
 		claim:  redis.NewScript(claimScript),
 		settle: redis.NewScript(settleScript),
@@ -180,10 +183,11 @@ func (s *redisStore) Claim(ctx context.Context, max int) ([]Lease, error) {
 		payload, _ := values[i+1].(string)
 		var job Job
 		if err := json.Unmarshal([]byte(payload), &job); err != nil {
+			buried, _ := json.Marshal(deadRecord{Job: Job{ID: id}, Error: "payload does not decode", FailedAt: time.Now().UTC()})
 			pipe := s.client.TxPipeline()
 			pipe.ZRem(ctx, s.queue, id)
 			pipe.HDel(ctx, s.jobs, id)
-			pipe.HSet(ctx, s.dead, id, payload)
+			pipe.HSet(ctx, s.dead, id, buried)
 			if _, perr := pipe.Exec(ctx); perr != nil {
 				return leases, fmt.Errorf("queue bury undecodable job %s: %w", id, perr)
 			}
@@ -194,15 +198,20 @@ func (s *redisStore) Claim(ctx context.Context, max int) ([]Lease, error) {
 	return leases, nil
 }
 
-func (s *redisStore) Ack(ctx context.Context, lease Lease) error {
+func (s *redisStore) Ack(ctx context.Context, lease Lease, result Result) error {
+	record, err := json.Marshal(doneRecord{Job: lease.Job, SessionID: result.SessionID, FinishedAt: time.Now().UTC()})
+	if err != nil {
+		return err
+	}
 	pipe := s.client.TxPipeline()
 	pipe.ZRem(ctx, s.queue, lease.ID)
 	pipe.HDel(ctx, s.jobs, lease.ID)
-	_, err := pipe.Exec(ctx)
+	pipe.Set(ctx, s.done+lease.ID, record, s.cfg.TombstoneTTL.Std())
+	_, err = pipe.Exec(ctx)
 	return err
 }
 
-func (s *redisStore) Nack(ctx context.Context, lease Lease, _ error) error {
+func (s *redisStore) Nack(ctx context.Context, lease Lease, cause error) error {
 	payload, err := s.client.HGet(ctx, s.jobs, lease.ID).Bytes()
 	if err != nil {
 		if err == redis.Nil {
@@ -215,13 +224,16 @@ func (s *redisStore) Nack(ctx context.Context, lease Lease, _ error) error {
 		return err
 	}
 	job.Attempts++
-	updated, err := json.Marshal(job)
-	if err != nil {
-		return err
-	}
 	mode := "retry"
+	var updated []byte
 	if max := s.cfg.MaxAttempts; max > 0 && job.Attempts >= max {
 		mode = "bury"
+		updated, err = json.Marshal(deadRecord{Job: job, Error: causeString(cause), FailedAt: time.Now().UTC()})
+	} else {
+		updated, err = json.Marshal(job)
+	}
+	if err != nil {
+		return err
 	}
 	score := time.Now().UTC().Add(Backoff(job.Attempts, s.cfg.RetryBase.Std())).UnixMilli()
 	return s.runSettle(ctx, lease, mode, score, updated)
@@ -241,6 +253,98 @@ func (s *redisStore) runSettle(ctx context.Context, lease Lease, mode string, sc
 	}
 	if res == 0 {
 		return ErrLeaseLost
+	}
+	return nil
+}
+
+func (s *redisStore) Get(ctx context.Context, id string) (Record, bool, error) {
+	payload, err := s.client.HGet(ctx, s.jobs, id).Bytes()
+	if err == nil {
+		var job Job
+		if err := json.Unmarshal(payload, &job); err != nil {
+			return Record{}, false, err
+		}
+		record := Record{Job: job, State: StateQueued}
+		if score, err := s.client.ZScore(ctx, s.queue, id).Result(); err == nil {
+			if time.Now().UTC().UnixMilli() < int64(score) {
+				record.State = StateLeased
+			}
+		}
+		return record, true, nil
+	}
+	if err != redis.Nil {
+		return Record{}, false, err
+	}
+	if payload, err := s.client.HGet(ctx, s.dead, id).Bytes(); err == nil {
+		dead := decodeDead(payload)
+		return Record{Job: dead.Job, State: StateDead, Error: dead.Error, FailedAt: dead.FailedAt}, true, nil
+	} else if err != redis.Nil {
+		return Record{}, false, err
+	}
+	payload, err = s.client.Get(ctx, s.done+id).Bytes()
+	if err == redis.Nil {
+		return Record{}, false, nil
+	}
+	if err != nil {
+		return Record{}, false, err
+	}
+	var done doneRecord
+	if err := json.Unmarshal(payload, &done); err != nil {
+		return Record{}, false, err
+	}
+	return Record{Job: done.Job, State: StateDone, SessionID: done.SessionID, FinishedAt: done.FinishedAt}, true, nil
+}
+
+func (s *redisStore) Dead(ctx context.Context, limit int) ([]Record, error) {
+	entries, err := s.client.HGetAll(ctx, s.dead).Result()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Record, 0, len(entries))
+	for _, payload := range entries {
+		dead := decodeDead([]byte(payload))
+		out = append(out, Record{Job: dead.Job, State: StateDead, Error: dead.Error, FailedAt: dead.FailedAt})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].FailedAt.After(out[j].FailedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *redisStore) Retry(ctx context.Context, id string) error {
+	payload, err := s.client.HGet(ctx, s.dead, id).Bytes()
+	if err == redis.Nil {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	dead := decodeDead(payload)
+	job := dead.Job
+	if job.ID == "" {
+		job.ID = id
+	}
+	job.Attempts = 0
+	encoded, err := json.Marshal(job)
+	if err != nil {
+		return err
+	}
+	pipe := s.client.TxPipeline()
+	pipe.HDel(ctx, s.dead, id)
+	pipe.HSet(ctx, s.jobs, id, encoded)
+	pipe.ZAdd(ctx, s.queue, redis.Z{Score: float64(time.Now().UTC().UnixMilli()), Member: id})
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+func (s *redisStore) Delete(ctx context.Context, id string) error {
+	removed, err := s.client.HDel(ctx, s.dead, id).Result()
+	if err != nil {
+		return err
+	}
+	if removed == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

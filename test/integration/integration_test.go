@@ -136,6 +136,7 @@ func TestWebhookToArtifact(t *testing.T) {
 	}
 	// The worker creates the session after the webhook is answered.
 	id := waitForSession(t, base, 20*time.Second)
+	waitForJobSession(t, base, hook.JobID, id, 10*time.Second)
 
 	events := waitForAssistant(t, base, id, 1, 40*time.Second)
 	if !hasMCPResult(events) {
@@ -408,6 +409,31 @@ func waitForSession(t *testing.T, base string, timeout time.Duration) string {
 	}
 	t.Fatal("worker did not create a session in time")
 	return ""
+}
+
+// waitForJobSession checks the queue tombstone that links a delivery to the
+// session it created.
+func waitForJobSession(t *testing.T, base, jobID, sessionID string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp, err := admin(http.MethodGet, base+"/api/v1/queue/jobs/"+jobID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out struct {
+			Job struct {
+				State     string `json:"state"`
+				SessionID string `json:"session_id"`
+			} `json:"job"`
+		}
+		decode(t, resp, &out)
+		if out.Job.State == "done" && out.Job.SessionID == sessionID {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("job %s did not record session %s", jobID, sessionID)
 }
 
 func waitForAssistant(t *testing.T, base, id string, want int, timeout time.Duration) []model.Event {

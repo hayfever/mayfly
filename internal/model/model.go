@@ -24,6 +24,7 @@ type TriggerInfo struct {
 	Name     string `json:"name,omitempty"`
 	Event    string `json:"event,omitempty"`
 	Delivery string `json:"delivery,omitempty"`
+	JobID    string `json:"job_id,omitempty"`
 	Actor    string `json:"actor,omitempty"`
 }
 

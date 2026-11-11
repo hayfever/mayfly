@@ -40,14 +40,14 @@ func TestWorkerRunsAndSettlesJobs(t *testing.T) {
 
 	var mu sync.Mutex
 	handled := map[string]int{}
-	handler := func(_ context.Context, job Job) error {
+	handler := func(_ context.Context, job Job) (Result, error) {
 		mu.Lock()
 		handled[job.Options.Prompt]++
 		mu.Unlock()
 		if job.Options.Prompt == "fail" {
-			return errors.New("boom")
+			return Result{}, errors.New("boom")
 		}
-		return nil
+		return Result{SessionID: "sess-" + job.ID}, nil
 	}
 	ok := testJob("ok-delivery")
 	ok.Options.Prompt = "ok"
@@ -97,7 +97,7 @@ func TestWorkerRunsAndSettlesJobs(t *testing.T) {
 	if lease.Job.Attempts != 1 {
 		t.Fatalf("attempts after one failure = %d, want 1", lease.Job.Attempts)
 	}
-	if err := store.Ack(context.Background(), lease); err != nil {
+	if err := store.Ack(context.Background(), lease, Result{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -115,11 +115,11 @@ func TestWorkerHonorsCapacity(t *testing.T) {
 	var mu sync.Mutex
 	slots := 0
 	runs := 0
-	handler := func(_ context.Context, _ Job) error {
+	handler := func(_ context.Context, _ Job) (Result, error) {
 		mu.Lock()
 		runs++
 		mu.Unlock()
-		return nil
+		return Result{}, nil
 	}
 	worker := NewWorker(store, handler, 2, func() int {
 		mu.Lock()
@@ -158,13 +158,13 @@ func TestWorkerReleaseDoesNotCountAttempt(t *testing.T) {
 	}
 
 	var once sync.Once
-	handler := func(_ context.Context, _ Job) error {
+	handler := func(_ context.Context, _ Job) (Result, error) {
 		first := false
 		once.Do(func() { first = true })
 		if first {
-			return ErrRetryLater
+			return Result{}, ErrRetryLater
 		}
-		return nil
+		return Result{}, nil
 	}
 	cancel, done := startWorker(t, NewWorker(store, handler, 1, nil, 10*time.Millisecond, workerLogger()))
 	waitFor(t, 2*time.Second, func() bool {
@@ -175,7 +175,7 @@ func TestWorkerReleaseDoesNotCountAttempt(t *testing.T) {
 	if lease.Job.Attempts != 0 {
 		t.Fatalf("release counted an attempt: %d", lease.Job.Attempts)
 	}
-	if err := store.Ack(context.Background(), lease); err != nil {
+	if err := store.Ack(context.Background(), lease, Result{}); err != nil {
 		t.Fatal(err)
 	}
 	cancel()
@@ -188,7 +188,7 @@ func TestWorkerStopsOnCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	worker := NewWorker(store, func(context.Context, Job) error { return nil }, 1, nil, 10*time.Millisecond, workerLogger())
+	worker := NewWorker(store, func(context.Context, Job) (Result, error) { return Result{}, nil }, 1, nil, 10*time.Millisecond, workerLogger())
 	cancel, done := startWorker(t, worker)
 	cancel()
 	select {
@@ -224,7 +224,7 @@ func TestWorkerDoesNotClaimPastFreeSlots(t *testing.T) {
 	const slots = 2
 	var mu sync.Mutex
 	running, peak, reserved, retries, done := 0, 0, 0, 0, 0
-	handler := func(_ context.Context, _ Job) error {
+	handler := func(_ context.Context, _ Job) (Result, error) {
 		mu.Lock()
 		running++
 		if running > peak {
@@ -237,7 +237,7 @@ func TestWorkerDoesNotClaimPastFreeSlots(t *testing.T) {
 		if reserved >= slots {
 			retries++
 			mu.Unlock()
-			return ErrRetryLater
+			return Result{}, ErrRetryLater
 		}
 		reserved++
 		mu.Unlock()
@@ -246,7 +246,7 @@ func TestWorkerDoesNotClaimPastFreeSlots(t *testing.T) {
 		reserved--
 		done++
 		mu.Unlock()
-		return nil
+		return Result{}, nil
 	}
 	free := func() int { mu.Lock(); defer mu.Unlock(); return slots - reserved }
 	cancel, stopped := startWorker(t, NewWorker(store, handler, 8, free, 5*time.Millisecond, workerLogger()))
@@ -258,4 +258,30 @@ func TestWorkerDoesNotClaimPastFreeSlots(t *testing.T) {
 	if peak > slots || retries != 0 {
 		t.Fatalf("peak handlers = %d (want <= %d), capacity retries = %d (want 0)", peak, slots, retries)
 	}
+}
+
+func TestWorkerRecordsSessionForLookup(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.TombstoneTTL = config.Duration(time.Hour)
+	store, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	job := testJob("correlate")
+	if err := store.Accept(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	handler := func(context.Context, Job) (Result, error) {
+		return Result{SessionID: "sess-42"}, nil
+	}
+	cancel, done := startWorker(t, NewWorker(store, handler, 1, nil, 10*time.Millisecond, workerLogger()))
+	defer func() {
+		cancel()
+		<-done
+	}()
+	waitFor(t, time.Second, func() bool {
+		record, ok, err := store.Get(context.Background(), job.ID)
+		return err == nil && ok && record.State == StateDone && record.SessionID == "sess-42"
+	})
 }
