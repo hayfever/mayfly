@@ -161,3 +161,37 @@ func TestLoadLiteLLMExample(t *testing.T) {
 		}
 	}
 }
+
+func validBase() *Config {
+	cfg := Default()
+	cfg.Runtime.Backend = "local"
+	cfg.Runtime.AgentBinary = "agent"
+	cfg.LLM.BaseURL = "https://example.com/v1"
+	cfg.LLM.Model = "model"
+	cfg.applyDefaults()
+	return cfg
+}
+
+func TestValidateS3CredentialSources(t *testing.T) {
+	s3Base := func() *Config {
+		cfg := validBase()
+		cfg.Artifacts.Store = "s3"
+		cfg.Artifacts.S3.Bucket = "bucket"
+		cfg.Artifacts.S3.Region = "us-east-1"
+		return cfg
+	}
+	if err := s3Base().Validate(); err != nil {
+		t.Fatalf("default credential chain must be allowed: %v", err)
+	}
+	partial := s3Base()
+	partial.Artifacts.S3.AccessKeyEnv = "AWS_ACCESS_KEY_ID"
+	if err := partial.Validate(); err == nil {
+		t.Fatal("expected a partial static credential error")
+	}
+	both := s3Base()
+	both.Artifacts.S3.AccessKeyEnv = "AWS_ACCESS_KEY_ID"
+	both.Artifacts.S3.SecretKeyEnv = "AWS_SECRET_ACCESS_KEY"
+	if err := both.Validate(); err != nil {
+		t.Fatalf("static credentials must be allowed: %v", err)
+	}
+}

@@ -6,10 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
-	"net/http"
 	"os"
 	"testing"
-	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/hayfever/mayfly/internal/config"
 )
@@ -28,25 +31,26 @@ func TestS3CompatibleStore(t *testing.T) {
 		t.Fatal("MAYFLY_S3_TEST_ACCESS_KEY, MAYFLY_S3_TEST_SECRET_KEY, and MAYFLY_S3_TEST_BUCKET are required")
 	}
 	region := "us-east-1"
+	ctx := context.Background()
 
-	req, err := http.NewRequest(http.MethodPut, endpoint+"/"+bucket, nil)
+	adminCfg, err := awsconfig.LoadDefaultConfig(ctx,
+		awsconfig.WithRegion(region),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(access, secret, "")),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	empty := sha256.Sum256(nil)
-	signV4(req, hex.EncodeToString(empty[:]), access, secret, "", region, time.Now())
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusConflict {
-		t.Fatalf("create bucket status = %d", resp.StatusCode)
+	admin := s3.NewFromConfig(adminCfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+		o.UsePathStyle = true
+	})
+	if _, err := admin.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
+		t.Logf("create bucket: %v", err)
 	}
 
 	t.Setenv("MAYFLY_S3_TEST_ACCESS", access)
 	t.Setenv("MAYFLY_S3_TEST_SECRET", secret)
-	store, err := NewS3(config.S3StoreConfig{
+	store, err := NewS3(ctx, config.S3StoreConfig{
 		Endpoint:     endpoint,
 		Region:       region,
 		Bucket:       bucket,
@@ -62,14 +66,14 @@ func TestS3CompatibleStore(t *testing.T) {
 	sum := sha256.Sum256(payload)
 	digest := hex.EncodeToString(sum[:])
 	key := "sessions/live/bundle.tar.gz"
-	uri, err := store.Put(context.Background(), key, bytes.NewReader(payload), int64(len(payload)), digest, "application/gzip")
+	uri, err := store.Put(ctx, key, bytes.NewReader(payload), int64(len(payload)), digest, "application/gzip")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if uri == "" {
 		t.Fatal("empty URI")
 	}
-	rc, size, err := store.Get(context.Background(), key)
+	rc, size, err := store.Get(ctx, key)
 	if err != nil {
 		t.Fatal(err)
 	}

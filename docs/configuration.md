@@ -79,16 +79,18 @@ For multiple providers, point `base_url` at LiteLLM and use its model aliases. S
 | `s3.endpoint` | AWS S3 | Custom S3-compatible endpoint, for example `http://minio:9000` |
 | `s3.region` | — | Signing region |
 | `s3.bucket` | — | Bucket name |
-| `s3.access_key_env` | — | Environment variable with the access key |
-| `s3.secret_key_env` | — | Environment variable with the secret key |
-| `s3.session_token_env` | — | Optional environment variable with a session token |
+| `s3.access_key_env` | — | Environment variable with the access key. Must be set together with `secret_key_env` |
+| `s3.secret_key_env` | — | Environment variable with the secret key. Must be set together with `access_key_env` |
+| `s3.session_token_env` | — | Optional environment variable with a session token for temporary static credentials |
 | `s3.prefix` | — | Object key prefix |
 | `s3.path_style` | `false` | Use path-style URLs (MinIO and most local S3 servers) |
 | `max_bytes` | `256MiB` | Maximum accepted bundle size |
 
 S3-compatible means AWS Signature Version 4 with a configurable endpoint and path style. This covers MinIO, Cloudflare R2, Backblaze B2, and GCS interoperability mode. The native GCS API and Artifact Registry are not implemented; add an `artifact.Store` implementation for them.
 
-Credentials are read from the control plane environment at startup. They are never placed in session pods.
+Credentials come from one of two places. Set `access_key_env` and `secret_key_env` to read static keys from the control-plane environment. Leave both empty to use the default AWS credential chain: environment variables, shared config, web identity (`IRSA`), ECS task role, or EC2 instance metadata. That lets the control plane use an IAM role with no static keys. Credentials never reach session pods. Static keys and environment credentials are read at startup; role credentials from IRSA, ECS, or instance metadata are fetched and refreshed by the SDK.
+
+Mayfly asks the SDK for checksums only when an operation requires one. R2, B2, and older MinIO builds reject the default CRC32 checksum headers, so those stores work without extra configuration. Test the store with one export before you rely on it.
 
 ## agents
 

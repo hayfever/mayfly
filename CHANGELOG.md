@@ -24,10 +24,12 @@ First public release.
 - Versioned CLI, control-plane, and agent builds with commit and date metadata.
 - Kind e2e test covering webhook creation, pod isolation, MCP tools, WebSocket replay, close, artifacts, and TTL expiry.
 - CI and release workflows: tests, Helm lint, kind e2e, multi-arch GHCR images, SBOMs, provenance, CLI archives, and OCI chart publishing.
+- S3 artifact export can use the default AWS credential chain, including IAM roles for service accounts.
 
 ### Changed
 
 - The module path and published images use `github.com/hayfever/mayfly` and `ghcr.io/hayfever`.
+- The S3 store sends checksums only when required, for compatibility with R2, B2, and older MinIO.
 
 ### Known limitations
 

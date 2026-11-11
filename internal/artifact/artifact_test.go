@@ -8,27 +8,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hayfever/mayfly/internal/config"
 )
-
-func TestSignV4KnownVector(t *testing.T) {
-	req, err := http.NewRequest(http.MethodGet, "https://examplebucket.s3.amazonaws.com/test.txt", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Range", "bytes=0-9")
-	empty := sha256.Sum256(nil)
-	signV4(req, hex.EncodeToString(empty[:]), "AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "", "us-east-1", time.Date(2013, 5, 24, 0, 0, 0, 0, time.UTC))
-	want := "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"
-	if got := req.Header.Get("Authorization"); got != want {
-		t.Fatalf("signature mismatch\n got: %s\nwant: %s", got, want)
-	}
-}
 
 func TestLocalStoreRoundTrip(t *testing.T) {
 	store, err := NewLocal(t.TempDir())
@@ -80,20 +65,14 @@ func TestLocalStoreRejectsTraversal(t *testing.T) {
 	}
 }
 
-func TestS3ObjectURL(t *testing.T) {
-	store := &s3Store{
-		cfg:      config.S3StoreConfig{Bucket: "bkt", Prefix: "mayfly", PathStyle: true},
-		endpoint: mustURL(t, "https://s3.example.com"),
+func TestS3ObjectKey(t *testing.T) {
+	store := &s3Store{cfg: config.S3StoreConfig{Bucket: "bkt", Prefix: "mayfly"}}
+	if got := store.objectKey("sessions/a/b.tar.gz"); got != "mayfly/sessions/a/b.tar.gz" {
+		t.Fatalf("key = %q", got)
 	}
-	u := store.objectURL("sessions/a/b.tar.gz")
-	if u.Path != "/bkt/mayfly/sessions/a/b.tar.gz" {
-		t.Fatalf("path = %q", u.Path)
-	}
-	store.cfg.PathStyle = false
-	store.endpoint = mustURL(t, "https://s3.example.com")
-	u = store.objectURL("sessions/a/b.tar.gz")
-	if u.Host != "bkt.s3.example.com" || u.Path != "/mayfly/sessions/a/b.tar.gz" {
-		t.Fatalf("virtual host URL = %s", u.String())
+	empty := &s3Store{cfg: config.S3StoreConfig{Bucket: "bkt"}}
+	if got := empty.objectKey("sessions/a/b.tar.gz"); got != "sessions/a/b.tar.gz" {
+		t.Fatalf("key without prefix = %q", got)
 	}
 }
 
@@ -104,23 +83,21 @@ func TestArtifactKey(t *testing.T) {
 	}
 }
 
-func mustURL(t *testing.T, raw string) *url.URL {
-	t.Helper()
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return u
-}
-
 func TestS3StorePutGet(t *testing.T) {
 	var putPath, putAuth string
+	var checksumHeaders []string
 	var stored []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPut:
 			putPath = r.URL.Path
 			putAuth = r.Header.Get("Authorization")
+			for name := range r.Header {
+				lower := strings.ToLower(name)
+				if strings.HasPrefix(lower, "x-amz-checksum") || lower == "x-amz-sdk-checksum-algorithm" {
+					checksumHeaders = append(checksumHeaders, lower)
+				}
+			}
 			data, _ := io.ReadAll(r.Body)
 			stored = data
 			w.WriteHeader(http.StatusOK)
@@ -137,7 +114,7 @@ func TestS3StorePutGet(t *testing.T) {
 	defer server.Close()
 	t.Setenv("TEST_S3_ACCESS", "access")
 	t.Setenv("TEST_S3_SECRET", "secret")
-	store, err := NewS3(config.S3StoreConfig{
+	store, err := NewS3(context.Background(), config.S3StoreConfig{
 		Endpoint:     server.URL,
 		Region:       "us-east-1",
 		Bucket:       "bkt",
@@ -164,6 +141,11 @@ func TestS3StorePutGet(t *testing.T) {
 	}
 	if !strings.HasPrefix(putAuth, "AWS4-HMAC-SHA256 ") {
 		t.Fatalf("authorization = %q", putAuth)
+	}
+	// S3-compatible stores such as R2, B2, and older MinIO reject the SDK's
+	// default checksum headers.
+	if len(checksumHeaders) > 0 {
+		t.Fatalf("unexpected checksum headers: %v", checksumHeaders)
 	}
 	rc, size, err := store.Get(context.Background(), "sessions/s1/b.tar.gz")
 	if err != nil {

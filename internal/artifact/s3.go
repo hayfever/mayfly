@@ -2,225 +2,139 @@ package artifact
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"path"
-	"sort"
 	"strings"
-	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 
 	"github.com/hayfever/mayfly/internal/config"
 )
 
-// sha256Hex returns the lowercase hex SHA-256 of data.
-func sha256Hex(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-// newS3Store builds an S3-compatible store from configuration.
-func newS3Store(cfg config.S3StoreConfig) (*s3Store, error) {
-	accessKey := os.Getenv(cfg.AccessKeyEnv)
-	secretKey := os.Getenv(cfg.SecretKeyEnv)
-	if accessKey == "" || secretKey == "" {
-		return nil, fmt.Errorf("S3 credentials: environment variables %s and %s must be set", cfg.AccessKeyEnv, cfg.SecretKeyEnv)
+// newS3Store builds an S3-compatible store. When access_key_env and
+// secret_key_env are set, the store uses those static credentials. When both
+// are empty, it uses the default AWS chain: environment, shared config, web
+// identity, ECS, or instance metadata. That covers IAM roles for service
+// accounts without static keys.
+func newS3Store(ctx context.Context, cfg config.S3StoreConfig) (*s3Store, error) {
+	options := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(cfg.Region)}
+	if cfg.AccessKeyEnv != "" || cfg.SecretKeyEnv != "" {
+		accessKey := os.Getenv(cfg.AccessKeyEnv)
+		secretKey := os.Getenv(cfg.SecretKeyEnv)
+		if accessKey == "" || secretKey == "" {
+			return nil, fmt.Errorf("S3 credentials: environment variables %s and %s must be set", cfg.AccessKeyEnv, cfg.SecretKeyEnv)
+		}
+		var sessionToken string
+		if cfg.SessionTokenEnv != "" {
+			sessionToken = os.Getenv(cfg.SessionTokenEnv)
+		}
+		options = append(options, awsconfig.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(accessKey, secretKey, sessionToken),
+		))
 	}
-	var token string
-	if cfg.SessionTokenEnv != "" {
-		token = os.Getenv(cfg.SessionTokenEnv)
-	}
-	endpoint, err := parseEndpoint(cfg.Endpoint, cfg.Region)
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, options...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("S3 credentials: %w", err)
 	}
+	endpoint := ""
+	if cfg.Endpoint != "" {
+		endpoint, err = parseEndpoint(cfg.Endpoint)
+		if err != nil {
+			return nil, err
+		}
+	}
+	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+		if endpoint != "" {
+			o.BaseEndpoint = aws.String(endpoint)
+		}
+		o.UsePathStyle = cfg.PathStyle
+		// The SDK defaults add CRC32 checksum headers and trailer checksums to
+		// every upload. R2, B2, and older MinIO reject them, so send checksums
+		// only when an operation requires one.
+		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
+	})
 	return &s3Store{
-		cfg:        cfg,
-		endpoint:   endpoint,
-		accessKey:  accessKey,
-		secretKey:  secretKey,
-		sessionTok: token,
-		client:     &http.Client{Timeout: 2 * time.Minute},
+		cfg:    cfg,
+		client: client,
 	}, nil
 }
 
 // NewS3 exposes the S3 store constructor for tests and embedders.
-func NewS3(cfg config.S3StoreConfig) (Store, error) { return newS3Store(cfg) }
-
-type s3Store struct {
-	cfg        config.S3StoreConfig
-	endpoint   *url.URL
-	accessKey  string
-	secretKey  string
-	sessionTok string
-	client     *http.Client
+func NewS3(ctx context.Context, cfg config.S3StoreConfig) (Store, error) {
+	return newS3Store(ctx, cfg)
 }
 
-func parseEndpoint(raw, region string) (*url.URL, error) {
-	if raw == "" {
-		return &url.URL{Scheme: "https", Host: "s3." + region + ".amazonaws.com"}, nil
-	}
+type s3Store struct {
+	cfg    config.S3StoreConfig
+	client *s3.Client
+}
+
+// parseEndpoint returns the configured endpoint as an absolute URL.
+func parseEndpoint(raw string) (string, error) {
 	if !strings.Contains(raw, "://") {
 		raw = "https://" + raw
 	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return nil, fmt.Errorf("invalid s3 endpoint: %w", err)
+	if !strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://") {
+		return "", fmt.Errorf("invalid s3 endpoint %q: scheme must be http or https", raw)
 	}
-	if u.Host == "" {
-		return nil, fmt.Errorf("invalid s3 endpoint %q", raw)
-	}
-	return u, nil
+	return strings.TrimRight(raw, "/"), nil
 }
 
-func (s *s3Store) objectURL(key string) *url.URL {
-	u := *s.endpoint
-	basePath := strings.TrimSuffix(u.Path, "/")
-	keyPath := path.Join("/", s.cfg.Prefix, key)
-	if s.cfg.PathStyle {
-		u.Path = basePath + "/" + s.cfg.Bucket + keyPath
-	} else {
-		u.Host = s.cfg.Bucket + "." + u.Host
-		u.Path = basePath + keyPath
-	}
-	return &u
+// objectKey joins the configured prefix and the artifact key.
+func (s *s3Store) objectKey(key string) string {
+	return strings.TrimPrefix(path.Join("/", s.cfg.Prefix, key), "/")
 }
 
-func (s *s3Store) Put(ctx context.Context, key string, r io.Reader, size int64, digest, contentType string) (string, error) {
-	u := s.objectURL(key)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u.String(), io.LimitReader(r, size))
-	if err != nil {
-		return "", err
-	}
-	req.ContentLength = size
+func (s *s3Store) Put(ctx context.Context, key string, r io.Reader, size int64, _ string, contentType string) (string, error) {
 	if contentType == "" {
 		contentType = "application/gzip"
 	}
-	req.Header.Set("Content-Type", contentType)
-	signV4(req, digest, s.accessKey, s.secretKey, s.sessionTok, s.cfg.Region, time.Now())
-	resp, err := s.client.Do(req)
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(s.cfg.Bucket),
+		Key:           aws.String(s.objectKey(key)),
+		Body:          r,
+		ContentLength: aws.Int64(size),
+		ContentType:   aws.String(contentType),
+	})
 	if err != nil {
 		return "", fmt.Errorf("s3 put: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("s3 put: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-	return "s3://" + s.cfg.Bucket + "/" + path.Join(s.cfg.Prefix, key), nil
+	return "s3://" + s.cfg.Bucket + "/" + s.objectKey(key), nil
 }
 
 func (s *s3Store) Get(ctx context.Context, key string) (io.ReadCloser, int64, error) {
-	u := s.objectURL(key)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.cfg.Bucket),
+		Key:    aws.String(s.objectKey(key)),
+	})
 	if err != nil {
-		return nil, 0, err
-	}
-	signV4(req, sha256Hex(nil), s.accessKey, s.secretKey, s.sessionTok, s.cfg.Region, time.Now())
-	resp, err := s.client.Do(req)
-	if err != nil {
+		if isNotFound(err) {
+			return nil, 0, ErrNotFound
+		}
 		return nil, 0, fmt.Errorf("s3 get: %w", err)
 	}
-	if resp.StatusCode == http.StatusNotFound {
-		_ = resp.Body.Close()
-		return nil, 0, ErrNotFound
+	var size int64
+	if out.ContentLength != nil {
+		size = *out.ContentLength
 	}
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		_ = resp.Body.Close()
-		return nil, 0, fmt.Errorf("s3 get: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	return resp.Body, resp.ContentLength, nil
+	return out.Body, size, nil
 }
 
-// signV4 signs req with AWS Signature Version 4 for the S3 service. It signs
-// every header except Authorization, User-Agent, and Accept-Encoding.
-func signV4(req *http.Request, payloadHash, accessKey, secretKey, sessionToken, region string, now time.Time) {
-	now = now.UTC()
-	amzDate := now.Format("20060102T150405Z")
-	dateStamp := now.Format("20060102")
-	if req.Header == nil {
-		req.Header = http.Header{}
-	}
-	req.Header.Set("X-Amz-Date", amzDate)
-	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
-	if sessionToken != "" {
-		req.Header.Set("X-Amz-Security-Token", sessionToken)
-	}
-
-	host := req.Host
-	if host == "" {
-		host = req.URL.Host
-	}
-	headers := map[string]string{"host": host}
-	for name, values := range req.Header {
-		lower := strings.ToLower(name)
-		switch lower {
-		case "authorization", "user-agent", "accept-encoding":
-			continue
+func isNotFound(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "NoSuchKey", "NotFound", "404":
+			return true
 		}
-		trimmed := make([]string, 0, len(values))
-		for _, v := range values {
-			trimmed = append(trimmed, strings.Join(strings.Fields(v), " "))
-		}
-		headers[lower] = strings.Join(trimmed, ",")
 	}
-	names := make([]string, 0, len(headers))
-	for name := range headers {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	var canonicalHeaders strings.Builder
-	for _, name := range names {
-		canonicalHeaders.WriteString(name)
-		canonicalHeaders.WriteString(":")
-		canonicalHeaders.WriteString(headers[name])
-		canonicalHeaders.WriteString("\n")
-	}
-	signedHeaders := strings.Join(names, ";")
-
-	uri := req.URL.EscapedPath()
-	if uri == "" {
-		uri = "/"
-	}
-	canonicalRequest := strings.Join([]string{
-		req.Method,
-		uri,
-		req.URL.Query().Encode(),
-		canonicalHeaders.String(),
-		signedHeaders,
-		payloadHash,
-	}, "\n")
-
-	scope := dateStamp + "/" + region + "/s3/aws4_request"
-	stringToSign := strings.Join([]string{
-		"AWS4-HMAC-SHA256",
-		amzDate,
-		scope,
-		sha256Hex([]byte(canonicalRequest)),
-	}, "\n")
-
-	kDate := hmacSHA256([]byte("AWS4"+secretKey), dateStamp)
-	kRegion := hmacSHA256(kDate, region)
-	kService := hmacSHA256(kRegion, "s3")
-	kSigning := hmacSHA256(kService, "aws4_request")
-	signature := hex.EncodeToString(hmacSHA256(kSigning, stringToSign))
-
-	req.Header.Set("Authorization", fmt.Sprintf(
-		"AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
-		accessKey, scope, signedHeaders, signature,
-	))
-}
-
-func hmacSHA256(key []byte, data string) []byte {
-	h := hmac.New(sha256.New, key)
-	h.Write([]byte(data))
-	return h.Sum(nil)
+	return false
 }

@@ -70,7 +70,7 @@ func TestWebhookToArtifact(t *testing.T) {
 		Timeout:         config.Duration(5 * time.Second),
 	}}
 
-	store, err := artifact.New(cfg.Artifacts)
+	store, err := artifact.New(context.Background(), cfg.Artifacts)
 	if err != nil {
 		t.Fatal(err)
 	}

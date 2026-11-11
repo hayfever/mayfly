@@ -21,19 +21,19 @@ var ErrNotFound = errors.New("artifact not found")
 // Store persists session bundles.
 type Store interface {
 	// Put writes size bytes from r under key. sha256Hex is the lowercase hex
-	// digest of the payload and is used for S3 request signing.
+	// digest of the payload the caller already computed.
 	Put(ctx context.Context, key string, r io.Reader, size int64, sha256Hex, contentType string) (string, error)
 	// Get opens a stored artifact.
 	Get(ctx context.Context, key string) (io.ReadCloser, int64, error)
 }
 
 // New builds the configured store.
-func New(cfg config.ArtifactsConfig) (Store, error) {
+func New(ctx context.Context, cfg config.ArtifactsConfig) (Store, error) {
 	switch cfg.Store {
 	case "local":
 		return NewLocal(cfg.Local.Dir)
 	case "s3":
-		return NewS3(cfg.S3)
+		return NewS3(ctx, cfg.S3)
 	default:
 		return nil, fmt.Errorf("unsupported artifact store %q", cfg.Store)
 	}

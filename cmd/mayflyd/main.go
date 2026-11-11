@@ -53,7 +53,7 @@ func main() {
 		logger.Warn("MAYFLY_API_TOKEN is not set; generated a session token for this process", "admin_token", cfg.AdminToken)
 	}
 
-	store, err := artifact.New(cfg.Artifacts)
+	store, err := artifact.New(context.Background(), cfg.Artifacts)
 	if err != nil {
 		logger.Error("configure artifact store", "error", err)
 		os.Exit(2)

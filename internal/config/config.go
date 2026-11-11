@@ -465,8 +465,8 @@ func (c *Config) Validate() error {
 		if c.Artifacts.S3.Bucket == "" || c.Artifacts.S3.Region == "" {
 			return fmt.Errorf("artifacts.s3.bucket and artifacts.s3.region are required")
 		}
-		if c.Artifacts.S3.AccessKeyEnv == "" || c.Artifacts.S3.SecretKeyEnv == "" {
-			return fmt.Errorf("artifacts.s3.access_key_env and artifacts.s3.secret_key_env are required")
+		if (c.Artifacts.S3.AccessKeyEnv == "") != (c.Artifacts.S3.SecretKeyEnv == "") {
+			return fmt.Errorf("artifacts.s3.access_key_env and artifacts.s3.secret_key_env must be set together; leave both empty to use the default AWS credential chain")
 		}
 	default:
 		return fmt.Errorf("artifacts.store must be local or s3, got %q", c.Artifacts.Store)

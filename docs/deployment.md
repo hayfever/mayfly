@@ -136,6 +136,19 @@ For MinIO:
     path_style: true
 ```
 
+On AWS with a service-account role, omit the key variables and let the SDK use the pod's IAM role:
+
+```yaml
+artifacts:
+  store: s3
+  s3:
+    region: us-east-1
+    bucket: mayfly-artifacts
+    prefix: prod
+```
+
+The control plane then picks up web identity (`IRSA`), ECS task role, or instance metadata. `access_key_env` and `secret_key_env` must be set together or left empty; one alone is a startup error. The role needs `s3:GetObject` and `s3:PutObject` on the prefix. `/readyz` does not call the store, so a bucket outage does not remove the replica from the Service and does not drop live sessions.
+
 For GCS interoperability, use the GCS XML endpoint and HMAC keys. Native GCS JSON API support requires a new `artifact.Store`.
 
 The control plane writes and reads bundles. Session pods never receive storage credentials. Downloads still work through `GET /api/v1/sessions/{id}/artifact`; the API streams from the store.
