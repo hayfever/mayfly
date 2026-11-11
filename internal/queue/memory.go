@@ -42,7 +42,7 @@ func (s *memoryStore) Accept(_ context.Context, job Job) error {
 		}
 	}
 	if job.Delivery != "" {
-		if _, ok := s.seen[job.Delivery]; ok {
+		if _, ok := s.seen[job.ID]; ok {
 			return ErrDuplicate
 		}
 	}
@@ -51,7 +51,7 @@ func (s *memoryStore) Accept(_ context.Context, job Job) error {
 	}
 	s.jobs[job.ID] = &memEntry{job: job, readyAt: now}
 	if job.Delivery != "" {
-		s.seen[job.Delivery] = now.Add(s.cfg.DedupeTTL.Std())
+		s.seen[job.ID] = now.Add(s.cfg.DedupeTTL.Std())
 	}
 	return nil
 }

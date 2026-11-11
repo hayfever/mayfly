@@ -57,12 +57,12 @@ func (s *boltStore) Accept(_ context.Context, job Job) error {
 		seen := tx.Bucket(bucketSeen)
 		ready := tx.Bucket(bucketReady)
 		if job.Delivery != "" {
-			if raw := seen.Get([]byte(job.Delivery)); raw != nil {
+			if raw := seen.Get([]byte(job.ID)); raw != nil {
 				expiry := time.Unix(0, int64(binary.BigEndian.Uint64(raw)))
 				if now.Before(expiry) {
 					return ErrDuplicate
 				}
-				if err := seen.Delete([]byte(job.Delivery)); err != nil {
+				if err := seen.Delete([]byte(job.ID)); err != nil {
 					return err
 				}
 			}
@@ -82,7 +82,7 @@ func (s *boltStore) Accept(_ context.Context, job Job) error {
 		if job.Delivery != "" {
 			expiry := make([]byte, 8)
 			binary.BigEndian.PutUint64(expiry, uint64(now.Add(s.cfg.DedupeTTL.Std()).UnixNano()))
-			if err := seen.Put([]byte(job.Delivery), expiry); err != nil {
+			if err := seen.Put([]byte(job.ID), expiry); err != nil {
 				return err
 			}
 		}

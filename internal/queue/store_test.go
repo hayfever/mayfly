@@ -156,6 +156,25 @@ func TestStoreDedupe(t *testing.T) {
 	}
 }
 
+func TestStoreDedupeIsPerTrigger(t *testing.T) {
+	for name, store := range backends(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			opts := session.CreateOptions{Prompt: "p", Trigger: model.TriggerInfo{Kind: "generic"}}
+			now := time.Now()
+			if err := store.Accept(ctx, NewJob("trigger-a", "key-1", opts, now)); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Accept(ctx, NewJob("trigger-b", "key-1", opts, now)); err != nil {
+				t.Fatalf("same key on another trigger = %v, want nil", err)
+			}
+			if err := store.Accept(ctx, NewJob("trigger-a", "key-1", opts, now)); !errors.Is(err, ErrDuplicate) {
+				t.Fatalf("repeat on the same trigger = %v, want ErrDuplicate", err)
+			}
+		})
+	}
+}
+
 func TestStoreVisibilityExpiryReclaims(t *testing.T) {
 	for name, store := range backends(t) {
 		t.Run(name, func(t *testing.T) {
