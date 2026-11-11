@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# End-to-end suite. See docs/testing.md.
+#
+#   hack/e2e.sh [all|up|test|down]     (default: all = up, test, down)
+#
+# By default it creates a kind cluster with Calico, builds and loads local
+# images, and installs the local Helm chart. Set E2E_KUBECONTEXT to run against
+# an existing cluster instead; images are then pushed to E2E_REGISTRY.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+CLUSTER="${E2E_CLUSTER:-mayfly-e2e}"
+NAMESPACE="${E2E_NAMESPACE:-mayfly-e2e}"
+RELEASE="${E2E_RELEASE:-mayfly}"
+QUEUE="${E2E_QUEUE:-bbolt}"                 # bbolt or redis
+CALICO_VERSION="${E2E_CALICO_VERSION:-v3.33.0}"
+KEEP="${E2E_KEEP:-0}"                       # 1 keeps the cluster after "all"
+ARTIFACTS="${E2E_ARTIFACTS:-$ROOT/.e2e}"    # logs and diagnostics
+GO_TEST_FLAGS="${E2E_GO_TEST_FLAGS:-}"      # e.g. -run TestNetworkIsolation
+SKIP_BUILD="${E2E_SKIP_BUILD:-0}"           # 1: images are already built (kind) or pushed (E2E_REGISTRY)
+VERSION="${VERSION:-0.1.0}"
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo none)"
+
+if [[ -n "${E2E_KUBECONTEXT:-}" ]]; then
+  MODE=existing
+  CONTEXT="$E2E_KUBECONTEXT"
+  REGISTRY="${E2E_REGISTRY:?E2E_REGISTRY is required with E2E_KUBECONTEXT (images are pushed there)}"
+  TAG="${E2E_TAG:-e2e-$COMMIT}"
+  PREFIX="$REGISTRY/"
+else
+  MODE=kind
+  CONTEXT="kind-$CLUSTER"
+  TAG="${E2E_TAG:-e2e}"
+  PREFIX=""
+fi
+IMG_MAYFLYD="${PREFIX}mayflyd:$TAG"
+IMG_AGENT="${PREFIX}mayfly-agent:$TAG"
+IMG_LLMSTUB="${PREFIX}mayfly-llmstub:$TAG"
+IMG_MCPSTUB="${PREFIX}mayfly-mcpstub:$TAG"
+
+log() { printf '\n==> %s\n' "$*"; }
+die() { echo "e2e: $*" >&2; exit 1; }
+k() { kubectl --context "$CONTEXT" "$@"; }
+kn() { kubectl --context "$CONTEXT" -n "$NAMESPACE" "$@"; }
+
+need() {
+  for tool in "$@"; do
+    command -v "$tool" >/dev/null || die "$tool is required"
+  done
+}
+
+build_images() {
+  log "building images ($TAG)"
+  local args=(--build-arg "VERSION=$VERSION" --build-arg "COMMIT=$COMMIT" --build-arg "DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+  docker build "${args[@]}" --target mayflyd -t "$IMG_MAYFLYD" .
+  docker build "${args[@]}" --target mayfly-agent -t "$IMG_AGENT" .
+  docker build "${args[@]}" --target llmstub -t "$IMG_LLMSTUB" .
+  docker build "${args[@]}" --target mcpstub -t "$IMG_MCPSTUB" .
+}
+
+create_kind() {
+  if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+    log "reusing kind cluster $CLUSTER"
+  else
+    log "creating kind cluster $CLUSTER"
+    kind create cluster --name "$CLUSTER" --config e2e/kind.yaml --wait 0s
+  fi
+  log "installing Calico $CALICO_VERSION (enforces NetworkPolicy)"
+  k apply --server-side --force-conflicts \
+    -f "https://raw.githubusercontent.com/projectcalico/calico/$CALICO_VERSION/manifests/calico.yaml" >/dev/null
+  k -n kube-system rollout status daemonset/calico-node --timeout=300s
+  k -n kube-system rollout status deployment/calico-kube-controllers --timeout=300s
+  k -n kube-system rollout status deployment/coredns --timeout=300s
+  k wait --for=condition=Ready nodes --all --timeout=300s
+  log "loading images into kind"
+  kind load docker-image --name "$CLUSTER" "$IMG_MAYFLYD" "$IMG_AGENT" "$IMG_LLMSTUB" "$IMG_MCPSTUB"
+}
+
+push_images() {
+  log "pushing images to $REGISTRY"
+  for img in "$IMG_MAYFLYD" "$IMG_AGENT" "$IMG_LLMSTUB" "$IMG_MCPSTUB"; do
+    docker push "$img"
+  done
+}
+
+deploy() {
+  log "deploying $RELEASE to $CONTEXT/$NAMESPACE (queue: $QUEUE)"
+  k create namespace "$NAMESPACE" --dry-run=client -o yaml | k apply -f - >/dev/null
+  if ! kn get secret mayfly-e2e-secrets >/dev/null 2>&1; then
+    kn create secret generic mayfly-e2e-secrets \
+      --from-literal=MAYFLY_API_TOKEN="$(openssl rand -hex 24)" \
+      --from-literal=MAYFLY_WEBHOOK_SECRET="$(openssl rand -hex 24)" \
+      --from-literal=MAYFLY_SLACK_SECRET="$(openssl rand -hex 24)" \
+      --from-literal=OPENAI_API_KEY=stub >/dev/null
+  fi
+  sed -e "s|LLMSTUB_IMAGE|$IMG_LLMSTUB|" -e "s|MCPSTUB_IMAGE|$IMG_MCPSTUB|" e2e/manifests/stubs.yaml | kn apply -f - >/dev/null
+  sed -e "s|E2E_NAMESPACE|$NAMESPACE|" e2e/manifests/deny-pods.yaml | k apply -f - >/dev/null
+
+  local queue_args=()
+  if [[ "$QUEUE" == redis ]]; then
+    kn apply -f e2e/manifests/redis.yaml >/dev/null
+    kn rollout status deployment/redis --timeout=180s
+    queue_args=(--set config.queue.backend=redis --set config.queue.redis.url=redis://redis:6379)
+  fi
+  kn rollout status deployment/llmstub --timeout=180s
+  kn rollout status deployment/mcpstub --timeout=180s
+
+  helm --kube-context "$CONTEXT" upgrade --install "$RELEASE" deploy/helm/mayfly \
+    --namespace "$NAMESPACE" \
+    -f e2e/values.yaml \
+    --set image.repository="${IMG_MAYFLYD%:*}" --set image.tag="$TAG" \
+    --set agentImage.repository="${IMG_AGENT%:*}" --set agentImage.tag="$TAG" \
+    --set-file 'skills.files.incident-triage\.md=examples/skills/incident-triage.md' \
+    --set-file 'agents.files.e2e\.yaml=e2e/agents.yaml' \
+    "${queue_args[@]}" \
+    --wait --timeout 5m
+  # A reused cluster keeps the pod when only the image content changed.
+  kn rollout restart "deployment/$RELEASE" >/dev/null
+  kn rollout status "deployment/$RELEASE" --timeout=180s
+}
+
+up() {
+  need kubectl helm openssl
+  if [[ "$SKIP_BUILD" != 1 ]]; then
+    need docker
+    build_images
+  fi
+  if [[ "$MODE" == kind ]]; then
+    need kind docker
+    create_kind
+  elif [[ "$SKIP_BUILD" != 1 ]]; then
+    push_images
+  fi
+  deploy
+}
+
+diagnostics() {
+  mkdir -p "$ARTIFACTS"
+  log "collecting diagnostics in $ARTIFACTS"
+  kn get all,networkpolicies,secrets,configmaps,pvc -o wide >"$ARTIFACTS/resources.txt" 2>&1 || true
+  kn get events --sort-by=.lastTimestamp >"$ARTIFACTS/events.txt" 2>&1 || true
+  kn describe pods >"$ARTIFACTS/pods.txt" 2>&1 || true
+  kn logs "deployment/$RELEASE" --all-containers --tail=-1 >"$ARTIFACTS/mayflyd.log" 2>&1 || true
+  kn logs "deployment/$RELEASE" --all-containers --previous --tail=-1 >"$ARTIFACTS/mayflyd.previous.log" 2>&1 || true
+}
+
+run_tests() {
+  need go kubectl
+  mkdir -p "$ARTIFACTS"
+  log "running the e2e suite against $CONTEXT/$NAMESPACE"
+  # shellcheck disable=SC2086
+  if MAYFLY_E2E_KUBECONTEXT="$CONTEXT" MAYFLY_E2E_NAMESPACE="$NAMESPACE" MAYFLY_E2E_RELEASE="$RELEASE" \
+    go test -tags e2e -count=1 -timeout 30m -v $GO_TEST_FLAGS ./e2e 2>&1 | tee "$ARTIFACTS/go-test.log"; then
+    kn logs "deployment/$RELEASE" --tail=-1 >"$ARTIFACTS/mayflyd.log" 2>&1 || true
+    return 0
+  fi
+  diagnostics
+  return 1
+}
+
+down() {
+  if [[ "$MODE" == kind ]]; then
+    log "deleting kind cluster $CLUSTER"
+    kind delete cluster --name "$CLUSTER"
+  else
+    log "removing $RELEASE and $NAMESPACE from $CONTEXT"
+    helm --kube-context "$CONTEXT" uninstall "$RELEASE" -n "$NAMESPACE" --wait || true
+    k delete namespace "$NAMESPACE" --wait=true || true
+    k delete validatingadmissionpolicybinding,validatingadmissionpolicy mayfly-e2e-deny-pods --ignore-not-found
+  fi
+}
+
+case "${1:-all}" in
+  up) up ;;
+  test) run_tests ;;
+  down) down ;;
+  all)
+    if [[ "$KEEP" != 1 ]]; then
+      trap down EXIT
+    fi
+    up
+    run_tests
+    ;;
+  *) die "usage: $0 [all|up|test|down]" ;;
+esac

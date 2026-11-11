@@ -1,0 +1,70 @@
+# Helm values for the e2e release. hack/e2e.sh sets the image repositories and
+# tags, and mounts e2e/agents.yaml and the example skills.
+existingSecret: mayfly-e2e-secrets
+logLevel: debug
+
+persistence:
+  enabled: true # bbolt must survive control plane replacement
+  size: 1Gi
+
+config:
+  server:
+    public_url: http://localhost:8080
+  sessions:
+    default_ttl: 10m
+    max_ttl: 30m
+    idle_timeout: 15m
+    close_grace: 60s
+    max_concurrent: 3 # TestQueueSurvivesRestart fills it
+    retention: 30m
+    connect_timeout: 2m
+    allow_shell: false
+  runtime:
+    workspace_limit: 256Mi
+    artifact_volume_limit: 256Mi
+    poll_interval: 2s
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  llm:
+    base_url: http://llmstub:9099/v1
+    model: stub
+    allow_models: [stub]
+    timeout: 60s
+  agents:
+    allowed_images: [] # the e2e agents use deliberately broken images
+  queue:
+    max_attempts: 2 # TestDeadLetter
+    retry_base: 1s
+    poll_interval: 1s
+    tombstone_ttl: 1h
+  mcp:
+    servers:
+      - name: echo
+        transport: http
+        url: http://mcpstub:9100/mcp
+  triggers:
+    - name: generic
+      type: generic
+      secret_env: MAYFLY_WEBHOOK_SECRET
+      rate_limit: {requests: 600, interval: 1m, burst: 100}
+    - name: github
+      type: github
+      secret_env: MAYFLY_WEBHOOK_SECRET
+      agent: e2e
+    - name: slack
+      type: slack
+      secret_env: MAYFLY_SLACK_SECRET
+      agent: e2e
+    - name: datadog
+      type: datadog
+      secret_env: MAYFLY_WEBHOOK_SECRET
+      agent: e2e
+    - name: limited # TestWebhookRateLimit
+      type: generic
+      secret_env: MAYFLY_WEBHOOK_SECRET
+      rate_limit: {requests: 2, interval: 10s, burst: 2}

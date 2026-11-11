@@ -113,10 +113,10 @@ Close and download:
 ./bin/mayfly artifact <id> -o session.tar.gz
 ```
 
-Run the automated kind test:
+Run the end-to-end suite (its own kind cluster with Calico, no API keys; see [docs/testing.md](docs/testing.md)):
 
 ```bash
-./hack/e2e-kind.sh
+make e2e
 ```
 
 ## Local development
@@ -158,7 +158,7 @@ curl -sS http://localhost:8080/hooks/generic \
   -d '{"prompt":"Check the latest deploy"}'
 ```
 
-Full endpoint list: [docs/api.md](docs/api.md). Provider auth: [docs/providers.md](docs/providers.md). Release process: [docs/release.md](docs/release.md).
+Full endpoint list: [docs/api.md](docs/api.md). Provider auth: [docs/providers.md](docs/providers.md). Release process: [docs/release.md](docs/release.md). Testing: [docs/testing.md](docs/testing.md).
 
 ## Configuration
 
@@ -246,7 +246,8 @@ Keep the credential boundary: new tool backends should be reached through the co
 | `internal/artifact` | local and S3-compatible stores |
 | `deploy/k8s` | base manifests and kind overlay |
 | `deploy/helm/mayfly` | Helm chart with optional LiteLLM |
-| `hack` | local run, kind deploy, e2e |
+| `hack` | local run, kind deploy, e2e runner |
+| `e2e` | end-to-end suite against a deployed release |
 
 ## License
 

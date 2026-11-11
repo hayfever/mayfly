@@ -22,7 +22,7 @@ First public release.
 - LiteLLM gateway configuration and deployment examples for OpenAI, Anthropic, Bedrock, OpenRouter, and internal backends.
 - Helm chart with optional LiteLLM, ingress, inline skills and agent manifests, image digests, and LiteLLM IRSA support.
 - Versioned CLI, control-plane, and agent builds with commit and date metadata.
-- Kind e2e test covering webhook creation, pod isolation, MCP tools, WebSocket replay, close, artifacts, and TTL expiry.
+- End-to-end suite on kind with Calico (`make e2e`, bbolt and Redis in CI): signed webhooks for every trigger type, dedupe, rate limits, queue durability across a control plane restart, dead letters, enforced network isolation, MCP, WebSocket attach, close, artifacts, TTL expiry, and cleanup. It also runs against an existing cluster.
 - CI and release workflows: tests, Helm lint, kind e2e, multi-arch GHCR images, SBOMs, provenance, CLI archives, and OCI chart publishing.
 - Session cap (`sessions.max_concurrent`) and per-trigger webhook rate limits; both answer `429` with `Retry-After`.
 - `sessions.retention` expires finished sessions from memory and releases their thread state.

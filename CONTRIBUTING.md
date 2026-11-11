@@ -15,8 +15,7 @@ make run-local
 Full cluster test:
 
 ```bash
-./hack/kind-up.sh
-./hack/e2e-kind.sh
+make e2e
 ```
 
 ## What to run before a pull request
@@ -29,7 +28,7 @@ helm lint deploy/helm/mayfly --set existingSecret=mayfly-secrets
 goreleaser check
 ```
 
-The kind e2e is required for changes to session lifecycle, Kubernetes objects, networking, artifacts, or the agent image.
+`make e2e` ([docs/testing.md](docs/testing.md)) is required for changes to session lifecycle, Kubernetes objects, networking, artifacts, or the agent image.
 
 ## Architecture rules
 

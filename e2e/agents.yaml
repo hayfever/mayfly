@@ -1,0 +1,23 @@
+schemaVersion: 1
+name: mayfly/e2e
+version: 0.1.0
+agents:
+  - name: e2e
+    description: Deterministic agent for the end-to-end suite (backed by llmstub).
+    systemPrompt: |
+      You are the Mayfly e2e agent. Write report.md, call the echo tool, then reply.
+    skills:
+      - incident-triage
+    mcpServers:
+      - echo
+    maxSteps: 8
+  - name: denied
+    description: Its pods are rejected by an admission policy, so its webhook jobs dead-letter.
+    systemPrompt: This agent never runs.
+    runtime:
+      image: mayfly-e2e.invalid/denied:never
+  - name: broken
+    description: Its image cannot be pulled, so its sessions fail at start.
+    systemPrompt: This agent never runs.
+    runtime:
+      image: mayfly-e2e.invalid/missing:never
