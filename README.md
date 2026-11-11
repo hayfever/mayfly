@@ -29,26 +29,28 @@ Sessions are the unit of work. There is no always-on agent.
 
 ## Architecture
 
+Mayfly puts a durable job queue in front of a session lifecycle manager. A verified webhook becomes a job, a worker turns each job into a short-lived session (a pod, or a local process in development), and every session ends with teardown and an artifact bundle. The API and CLI skip the queue and create sessions directly.
+
 ```mermaid
 flowchart LR
-  T[Webhook or API] --> C[mayflyd]
-  C -->|accept job| Q[(queue)]
-  U[Web UI / CLI] <-->|WebSocket| C
-  Q -->|worker| C
-  C -->|create pod| K[Kubernetes]
-  K --> A[mayfly-agent]
-  A -->|events + inbox| C
-  A -->|chat completions| B[credential broker]
-  B --> L[LLM provider]
-  A -->|HTTP MCP| P[MCP proxy]
-  P --> M[MCP server]
-  A -->|bundle upload| C
-  C --> S[(S3-compatible or local)]
+  Hook["Webhook<br/>POST /hooks/{name}"] -->|"verify, rate limit, Accept"| Q[("queue.Store<br/>memory, bbolt, redis")]
+  API["API / CLI<br/>POST /api/v1/sessions"] --> M
+  Q -->|"Claim lease"| W["queue.Worker"]
+  W -->|"SessionHandler"| M["session.Manager<br/>Create"]
+  W -->|"Release on ErrCapacity"| Q
+  W -->|"Ack: job id to session id"| Done[("done tombstones<br/>tombstone_ttl")]
+  W -->|"Nack at max_attempts"| Dead[("dead jobs<br/>retry or delete")]
+  M -->|"runner.Start"| R["Kubernetes pod<br/>or local process"]
+  R --> A["mayfly-harness<br/>mayfly-agent"]
+  A -->|"events, inbox, LLM and MCP via broker"| M
+  A -->|"bundle, finalize"| M
+  M -->|"Put bundle"| S[("artifact.Store<br/>local, S3")]
+  M -->|"runner.Stop: teardown"| R
 ```
 
-The control plane owns lifecycle and the thread. The session runtime owns the agent loop, tools, and bundle assembly. Runtime-to-control-plane traffic goes outbound only, so session pods need no inbound access.
+`mayflyd` owns the trigger, queue, and session layers. The session runtime only makes outbound calls to it, and it never holds an LLM, MCP, or object-store credential. Delivery is at least once: jobs are leased, and a lease that expires makes the job claimable again.
 
-See [docs/architecture.md](docs/architecture.md) for the sequence and state model.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the code map and invariants, and [docs/architecture.md](docs/architecture.md) for sequence diagrams and failure handling.
 
 ## Install with Helm
 
