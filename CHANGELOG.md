@@ -46,6 +46,7 @@ First public release.
 - `/readyz` no longer calls the artifact store, and the probes set `timeoutSeconds: 3`.
 - The module path and published images use `github.com/hayfever/mayfly` and `ghcr.io/hayfever`.
 - The S3 store sends checksums only when required, for compatibility with R2, B2, and older MinIO.
+- `mayflyd` rejects unknown configuration fields.
 
 ### Fixed
 

@@ -1,11 +1,16 @@
 package config
 
 import (
+	"bytes"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadExampleLocal(t *testing.T) {
@@ -278,5 +283,86 @@ triggers:
 	}
 	if got := cfg.Triggers[2].RateLimit; got.Requests != 6 || got.Burst != 2 || got.Interval.Std() != 30*time.Second {
 		t.Fatalf("custom rate limit = %+v", got)
+	}
+}
+
+func TestLoadRejectsUnknownField(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("queue:\n  backnd: bbolt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected an error for an unknown key")
+	}
+	if !strings.Contains(err.Error(), "backnd") {
+		t.Fatalf("error does not name the unknown key: %v", err)
+	}
+}
+
+func TestLoadAcceptsEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err != nil && strings.Contains(err.Error(), "parse config") {
+		t.Fatalf("empty file should parse as an empty document: %v", err)
+	}
+}
+
+func TestLoadRejectsMultipleDocuments(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("server: {addr: \":8081\"}\n---\nserver: {addr: \":8082\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Fatalf("Load error = %v, want a multiple-document error", err)
+	}
+}
+
+func TestShippedConfigsHaveNoUnknownFields(t *testing.T) {
+	files := []string{
+		filepath.Join("..", "..", "examples", "config.local.yaml"),
+		filepath.Join("..", "..", "examples", "config.litellm.yaml"),
+	}
+	for _, path := range files {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := Default()
+		decoder := yaml.NewDecoder(bytes.NewReader(raw))
+		decoder.KnownFields(true)
+		if err := decoder.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
+			t.Fatalf("%s: %v", path, err)
+		}
+	}
+
+	path := filepath.Join("..", "..", "deploy", "helm", "mayfly", "values.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Config yaml.Node `yaml:"config"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Config.Kind == 0 {
+		t.Fatalf("%s: no config subtree", path)
+	}
+	sub, err := yaml.Marshal(&doc.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(sub))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(Default()); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("%s config subtree: %v", path, err)
 	}
 }

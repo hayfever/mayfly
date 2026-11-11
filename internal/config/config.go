@@ -2,8 +2,11 @@
 package config
 
 import (
+	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path"
@@ -338,7 +341,17 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	cfg := Default()
-	if err := yaml.Unmarshal(raw, cfg); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(raw))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	// A decoder reads one document at a time; a trailing document would be
+	// ignored silently. One config file means one document.
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); err == nil {
+		return nil, fmt.Errorf("parse config %s: multiple YAML documents are not supported", path)
+	} else if !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	cfg.applyDefaults()

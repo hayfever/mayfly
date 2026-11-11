@@ -1,6 +1,6 @@
 # Configuration
 
-`mayflyd --config <path>` loads one YAML document. Unknown fields are ignored. Durations use Go syntax: `30s`, `15m`, `2h`. Validate before deploy by running the binary once; invalid configuration exits with code 2.
+`mayflyd --config <path>` loads one YAML document. Unknown fields are rejected at startup, so a misspelled key fails fast instead of falling back to a default. Durations use Go syntax: `30s`, `15m`, `2h`. Validate before deploy by running the binary once; invalid configuration exits with code 2.
 
 Complete example: [examples/config.local.yaml](../examples/config.local.yaml). Kubernetes example: [deploy/k8s/base/configmap.yaml](../deploy/k8s/base/configmap.yaml).
 
