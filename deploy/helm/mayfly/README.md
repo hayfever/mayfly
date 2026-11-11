@@ -27,7 +27,7 @@ helm install mayfly deploy/helm/mayfly \
   --set config.server.public_url=https://mayfly.example.com
 ```
 
-The default images are `ghcr.io/hayfever/mayflyd:v0.1.0` and `ghcr.io/hayfever/mayfly-agent:v0.1.0`. Override `image` and `agentImage` for your registry.
+The default images are `ghcr.io/hayfever/mayflyd:0.1.0` and `ghcr.io/hayfever/mayfly-agent:0.1.0`. Override `image` and `agentImage` for your registry.
 
 Check the token:
 

@@ -45,8 +45,8 @@ The release workflow runs on `v*` tags:
 ## Post-release verification
 
 ```bash
-docker pull ghcr.io/<owner>/mayflyd:v0.1.0
-docker pull ghcr.io/<owner>/mayfly-agent:v0.1.0
+docker pull ghcr.io/<owner>/mayflyd:0.1.0
+docker pull ghcr.io/<owner>/mayfly-agent:0.1.0
 helm show chart oci://ghcr.io/<owner>/charts/mayfly --version 0.1.0
 ```
 
