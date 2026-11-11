@@ -57,7 +57,7 @@ The runtime adds the session token. The control plane checks that `github` is as
 
 Session pods only need network access to the control plane. Upstream MCP credentials and URLs stay outside the container.
 
-Supported methods: `POST`, `GET`, `DELETE`. Headers forwarded: `Content-Type`, `Accept`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `Last-Event-ID`. Response headers forwarded: `Content-Type`, `Cache-Control`, `Mcp-Session-Id`, `MCP-Protocol-Version`.
+Supported methods: `POST`, `GET`, `DELETE`. Request bodies are limited to `llm.max_body_bytes` (default 16 MiB); larger requests get `413`. Headers forwarded: `Content-Type`, `Accept`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `Last-Event-ID`. Response headers forwarded: `Content-Type`, `Cache-Control`, `Mcp-Session-Id`, `MCP-Protocol-Version`.
 
 ### stdio servers
 

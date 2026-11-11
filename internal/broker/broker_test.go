@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/stub"
@@ -90,6 +91,79 @@ func TestLLMStreamingPassthrough(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "data: [DONE]") {
 		t.Fatalf("stream not passed through: %s", rec.Body.String())
 	}
+}
+
+func TestMCPProxyRejectsOversizedBody(t *testing.T) {
+	const limit = 1024
+	type upstreamCall struct {
+		body []byte
+	}
+	calls := make(chan upstreamCall, 4)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, limit+1))
+		calls <- upstreamCall{body: body}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer upstream.Close()
+
+	def := config.MCPServerConfig{Name: "remote", Transport: "http", URL: upstream.URL + "/mcp"}
+	b := New(config.LLMConfig{MaxBodyBytes: limit}, testLogger())
+	oversized := strings.Repeat("a", 2*limit)
+
+	t.Run("declared length over cap", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/internal/v1/mcp/remote", strings.NewReader(oversized))
+		if req.ContentLength != int64(len(oversized)) {
+			t.Fatalf("test setup: content length = %d", req.ContentLength)
+		}
+		rec := httptest.NewRecorder()
+		b.ServeMCP(rec, req, def)
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want 413 body=%s", rec.Code, rec.Body.String())
+		}
+		select {
+		case call := <-calls:
+			t.Fatalf("upstream was called with %d bytes, want no call", len(call.body))
+		default:
+		}
+	})
+
+	t.Run("chunked body over cap", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/internal/v1/mcp/remote", nil)
+		req.Body = io.NopCloser(strings.NewReader(oversized))
+		req.ContentLength = -1
+		rec := httptest.NewRecorder()
+		b.ServeMCP(rec, req, def)
+		if rec.Code < 400 {
+			t.Fatalf("status = %d, want an error status", rec.Code)
+		}
+		select {
+		case call := <-calls:
+			if len(call.body) > limit {
+				t.Fatalf("upstream received %d bytes, want at most %d", len(call.body), limit)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("upstream call did not finish")
+		}
+	})
+
+	t.Run("under cap is forwarded", func(t *testing.T) {
+		payload := `{"jsonrpc":"2.0","id":1,"method":"ping"}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/v1/mcp/remote", strings.NewReader(payload))
+		rec := httptest.NewRecorder()
+		b.ServeMCP(rec, req, def)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+		}
+		select {
+		case call := <-calls:
+			if string(call.body) != payload {
+				t.Fatalf("upstream body = %q, want %q", call.body, payload)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("upstream call did not finish")
+		}
+	})
 }
 
 func TestMCPProxyInjectsCredentials(t *testing.T) {

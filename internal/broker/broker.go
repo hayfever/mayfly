@@ -138,9 +138,17 @@ func (b *Broker) ServeMCP(w http.ResponseWriter, r *http.Request, def config.MCP
 		writeError(w, http.StatusBadGateway, "MCP server is not configured correctly")
 		return
 	}
+	limit := b.cfg.MaxBodyBytes
+	if limit > 0 && r.ContentLength > limit {
+		writeError(w, http.StatusRequestEntityTooLarge, "MCP request body is too large")
+		return
+	}
 	var body io.Reader
 	if r.Body != nil {
 		body = r.Body
+		if limit > 0 {
+			body = http.MaxBytesReader(w, r.Body, limit)
+		}
 	}
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, upstream.String(), body)
 	if err != nil {
