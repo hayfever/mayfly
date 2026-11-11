@@ -8,7 +8,7 @@ CLUSTER ?= mayfly
 LDFLAGS := -s -w -X github.com/hayfever/mayfly/internal/version.Version=$(VERSION) -X github.com/hayfever/mayfly/internal/version.Commit=$(COMMIT) -X github.com/hayfever/mayfly/internal/version.Date=$(DATE)
 CMDS := mayflyd mayfly-agent mayfly mayfly-harness llmstub mcpstub
 
-.PHONY: build test vet fmt image kind-create kind-up kind-down deploy e2e run-local clean FORCE
+.PHONY: build test vet fmt image kind-create kind-up kind-down deploy e2e e2e-up e2e-test e2e-down run-local clean FORCE
 
 build: $(addprefix $(BIN)/,$(CMDS))
 
@@ -25,7 +25,7 @@ vet:
 	$(GO) vet ./...
 
 fmt:
-	gofmt -w cmd internal test
+	gofmt -w cmd internal test e2e
 
 IMAGE_ARGS := --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE)
 
@@ -47,11 +47,21 @@ kind-down:
 deploy:
 	kubectl kustomize --load-restrictor=LoadRestrictionsNone deploy/k8s/overlays/kind | kubectl apply -f -
 
+# End-to-end suite on kind with Calico; see docs/testing.md.
 e2e:
-	./hack/e2e-kind.sh
+	./hack/e2e.sh all
+
+e2e-up:
+	./hack/e2e.sh up
+
+e2e-test:
+	./hack/e2e.sh test
+
+e2e-down:
+	./hack/e2e.sh down
 
 run-local:
 	./hack/run-local.sh
 
 clean:
-	rm -rf $(BIN) .mayfly
+	rm -rf $(BIN) .mayfly .e2e

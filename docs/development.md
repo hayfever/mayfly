@@ -4,7 +4,7 @@
 
 - Go 1.26+
 - Docker for images and kind
-- kind, kubectl, jq, openssl for the cluster test
+- kind, kubectl, Helm, openssl for the end-to-end suite
 - Node is not required on the host; stdio MCP servers run inside the agent image
 
 ## Commands
@@ -16,7 +16,7 @@ make vet
 make image     # four Docker targets
 make run-local # control plane + stubs, token dev-token
 make kind-up   # kind cluster, images, manifests
-make e2e       # kind end-to-end test
+make e2e       # end-to-end suite on kind with Calico (docs/testing.md)
 make kind-down
 ```
 
@@ -36,7 +36,7 @@ make kind-down
 | `internal/broker` | model allowlist, streaming passthrough, MCP header injection |
 | `examples/litellm` | LiteLLM gateway configuration and deployment example |
 | `test/integration` | webhook → queue → worker → real agent process → MCP → WebSocket → close → artifact |
-| `hack/e2e-kind.sh` | real pod isolation, NetworkPolicy, lifecycle, TTL, artifact |
+| `e2e` (`make e2e`) | released images and chart on a real cluster: webhooks, queue durability, dead letters, isolation, lifecycle; see [testing.md](testing.md) |
 
 Run one test:
 

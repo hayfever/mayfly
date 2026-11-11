@@ -21,8 +21,8 @@ helm lint deploy/helm/mayfly --set existingSecret=mayfly-secrets
 helm template mayfly deploy/helm/mayfly -n mayfly --set existingSecret=mayfly-secrets >/dev/null
 goreleaser check
 actionlint .github/workflows/*.yml
-./hack/kind-up.sh
-./hack/e2e-kind.sh
+make e2e
+E2E_QUEUE=redis make e2e
 ```
 
 3. Build both images locally. Check that `mayfly version`, `mayflyd --version`, and `mayfly-agent --version` show the release version, commit, and date.

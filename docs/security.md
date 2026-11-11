@@ -25,7 +25,7 @@ The NetworkPolicy sets:
 - Egress to cluster DNS on UDP/TCP 53.
 - Extra CIDRs only when configured under `runtime.egress`.
 
-Kind's default CNI must be checked for NetworkPolicy enforcement. The included e2e test verifies that the cloud metadata endpoint is unreachable.
+The policy is only as good as the CNI that enforces it. The end-to-end suite (`TestNetworkIsolation`, [testing.md](testing.md)) runs on Calico and checks each allowed and blocked path; run it against your cluster to confirm enforcement.
 
 ## Credential boundary
 

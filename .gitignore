@@ -5,3 +5,10 @@ artifacts/
 .env
 *.log
 dist/
+.e2e/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+*.tfvars

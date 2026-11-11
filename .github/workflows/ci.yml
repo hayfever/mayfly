@@ -17,10 +17,12 @@ jobs:
           go-version: "1.27.x"
       - name: gofmt
         run: |
-          out="$(gofmt -l cmd internal test)"
+          out="$(gofmt -l cmd internal test e2e)"
           if [ -n "$out" ]; then echo "$out"; exit 1; fi
       - name: vet
-        run: go vet ./...
+        run: |
+          go vet ./...
+          go vet -tags e2e ./e2e
       - name: test
         run: go test ./...
       - name: build
@@ -34,26 +36,3 @@ jobs:
           helm template mayfly deploy/helm/mayfly -n mayfly \
             --set existingSecret=mayfly-secrets >/dev/null
 
-  kind-e2e:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.27.x"
-      - name: install kind
-        run: |
-          curl -fsSL https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 -o /tmp/kind
-          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
-      - name: install kubectl
-        run: |
-          curl -fsSL https://dl.k8s.io/release/stable.txt -o /tmp/kube-version
-          curl -fsSL "https://dl.k8s.io/release/$(cat /tmp/kube-version)/bin/linux/amd64/kubectl" -o /tmp/kubectl
-          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
-      - name: build and deploy
-        run: |
-          make build
-          ./hack/kind-up.sh
-      - name: e2e
-        run: ./hack/e2e-kind.sh
