@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/hayden/mayfly/internal/model"
+	"github.com/hayden/mayfly/internal/version"
 )
 
 func main() {
@@ -45,6 +46,9 @@ func main() {
 		err = cmdDelete(args)
 	case "artifact":
 		err = cmdArtifact(args)
+	case "version", "--version", "-v":
+		fmt.Println(version.String())
+		return
 	case "agents":
 		err = cmdAgents(args)
 	case "help", "-h", "--help":
@@ -66,6 +70,7 @@ Environment:
   MAYFLY_TOKEN  admin API token
 
 Commands:
+  version
   run --prompt TEXT [--agent NAME] [--title T] [--ttl 30m] [--model M] [--skill NAME]... [--mcp NAME]...
   agents
   ls

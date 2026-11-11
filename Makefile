@@ -2,8 +2,10 @@ SHELL := /bin/bash
 GO ?= go
 BIN ?= bin
 VERSION ?= dev
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 CLUSTER ?= mayfly
-LDFLAGS := -s -w -X github.com/hayden/mayfly/internal/version.Version=$(VERSION)
+LDFLAGS := -s -w -X github.com/hayden/mayfly/internal/version.Version=$(VERSION) -X github.com/hayden/mayfly/internal/version.Commit=$(COMMIT) -X github.com/hayden/mayfly/internal/version.Date=$(DATE)
 CMDS := mayflyd mayfly-agent mayfly mayfly-harness llmstub mcpstub
 
 .PHONY: build test vet fmt image kind-create kind-up kind-down deploy e2e run-local clean FORCE
@@ -25,11 +27,13 @@ vet:
 fmt:
 	gofmt -w cmd internal test
 
+IMAGE_ARGS := --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE)
+
 image:
-	docker build --target mayflyd -t mayflyd:dev .
-	docker build --target llmstub -t mayfly-llmstub:dev .
-	docker build --target mcpstub -t mayfly-mcpstub:dev .
-	docker build --target mayfly-agent -t mayfly-agent:dev .
+	docker build $(IMAGE_ARGS) --target mayflyd -t mayflyd:dev .
+	docker build $(IMAGE_ARGS) --target llmstub -t mayfly-llmstub:dev .
+	docker build $(IMAGE_ARGS) --target mcpstub -t mayfly-mcpstub:dev .
+	docker build $(IMAGE_ARGS) --target mayfly-agent -t mayfly-agent:dev .
 
 kind-create:
 	kind create cluster --config deploy/kind.yaml

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -27,7 +28,12 @@ import (
 
 func main() {
 	configPath := flag.String("config", envOr("MAYFLY_CONFIG", "config.yaml"), "path to config.yaml")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version.String())
+		return
+	}
 
 	logger := newLogger()
 	slog.SetDefault(logger)
@@ -98,6 +104,7 @@ func main() {
 			"backend", cfg.Runtime.Backend,
 			"artifact_store", cfg.Artifacts.Store,
 			"version", version.Version,
+			"commit", version.Commit,
 		)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server", "error", err)

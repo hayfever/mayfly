@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -14,11 +15,17 @@ import (
 
 	"github.com/hayden/mayfly/internal/agent"
 	"github.com/hayden/mayfly/internal/sessioncfg"
+	"github.com/hayden/mayfly/internal/version"
 )
 
 func main() {
 	configPath := flag.String("config", os.Getenv("MAYFLY_CONFIG"), "path to session.json")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version.String())
+		return
+	}
 
 	logger := newLogger()
 	slog.SetDefault(logger)

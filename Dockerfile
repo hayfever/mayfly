@@ -6,10 +6,13 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/hayden/mayfly/internal/version.Version=${VERSION}" -o /out/mayflyd ./cmd/mayflyd \
- && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/hayden/mayfly/internal/version.Version=${VERSION}" -o /out/mayfly-agent ./cmd/mayfly-agent \
- && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/hayden/mayfly/internal/version.Version=${VERSION}" -o /out/mayfly ./cmd/mayfly \
- && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/hayden/mayfly/internal/version.Version=${VERSION}" -o /out/mayfly-harness ./cmd/mayfly-harness \
+ARG COMMIT=none
+ARG DATE=unknown
+RUN LDFLAGS="-s -w -X github.com/hayden/mayfly/internal/version.Version=${VERSION} -X github.com/hayden/mayfly/internal/version.Commit=${COMMIT} -X github.com/hayden/mayfly/internal/version.Date=${DATE}" \
+ && CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o /out/mayflyd ./cmd/mayflyd \
+ && CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o /out/mayfly-agent ./cmd/mayfly-agent \
+ && CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o /out/mayfly ./cmd/mayfly \
+ && CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o /out/mayfly-harness ./cmd/mayfly-harness \
  && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/llmstub ./cmd/llmstub \
  && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/mcpstub ./cmd/mcpstub
 
