@@ -142,6 +142,25 @@ func TestSlackChallengeAndSlashCommand(t *testing.T) {
 	}
 }
 
+func TestGitHubRejectsStaticToken(t *testing.T) {
+	body := []byte(`{"action":"opened","number":1,"repository":{"full_name":"acme/app"},"sender":{"login":"alice"}}`)
+	cfg := config.TriggerConfig{Name: "github", Type: "github", Secret: "gh-secret"}
+	header := http.Header{}
+	header.Set("X-GitHub-Event", "pull_request")
+	header.Set("X-Mayfly-Token", "gh-secret")
+	if _, err := Parse(cfg, header, body); err != ErrUnauthorized {
+		t.Fatalf("replayed token was accepted: %v", err)
+	}
+
+	generic := config.TriggerConfig{Name: "generic", Type: "generic", Secret: "gh-secret"}
+	header = http.Header{}
+	header.Set("Content-Type", "application/json")
+	header.Set("X-Mayfly-Token", "gh-secret")
+	if _, err := Parse(generic, header, body); err != nil {
+		t.Fatalf("generic trigger must still accept the shared token: %v", err)
+	}
+}
+
 func TestDatadogToken(t *testing.T) {
 	body := []byte(`{"title":"High error rate","text":"5xx above threshold","alert_type":"error","url":"https://app.example/monitor/1"}`)
 	cfg := config.TriggerConfig{Name: "datadog", Type: "datadog", Secret: "dd"}

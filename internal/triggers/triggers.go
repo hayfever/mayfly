@@ -180,7 +180,7 @@ func parseDatadog(cfg config.TriggerConfig, header http.Header, body []byte) (*R
 }
 
 func parseGitHub(cfg config.TriggerConfig, header http.Header, body []byte) (*Result, error) {
-	if !verifyHMACOrToken(cfg, header, body) {
+	if !verifyGitHub(cfg, header, body) {
 		return nil, ErrUnauthorized
 	}
 	event := header.Get("X-GitHub-Event")
@@ -298,18 +298,31 @@ func applyTemplate(cfg config.TriggerConfig, data Data, fallback string) (string
 	return strings.TrimSpace(out.String()), nil
 }
 
+// verifyHMACOrToken accepts a request signature or a static shared token.
 func verifyHMACOrToken(cfg config.TriggerConfig, header http.Header, body []byte) bool {
 	if cfg.Secret == "" {
 		return cfg.AllowUnsigned
 	}
-	if verifyHMAC(cfg.Secret, body, header.Get("X-Mayfly-Signature-256")) {
-		return true
+	return verifySignature(cfg.Secret, header, body) || verifyToken(cfg.Secret, header)
+}
+
+// verifyGitHub accepts only a request signature. GitHub never sends the
+// static token header, and a token can be replayed, so it is not accepted here.
+func verifyGitHub(cfg config.TriggerConfig, header http.Header, body []byte) bool {
+	if cfg.Secret == "" {
+		return cfg.AllowUnsigned
 	}
-	if verifyHMAC(cfg.Secret, body, header.Get("X-Hub-Signature-256")) {
-		return true
-	}
+	return verifySignature(cfg.Secret, header, body)
+}
+
+func verifySignature(secret string, header http.Header, body []byte) bool {
+	return verifyHMAC(secret, body, header.Get("X-Mayfly-Signature-256")) ||
+		verifyHMAC(secret, body, header.Get("X-Hub-Signature-256"))
+}
+
+func verifyToken(secret string, header http.Header) bool {
 	token := header.Get("X-Mayfly-Token")
-	return token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(cfg.Secret)) == 1
+	return token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(secret)) == 1
 }
 
 func verifyHMAC(secret string, body []byte, header string) bool {

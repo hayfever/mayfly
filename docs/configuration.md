@@ -204,7 +204,7 @@ Template data fields: `.Trigger`, `.Type`, `.Event`, `.Delivery`, `.Actor`, `.Ag
 Signature behavior:
 
 - `generic`: `X-Mayfly-Signature-256` HMAC-SHA256 hex, optional `sha256=` prefix, or `X-Mayfly-Token`.
-- `github`: `X-Hub-Signature-256`.
+- `github`: `X-Hub-Signature-256` only. The static `X-Mayfly-Token` header is not accepted, because GitHub signs each delivery and a static token can be replayed.
 - `slack`: `X-Slack-Signature` with a 5-minute timestamp window; also answers `url_verification`.
 - `datadog`: `X-Mayfly-Token`.
 

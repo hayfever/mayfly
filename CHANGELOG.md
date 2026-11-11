@@ -31,6 +31,10 @@ First public release.
 - The module path and published images use `github.com/hayfever/mayfly` and `ghcr.io/hayfever`.
 - The S3 store sends checksums only when required, for compatibility with R2, B2, and older MinIO.
 
+### Fixed
+
+- GitHub triggers no longer accept the static `X-Mayfly-Token` header, which could be replayed.
+
 ### Known limitations
 
 - The control plane runs one replica. Session records and thread history are in memory; artifacts are durable.
