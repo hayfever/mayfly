@@ -3,9 +3,10 @@ package version
 
 import "fmt"
 
-// Set at build time with -ldflags. See the Makefile and release workflow.
+// Version is the current release. Release builds override Version, Commit, and
+// Date with -ldflags; see the Makefile and release workflow.
 var (
-	Version = "dev"
+	Version = "0.1.0"
 	Commit  = "none"
 	Date    = "unknown"
 )
