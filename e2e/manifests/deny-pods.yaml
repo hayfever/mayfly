@@ -1,0 +1,29 @@
+# Dead-letter fixture: rejects pods of the e2e "denied" agent in the e2e
+# namespace, so session creation fails after its webhook was accepted.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: mayfly-e2e-deny-pods
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  validations:
+    - expression: "!object.spec.containers.exists(c, c.image.startsWith('mayfly-e2e.invalid/denied'))"
+      message: "mayfly-e2e: pod denied by the dead-letter fixture"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: mayfly-e2e-deny-pods
+spec:
+  policyName: mayfly-e2e-deny-pods
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: E2E_NAMESPACE

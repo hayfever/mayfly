@@ -30,15 +30,7 @@ Delete the cluster:
 make kind-down
 ```
 
-The e2e test ([hack/e2e-kind.sh](../hack/e2e-kind.sh)) checks:
-
-- webhook creation,
-- pod security context and NetworkPolicy existence,
-- cloud metadata endpoint blocked,
-- MCP tool call,
-- WebSocket replay,
-- close and artifact contents,
-- TTL expiry.
+To check a cluster before relying on it, run the end-to-end suite against it. It installs into its own namespace and removes itself afterwards. See [testing.md](testing.md#against-a-real-cluster).
 
 ## Helm
 

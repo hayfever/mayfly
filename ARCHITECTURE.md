@@ -77,7 +77,9 @@ Inside the container, `mayfly-harness` reads `session.json` and execs either a n
 ### Everything else
 
 - `deploy/helm/mayfly`, `deploy/k8s`: Helm chart (optional LiteLLM) and kustomize base with a kind overlay.
-- `hack/`: `run-local.sh`, `kind-up.sh`, `e2e-kind.sh`.
+- `deploy/terraform/civo`: Terraform for a one-node Civo cluster with Cilium, sized for Mayfly and the e2e suite.
+- `hack/`: `run-local.sh`, `kind-up.sh`, `e2e.sh`.
+- `e2e/`: the end-to-end suite (build tag `e2e`), its Helm values, and fixtures. See `docs/testing.md`.
 - `test/integration`: an in-process end-to-end test, `TestWebhookToArtifact`.
 - `docs/`: user-facing docs. `docs/architecture.md` has the sequence diagrams.
 
@@ -145,6 +147,6 @@ Process:
 - `internal/queue/store_test.go` runs every store test against memory, bbolt, and Redis. Redis uses in-process miniredis, or the server named by `MAYFLY_REDIS_TEST_URL`.
 - `worker_test.go` covers capacity, release, and shutdown.
 - `test/integration` drives a webhook through the queue, a real `mayfly-agent` process on the local runner, a WebSocket attach, close, and artifact inspection, all against the stubs.
-- `hack/e2e-kind.sh` runs the same flow on a kind cluster.
+- `e2e/` (`make e2e`) runs the chart and images on kind with Calico and checks webhooks, queue durability across a control plane restart, dead letters, network isolation, and the session lifecycle.
 
 **Observability.** JSON `slog` goes to stderr, with the level set by `MAYFLY_LOG_LEVEL`. `GET /api/v1/queue` reports queue depth, and `GET /readyz` checks only that the lifecycle engine is running, not the artifact store.
