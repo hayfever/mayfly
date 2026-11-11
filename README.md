@@ -54,7 +54,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the code map and invariants, and [doc
 
 ## Install with Helm
 
-Published images are `ghcr.io/hayfever/mayflyd:v0.1.0` and `ghcr.io/hayfever/mayfly-agent:v0.1.0`.
+Published images are `ghcr.io/hayfever/mayflyd:0.1.0` and `ghcr.io/hayfever/mayfly-agent:0.1.0`.
 
 ```bash
 kubectl create namespace mayfly
