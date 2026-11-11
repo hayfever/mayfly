@@ -28,7 +28,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: mayflyd
-          image: mayflyd:dev
+          image: ghcr.io/hayden/mayflyd:v0.1.0
           imagePullPolicy: IfNotPresent
           args: ["--config", "/etc/mayfly-config/config.yaml"]
           envFrom:

@@ -21,7 +21,7 @@ data:
       shell_timeout: 120s
     runtime:
       backend: kubernetes
-      image: mayfly-agent:dev
+      image: ghcr.io/hayden/mayfly-agent:v0.1.0
       image_pull_policy: IfNotPresent
       service_account: mayfly-agent
       platform_namespace: mayfly
