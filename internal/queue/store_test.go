@@ -227,7 +227,7 @@ func TestStoreReleaseDefers(t *testing.T) {
 				t.Fatal(err)
 			}
 			lease := claimOne(t, store)
-			if err := store.Release(ctx, lease, 10*time.Second); err != nil {
+			if err := store.Release(ctx, lease, 150*time.Millisecond); err != nil {
 				t.Fatal(err)
 			}
 			if leases, _ := store.Claim(ctx, 1); len(leases) != 0 {
@@ -237,9 +237,7 @@ func TestStoreReleaseDefers(t *testing.T) {
 			if stats.Leased != 1 || stats.Dead != 0 {
 				t.Fatalf("stats after release = %+v", stats)
 			}
-			if err := store.Release(ctx, lease, 0); err != nil {
-				t.Fatal(err)
-			}
+			time.Sleep(200 * time.Millisecond)
 			if got := claimOne(t, store); got.ID != lease.ID {
 				t.Fatalf("released job = %s, want %s", got.ID, lease.ID)
 			}
@@ -352,4 +350,34 @@ func claimOne(t *testing.T, store Store) Lease {
 		t.Fatalf("claim returned %d leases", len(leases))
 	}
 	return leases[0]
+}
+
+func TestStoreStaleLeaseCannotSettle(t *testing.T) {
+	for name, store := range backends(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			if err := store.Accept(ctx, testJob("stale")); err != nil {
+				t.Fatal(err)
+			}
+			stale := claimOne(t, store)
+			time.Sleep(80 * time.Millisecond)
+			current := claimOne(t, store)
+			if err := store.Nack(ctx, stale, errors.New("late failure")); !errors.Is(err, ErrLeaseLost) {
+				t.Fatalf("stale nack = %v, want ErrLeaseLost", err)
+			}
+			if err := store.Release(ctx, stale, 0); !errors.Is(err, ErrLeaseLost) {
+				t.Fatalf("stale release = %v, want ErrLeaseLost", err)
+			}
+			if leases, _ := store.Claim(ctx, 10); len(leases) != 0 {
+				t.Fatalf("job claimable while another lease holds it: %+v", leases)
+			}
+			if err := store.Nack(ctx, current, errors.New("real failure")); err != nil {
+				t.Fatalf("current nack = %v", err)
+			}
+			time.Sleep(40 * time.Millisecond)
+			if retry := claimOne(t, store); retry.Job.Attempts != 1 {
+				t.Fatalf("attempts = %d, want 1", retry.Job.Attempts)
+			}
+		})
+	}
 }

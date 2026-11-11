@@ -593,6 +593,15 @@ func (c *Config) Validate() error {
 	if c.Queue.MaxJobs < 0 || c.Queue.MaxAttempts < 0 {
 		return fmt.Errorf("queue.max_jobs and queue.max_attempts must not be negative")
 	}
+	// A session start can take up to 90s (runner start timeout); a shorter
+	// lease would expire while the first worker is still creating the session.
+	if c.Queue.VisibilityTimeout.Std() < 2*time.Minute {
+		return fmt.Errorf("queue.visibility_timeout must be at least 2m")
+	}
+	// Redis stores dedupe keys with whole-second expiry.
+	if c.Queue.DedupeTTL.Std() < time.Second {
+		return fmt.Errorf("queue.dedupe_ttl must be at least 1s")
+	}
 	switch c.Artifacts.Store {
 	case "local":
 		if c.Artifacts.Local.Dir == "" {

@@ -110,6 +110,9 @@ func (s *memoryStore) Nack(_ context.Context, lease Lease, _ error) error {
 	if !ok {
 		return nil
 	}
+	if entry.dead || !entry.readyAt.Equal(lease.Deadline) {
+		return ErrLeaseLost
+	}
 	entry.job.Attempts++
 	if max := s.cfg.MaxAttempts; max > 0 && entry.job.Attempts >= max {
 		entry.dead = true
@@ -122,9 +125,14 @@ func (s *memoryStore) Nack(_ context.Context, lease Lease, _ error) error {
 func (s *memoryStore) Release(_ context.Context, lease Lease, after time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if entry, ok := s.jobs[lease.ID]; ok {
-		entry.readyAt = time.Now().UTC().Add(after)
+	entry, ok := s.jobs[lease.ID]
+	if !ok {
+		return nil
 	}
+	if entry.dead || !entry.readyAt.Equal(lease.Deadline) {
+		return ErrLeaseLost
+	}
+	entry.readyAt = time.Now().UTC().Add(after)
 	return nil
 }
 

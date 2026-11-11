@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -152,6 +153,9 @@ func (s *boltStore) Nack(_ context.Context, lease Lease, _ error) error {
 		if payload == nil {
 			return nil
 		}
+		if !holdsLease(tx.Bucket(bucketReady), lease) {
+			return ErrLeaseLost
+		}
 		var job Job
 		if err := json.Unmarshal(payload, &job); err != nil {
 			return err
@@ -187,7 +191,13 @@ func (s *boltStore) Nack(_ context.Context, lease Lease, _ error) error {
 func (s *boltStore) Release(_ context.Context, lease Lease, after time.Duration) error {
 	now := time.Now().UTC().Add(after)
 	return s.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(bucketJobs).Get([]byte(lease.ID)) == nil {
+			return nil
+		}
 		ready := tx.Bucket(bucketReady)
+		if !holdsLease(ready, lease) {
+			return ErrLeaseLost
+		}
 		if err := ready.Delete(readyKey(lease.Deadline, lease.ID)); err != nil {
 			return err
 		}
@@ -225,6 +235,14 @@ func (s *boltStore) Stats(_ context.Context) (Stats, error) {
 }
 
 func (s *boltStore) Close() error { return s.db.Close() }
+
+// holdsLease reports whether the ready entry written by this lease's Claim
+// is still present, meaning no later Claim has taken the job.
+func holdsLease(ready *bolt.Bucket, lease Lease) bool {
+	key := readyKey(lease.Deadline, lease.ID)
+	found, _ := ready.Cursor().Seek(key)
+	return bytes.Equal(found, key)
+}
 
 // readyKey orders jobs by the time they become claimable.
 func readyKey(at time.Time, id string) []byte {

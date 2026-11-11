@@ -221,6 +221,22 @@ func TestValidateS3CredentialSources(t *testing.T) {
 	}
 }
 
+func TestValidateQueueBounds(t *testing.T) {
+	if err := validBase().Validate(); err != nil {
+		t.Fatalf("default queue bounds must be allowed: %v", err)
+	}
+	shortLease := validBase()
+	shortLease.Queue.VisibilityTimeout = Duration(30 * time.Second)
+	if err := shortLease.Validate(); err == nil {
+		t.Fatal("expected a visibility_timeout lower bound error")
+	}
+	shortDedupe := validBase()
+	shortDedupe.Queue.DedupeTTL = Duration(500 * time.Millisecond)
+	if err := shortDedupe.Validate(); err == nil {
+		t.Fatal("expected a dedupe_ttl lower bound error")
+	}
+}
+
 func TestTriggerRateLimitDefaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

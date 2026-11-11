@@ -26,6 +26,7 @@ type redisStore struct {
 
 	accept *redis.Script
 	claim  *redis.Script
+	settle *redis.Script
 }
 
 const acceptScript = `
@@ -65,6 +66,24 @@ end
 return out
 `
 
+const settleScript = `
+local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
+if not score or tonumber(score) ~= tonumber(ARGV[2]) then
+  return 0
+end
+if ARGV[3] == 'bury' then
+  redis.call('ZREM', KEYS[1], ARGV[1])
+  redis.call('HDEL', KEYS[2], ARGV[1])
+  redis.call('HSET', KEYS[3], ARGV[1], ARGV[5])
+  return 1
+end
+if ARGV[3] == 'retry' then
+  redis.call('HSET', KEYS[2], ARGV[1], ARGV[5])
+end
+redis.call('ZADD', KEYS[1], ARGV[4], ARGV[1])
+return 1
+`
+
 func newRedis(ctx context.Context, cfg config.QueueConfig) (*redisStore, error) {
 	options, err := redis.ParseURL(cfg.Redis.URL)
 	if err != nil {
@@ -85,6 +104,7 @@ func newRedis(ctx context.Context, cfg config.QueueConfig) (*redisStore, error) 
 		seen:   tag + ":seen:",
 		accept: redis.NewScript(acceptScript),
 		claim:  redis.NewScript(claimScript),
+		settle: redis.NewScript(settleScript),
 	}
 	if cfg.Redis.Cluster {
 		store.client = redis.NewClusterClient(&redis.ClusterOptions{
@@ -199,28 +219,30 @@ func (s *redisStore) Nack(ctx context.Context, lease Lease, _ error) error {
 	if err != nil {
 		return err
 	}
-	pipe := s.client.TxPipeline()
+	mode := "retry"
 	if max := s.cfg.MaxAttempts; max > 0 && job.Attempts >= max {
-		pipe.HDel(ctx, s.jobs, lease.ID)
-		pipe.ZRem(ctx, s.queue, lease.ID)
-		pipe.HSet(ctx, s.dead, lease.ID, updated)
-		_, err = pipe.Exec(ctx)
-		return err
+		mode = "bury"
 	}
-	pipe.HSet(ctx, s.jobs, lease.ID, updated)
-	pipe.ZAdd(ctx, s.queue, redis.Z{
-		Score:  float64(time.Now().UTC().Add(Backoff(job.Attempts, s.cfg.RetryBase.Std())).UnixMilli()),
-		Member: lease.ID,
-	})
-	_, err = pipe.Exec(ctx)
-	return err
+	score := time.Now().UTC().Add(Backoff(job.Attempts, s.cfg.RetryBase.Std())).UnixMilli()
+	return s.runSettle(ctx, lease, mode, score, updated)
 }
 
 func (s *redisStore) Release(ctx context.Context, lease Lease, after time.Duration) error {
-	return s.client.ZAdd(ctx, s.queue, redis.Z{
-		Score:  float64(time.Now().UTC().Add(after).UnixMilli()),
-		Member: lease.ID,
-	}).Err()
+	return s.runSettle(ctx, lease, "release", time.Now().UTC().Add(after).UnixMilli(), nil)
+}
+
+// runSettle reschedules or buries a job only while the caller still holds its
+// lease, and returns ErrLeaseLost otherwise.
+func (s *redisStore) runSettle(ctx context.Context, lease Lease, mode string, score int64, payload []byte) error {
+	res, err := s.settle.Run(ctx, s.client, []string{s.queue, s.jobs, s.dead},
+		lease.ID, lease.Deadline.UnixMilli(), mode, score, payload).Int()
+	if err != nil {
+		return fmt.Errorf("queue %s: %w", mode, err)
+	}
+	if res == 0 {
+		return ErrLeaseLost
+	}
+	return nil
 }
 
 func (s *redisStore) Stats(ctx context.Context) (Stats, error) {

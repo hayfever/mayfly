@@ -22,6 +22,9 @@ var (
 	ErrFull = errors.New("queue is full")
 	// ErrRetryLater tells the worker to requeue without counting an attempt.
 	ErrRetryLater = errors.New("retry later")
+	// ErrLeaseLost means the lease expired and the job was claimed again, so
+	// this holder may no longer reschedule it.
+	ErrLeaseLost = errors.New("queue lease lost")
 )
 
 // Job is one accepted session request.
