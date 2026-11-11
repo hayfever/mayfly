@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/hayden/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/config"
 )
 
 // Broker serves the internal credential-proxy endpoints.

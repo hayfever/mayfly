@@ -27,7 +27,7 @@ helm install mayfly deploy/helm/mayfly \
   --set config.server.public_url=https://mayfly.example.com
 ```
 
-The default images are `ghcr.io/hayden/mayflyd:v0.1.0` and `ghcr.io/hayden/mayfly-agent:v0.1.0`. Override `image` and `agentImage` for your registry.
+The default images are `ghcr.io/hayfever/mayflyd:v0.1.0` and `ghcr.io/hayfever/mayfly-agent:v0.1.0`. Override `image` and `agentImage` for your registry.
 
 Check the token:
 
@@ -101,9 +101,9 @@ For Bedrock on EKS, annotate `litellm.serviceAccount.annotations` with your IRSA
 
 | Value | Default | Meaning |
 |---|---|---|
-| `image.repository` | `ghcr.io/hayden/mayflyd` | Control-plane image |
+| `image.repository` | `ghcr.io/hayfever/mayflyd` | Control-plane image |
 | `image.digest` | empty | Pin instead of tag |
-| `agentImage.repository` | `ghcr.io/hayden/mayfly-agent` | Agent image |
+| `agentImage.repository` | `ghcr.io/hayfever/mayfly-agent` | Agent image |
 | `agentImage.digest` | empty | Pin instead of tag |
 | `imagePullSecrets` | empty | Secrets for control-plane, LiteLLM, and session images |
 | `existingSecret` | empty | Secret with control-plane env |

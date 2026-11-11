@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/hayden/mayfly/internal/stub"
+	"github.com/hayfever/mayfly/internal/stub"
 )
 
 func main() {

@@ -1,4 +1,4 @@
-module github.com/hayden/mayfly
+module github.com/hayfever/mayfly
 
 go 1.26.0
 

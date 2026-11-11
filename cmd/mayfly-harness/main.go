@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/hayden/mayfly/internal/harness"
+	"github.com/hayfever/mayfly/internal/harness"
 )
 
 func main() {

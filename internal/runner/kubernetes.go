@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hayden/mayfly/internal/k8s"
+	"github.com/hayfever/mayfly/internal/k8s"
 )
 
 // Kubernetes runs sessions as pods.

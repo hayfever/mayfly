@@ -13,12 +13,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hayden/mayfly/internal/llm"
-	"github.com/hayden/mayfly/internal/mcp"
-	"github.com/hayden/mayfly/internal/model"
-	"github.com/hayden/mayfly/internal/platformclient"
-	"github.com/hayden/mayfly/internal/sessioncfg"
-	"github.com/hayden/mayfly/internal/version"
+	"github.com/hayfever/mayfly/internal/llm"
+	"github.com/hayfever/mayfly/internal/mcp"
+	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/platformclient"
+	"github.com/hayfever/mayfly/internal/sessioncfg"
+	"github.com/hayfever/mayfly/internal/version"
 )
 
 // Runtime is the in-container agent session.

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/hayden/mayfly/internal/version"
+	"github.com/hayfever/mayfly/internal/version"
 )
 
 const protocolVersion = "2025-06-18"

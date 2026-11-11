@@ -19,9 +19,9 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/hayden/mayfly/internal/broker"
-	"github.com/hayden/mayfly/internal/config"
-	"github.com/hayden/mayfly/internal/session"
+	"github.com/hayfever/mayfly/internal/broker"
+	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/session"
 )
 
 //go:embed web/*

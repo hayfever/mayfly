@@ -5,7 +5,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/hayden/mayfly/internal/sessioncfg"
+	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
 // Spec is everything a backend needs to start one session.

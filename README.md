@@ -41,7 +41,7 @@ See [docs/architecture.md](docs/architecture.md) for the sequence and state mode
 
 ## Install with Helm
 
-Published images are `ghcr.io/hayden/mayflyd:v0.1.0` and `ghcr.io/hayden/mayfly-agent:v0.1.0`.
+Published images are `ghcr.io/hayfever/mayflyd:v0.1.0` and `ghcr.io/hayfever/mayfly-agent:v0.1.0`.
 
 ```bash
 kubectl create namespace mayfly
@@ -51,7 +51,7 @@ kubectl -n mayfly create secret generic mayfly-secrets \
   --from-literal=MAYFLY_WEBHOOK_SECRET="$(openssl rand -hex 24)" \
   --from-literal=OPENAI_API_KEY="sk-..."
 
-helm install mayfly oci://ghcr.io/hayden/charts/mayfly \
+helm install mayfly oci://ghcr.io/hayfever/charts/mayfly \
   --version 0.1.0 \
   --namespace mayfly \
   --set existingSecret=mayfly-secrets \

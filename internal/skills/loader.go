@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/hayden/mayfly/internal/sessioncfg"
+	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
 // Source is a pinned tar.gz archive of skills. It is normally a code hosting

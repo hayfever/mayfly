@@ -13,9 +13,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/hayden/mayfly/internal/agent"
-	"github.com/hayden/mayfly/internal/sessioncfg"
-	"github.com/hayden/mayfly/internal/version"
+	"github.com/hayfever/mayfly/internal/agent"
+	"github.com/hayfever/mayfly/internal/sessioncfg"
+	"github.com/hayfever/mayfly/internal/version"
 )
 
 func main() {

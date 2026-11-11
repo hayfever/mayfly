@@ -16,14 +16,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/hayden/mayfly/internal/artifact"
-	"github.com/hayden/mayfly/internal/config"
-	"github.com/hayden/mayfly/internal/httpapi"
-	"github.com/hayden/mayfly/internal/hub"
-	"github.com/hayden/mayfly/internal/k8s"
-	"github.com/hayden/mayfly/internal/runner"
-	"github.com/hayden/mayfly/internal/session"
-	"github.com/hayden/mayfly/internal/version"
+	"github.com/hayfever/mayfly/internal/artifact"
+	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/httpapi"
+	"github.com/hayfever/mayfly/internal/hub"
+	"github.com/hayfever/mayfly/internal/k8s"
+	"github.com/hayfever/mayfly/internal/runner"
+	"github.com/hayfever/mayfly/internal/session"
+	"github.com/hayfever/mayfly/internal/version"
 )
 
 func main() {

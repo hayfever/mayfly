@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hayden/mayfly/internal/model"
-	"github.com/hayden/mayfly/internal/session"
+	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/session"
 )
 
 type createRequest struct {

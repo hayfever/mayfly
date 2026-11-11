@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hayden/mayfly/internal/config"
-	"github.com/hayden/mayfly/internal/stub"
+	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/stub"
 )
 
 func testLogger() *slog.Logger {

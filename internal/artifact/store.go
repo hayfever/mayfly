@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hayden/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/config"
 )
 
 // ErrNotFound is returned when an artifact key does not exist.

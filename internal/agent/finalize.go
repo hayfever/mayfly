@@ -11,9 +11,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/hayden/mayfly/internal/bundle"
-	"github.com/hayden/mayfly/internal/model"
-	"github.com/hayden/mayfly/internal/version"
+	"github.com/hayfever/mayfly/internal/bundle"
+	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/version"
 )
 
 // finalize exports the artifact bundle, reports completion, and returns the

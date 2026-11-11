@@ -18,7 +18,7 @@ import (
 
 	"net/http"
 
-	"github.com/hayden/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/model"
 )
 
 // Client talks to the control plane with a scoped session token.

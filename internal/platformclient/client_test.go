@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hayden/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/model"
 )
 
 func TestInboxResetsAfterSequenceGap(t *testing.T) {

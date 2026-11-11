@@ -11,7 +11,7 @@ COPY . .
 ARG VERSION=dev
 ARG COMMIT=none
 ARG DATE=unknown
-RUN LDFLAGS="-s -w -X github.com/hayden/mayfly/internal/version.Version=${VERSION} -X github.com/hayden/mayfly/internal/version.Commit=${COMMIT} -X github.com/hayden/mayfly/internal/version.Date=${DATE}" \
+RUN LDFLAGS="-s -w -X github.com/hayfever/mayfly/internal/version.Version=${VERSION} -X github.com/hayfever/mayfly/internal/version.Commit=${COMMIT} -X github.com/hayfever/mayfly/internal/version.Date=${DATE}" \
  && go build -trimpath -ldflags "$LDFLAGS" -o /out/mayflyd ./cmd/mayflyd \
  && go build -trimpath -ldflags "$LDFLAGS" -o /out/mayfly-agent ./cmd/mayfly-agent \
  && go build -trimpath -ldflags "$LDFLAGS" -o /out/mayfly ./cmd/mayfly \

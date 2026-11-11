@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/hayden/mayfly/internal/sessioncfg"
+	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
 // systemPrompt builds the model instructions from the agent prompt, runtime

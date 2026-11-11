@@ -22,14 +22,14 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/hayden/mayfly/internal/artifact"
-	"github.com/hayden/mayfly/internal/config"
-	"github.com/hayden/mayfly/internal/httpapi"
-	"github.com/hayden/mayfly/internal/hub"
-	"github.com/hayden/mayfly/internal/model"
-	"github.com/hayden/mayfly/internal/runner"
-	"github.com/hayden/mayfly/internal/session"
-	"github.com/hayden/mayfly/internal/stub"
+	"github.com/hayfever/mayfly/internal/artifact"
+	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/httpapi"
+	"github.com/hayfever/mayfly/internal/hub"
+	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/runner"
+	"github.com/hayfever/mayfly/internal/session"
+	"github.com/hayfever/mayfly/internal/stub"
 )
 
 type sessionResponse struct {

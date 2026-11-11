@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hayden/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/config"
 )
 
 // TestS3CompatibleStore runs against a real S3-compatible server when

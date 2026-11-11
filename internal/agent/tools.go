@@ -16,8 +16,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/hayden/mayfly/internal/llm"
-	"github.com/hayden/mayfly/internal/mcp"
+	"github.com/hayfever/mayfly/internal/llm"
+	"github.com/hayfever/mayfly/internal/mcp"
 )
 
 const (

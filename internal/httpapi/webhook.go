@@ -5,7 +5,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/hayden/mayfly/internal/triggers"
+	"github.com/hayfever/mayfly/internal/triggers"
 )
 
 func (s *Server) receiveWebhook(w http.ResponseWriter, r *http.Request) {

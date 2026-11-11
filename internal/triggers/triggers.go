@@ -17,9 +17,9 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/hayden/mayfly/internal/config"
-	"github.com/hayden/mayfly/internal/model"
-	"github.com/hayden/mayfly/internal/session"
+	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/session"
 )
 
 // ErrUnauthorized means webhook verification failed.

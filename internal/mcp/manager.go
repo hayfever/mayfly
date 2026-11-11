@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/hayden/mayfly/internal/sessioncfg"
+	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
 // Manager owns every MCP client for one session.

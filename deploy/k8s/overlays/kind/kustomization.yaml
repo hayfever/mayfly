@@ -95,6 +95,6 @@ patches:
               type: slack
               allow_unsigned: true
 images:
-  - name: ghcr.io/hayden/mayflyd
+  - name: ghcr.io/hayfever/mayflyd
     newName: mayflyd
     newTag: dev

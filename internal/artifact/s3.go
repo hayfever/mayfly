@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hayden/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/config"
 )
 
 // sha256Hex returns the lowercase hex SHA-256 of data.

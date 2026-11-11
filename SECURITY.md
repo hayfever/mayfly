@@ -10,7 +10,7 @@
 
 Report vulnerabilities through GitHub private vulnerability reporting:
 
-https://github.com/hayden/mayfly/security/advisories/new
+https://github.com/hayfever/mayfly/security/advisories/new
 
 Do not open a public issue for an undisclosed vulnerability. Include:
 

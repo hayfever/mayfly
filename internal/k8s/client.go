@@ -16,7 +16,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/hayden/mayfly/internal/version"
+	"github.com/hayfever/mayfly/internal/version"
 )
 
 const managedSelector = LabelManaged + "=true," + LabelApp + "=" + AppName

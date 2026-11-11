@@ -6,9 +6,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/hayden/mayfly/internal/agents"
-	"github.com/hayden/mayfly/internal/config"
-	"github.com/hayden/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/agents"
+	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/model"
 )
 
 // AgentInfo is the public description of a selectable agent.

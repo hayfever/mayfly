@@ -25,6 +25,10 @@ First public release.
 - Kind e2e test covering webhook creation, pod isolation, MCP tools, WebSocket replay, close, artifacts, and TTL expiry.
 - CI and release workflows: tests, Helm lint, kind e2e, multi-arch GHCR images, SBOMs, provenance, CLI archives, and OCI chart publishing.
 
+### Changed
+
+- The module path and published images use `github.com/hayfever/mayfly` and `ghcr.io/hayfever`.
+
 ### Known limitations
 
 - The control plane runs one replica. Session records and thread history are in memory; artifacts are durable.

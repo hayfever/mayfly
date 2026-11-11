@@ -14,8 +14,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 
-	"github.com/hayden/mayfly/internal/sessioncfg"
-	"github.com/hayden/mayfly/internal/stub"
+	"github.com/hayfever/mayfly/internal/sessioncfg"
+	"github.com/hayfever/mayfly/internal/stub"
 )
 
 func TestMCPHelperProcess(t *testing.T) {

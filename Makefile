@@ -5,7 +5,7 @@ VERSION ?= dev
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 CLUSTER ?= mayfly
-LDFLAGS := -s -w -X github.com/hayden/mayfly/internal/version.Version=$(VERSION) -X github.com/hayden/mayfly/internal/version.Commit=$(COMMIT) -X github.com/hayden/mayfly/internal/version.Date=$(DATE)
+LDFLAGS := -s -w -X github.com/hayfever/mayfly/internal/version.Version=$(VERSION) -X github.com/hayfever/mayfly/internal/version.Commit=$(COMMIT) -X github.com/hayfever/mayfly/internal/version.Date=$(DATE)
 CMDS := mayflyd mayfly-agent mayfly mayfly-harness llmstub mcpstub
 
 .PHONY: build test vet fmt image kind-create kind-up kind-down deploy e2e run-local clean FORCE

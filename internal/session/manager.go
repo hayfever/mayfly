@@ -20,16 +20,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hayden/mayfly/internal/agents"
-	"github.com/hayden/mayfly/internal/artifact"
-	"github.com/hayden/mayfly/internal/config"
-	"github.com/hayden/mayfly/internal/hub"
-	"github.com/hayden/mayfly/internal/k8s"
-	"github.com/hayden/mayfly/internal/model"
-	"github.com/hayden/mayfly/internal/runner"
-	"github.com/hayden/mayfly/internal/sessioncfg"
-	"github.com/hayden/mayfly/internal/skills"
-	"github.com/hayden/mayfly/internal/version"
+	"github.com/hayfever/mayfly/internal/agents"
+	"github.com/hayfever/mayfly/internal/artifact"
+	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/hub"
+	"github.com/hayfever/mayfly/internal/k8s"
+	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/runner"
+	"github.com/hayfever/mayfly/internal/sessioncfg"
+	"github.com/hayfever/mayfly/internal/skills"
+	"github.com/hayfever/mayfly/internal/version"
 )
 
 // ErrNotFound is returned for unknown sessions.

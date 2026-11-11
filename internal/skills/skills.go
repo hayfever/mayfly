@@ -20,7 +20,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/hayden/mayfly/internal/sessioncfg"
+	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
 type frontmatter struct {

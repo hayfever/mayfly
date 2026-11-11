@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hayden/mayfly/internal/model"
-	"github.com/hayden/mayfly/internal/platformclient"
+	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/platformclient"
 )
 
 // emitter posts thread events to the control plane and writes a local copy.

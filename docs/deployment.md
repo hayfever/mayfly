@@ -42,7 +42,7 @@ The e2e test ([hack/e2e-kind.sh](../hack/e2e-kind.sh)) checks:
 
 ## Helm
 
-The release chart is published to `oci://ghcr.io/hayden/charts/mayfly`.
+The release chart is published to `oci://ghcr.io/hayfever/charts/mayfly`.
 
 ```bash
 kubectl create namespace mayfly
@@ -51,7 +51,7 @@ kubectl -n mayfly create secret generic mayfly-secrets \
   --from-literal=MAYFLY_WEBHOOK_SECRET="$(openssl rand -hex 24)" \
   --from-literal=OPENAI_API_KEY="sk-..."
 
-helm install mayfly oci://ghcr.io/hayden/charts/mayfly \
+helm install mayfly oci://ghcr.io/hayfever/charts/mayfly \
   --version 0.1.0 \
   --namespace mayfly \
   --set existingSecret=mayfly-secrets \

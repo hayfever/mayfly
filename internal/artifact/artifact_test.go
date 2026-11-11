@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hayden/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/config"
 )
 
 func TestSignV4KnownVector(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hayden/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/model"
 )
 
 type stream struct {

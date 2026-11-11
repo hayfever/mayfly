@@ -6,7 +6,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/hayden/mayfly/internal/llm"
+	"github.com/hayfever/mayfly/internal/llm"
 )
 
 // conversation stores the full model-visible message history and persists it

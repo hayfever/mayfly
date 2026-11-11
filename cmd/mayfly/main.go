@@ -15,8 +15,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/hayden/mayfly/internal/model"
-	"github.com/hayden/mayfly/internal/version"
+	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/version"
 )
 
 func main() {

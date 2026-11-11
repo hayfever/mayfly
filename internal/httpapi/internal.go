@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hayden/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/model"
 )
 
 func (s *Server) internalEvents(w http.ResponseWriter, r *http.Request) {

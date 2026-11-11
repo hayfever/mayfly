@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hayden/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/config"
 )
 
 func hmacHex(secret string, body []byte) string {
