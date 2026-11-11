@@ -14,6 +14,7 @@ Sessions are the unit of work. There is no always-on agent.
 - MCP servers (stdio in the container, HTTP through a credential proxy) and Markdown skills injected at startup, including verified remote skill sources from repo or archive links.
 - Shared interactive thread over WebSocket: many people can attach, send messages, and watch tool calls.
 - Explicit close, TTL expiry, idle timeout, and crash recovery.
+- A session cap (`sessions.max_concurrent`) and per-trigger webhook rate limits, so one noisy trigger cannot overrun the cluster.
 - Artifact export on teardown: conversation, events, traces, generated workspace files, and a manifest. Local filesystem or S3-compatible storage.
 - Isolation defaults: non-root, read-only root filesystem, all capabilities dropped, no service account token, default-deny ingress, egress only to the control plane and DNS.
 - LLM and HTTP MCP credentials stay in the control plane. Sessions receive one scoped token.

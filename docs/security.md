@@ -60,6 +60,15 @@ Remote skill archives are fetched by the control plane at startup, verified by S
 
 `runtime.command`, `runtime.args`, and `runtime.env` are trusted manifest configuration. They become pod settings. Do not accept them from API requests. Environment values are literal and visible in the pod spec; `MAYFLY_SESSION_TOKEN` and `MAYFLY_CONFIG` are reserved and rejected at startup if a manifest or `runtime.env` sets them. The pod builder also drops them, so a repeated env name cannot override the session token. Harness-specific data belongs in `runtime.config`, which the built-in runtime ignores. `runtime.config` is written to the session ConfigMap, so do not put secrets there either.
 
+## Trigger authentication
+
+- `generic` and `datadog` triggers accept an HMAC signature or the shared `X-Mayfly-Token` header.
+- `github` triggers accept only `X-Hub-Signature-256`. GitHub signs each delivery, so the static token is not accepted there; a bearer token can be replayed from logs.
+- `slack` triggers verify `X-Slack-Signature` inside a 5-minute timestamp window.
+- `allow_unsigned: true` disables verification. Use it only for local development.
+- Every trigger has a token-bucket rate limit. A request spends a token only after its signature verifies, so unauthenticated traffic cannot exhaust the trigger. Requests over the limit get `429` before a session is created.
+- `sessions.max_concurrent` caps total live sessions across every creation path.
+
 ## What is intentionally permissive
 
 - The shell tool (`run_command`) is off by default. Set `sessions.allow_shell: true`, or `allowShell` in an agent manifest, when an agent needs it. The container, not the tool, is the security boundary.

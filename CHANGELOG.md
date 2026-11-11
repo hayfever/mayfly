@@ -24,6 +24,7 @@ First public release.
 - Versioned CLI, control-plane, and agent builds with commit and date metadata.
 - Kind e2e test covering webhook creation, pod isolation, MCP tools, WebSocket replay, close, artifacts, and TTL expiry.
 - CI and release workflows: tests, Helm lint, kind e2e, multi-arch GHCR images, SBOMs, provenance, CLI archives, and OCI chart publishing.
+- Session cap (`sessions.max_concurrent`) and per-trigger webhook rate limits; both answer `429` with `Retry-After`.
 - `sessions.retention` expires finished sessions from memory and releases their thread state.
 - `/readyz` reports lifecycle state instead of always returning ready.
 - S3 artifact export can use the default AWS credential chain, including IAM roles for service accounts.
@@ -36,6 +37,7 @@ First public release.
 - A session becomes `running` when its runtime connects, not when the container starts.
 - The LLM broker accepts only the model assigned to the session and fills an empty model field with it.
 - The LLM and MCP proxy clients bound connection setup and response-header wait with `llm.timeout`.
+- Webhook rate limits count only verified requests.
 - `/readyz` no longer calls the artifact store, and the probes set `timeoutSeconds: 3`.
 - The module path and published images use `github.com/hayfever/mayfly` and `ghcr.io/hayfever`.
 - The S3 store sends checksums only when required, for compatibility with R2, B2, and older MinIO.

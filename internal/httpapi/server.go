@@ -21,6 +21,7 @@ import (
 
 	"github.com/hayfever/mayfly/internal/broker"
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/ratelimit"
 	"github.com/hayfever/mayfly/internal/session"
 )
 
@@ -81,6 +82,7 @@ type Server struct {
 	broker     *broker.Broker
 	logger     *slog.Logger
 	triggers   map[string]config.TriggerConfig
+	limiters   map[string]*ratelimit.Limiter
 	mcpServers map[string]config.MCPServerConfig
 	tickets    *ticketStore
 	web        fs.FS
@@ -91,8 +93,12 @@ type Server struct {
 func New(cfg *config.Config, mgr *session.Manager, logger *slog.Logger) *Server {
 	sub, _ := fs.Sub(webAssets, "web")
 	triggersByName := map[string]config.TriggerConfig{}
+	limiters := map[string]*ratelimit.Limiter{}
 	for _, t := range cfg.Triggers {
 		triggersByName[t.Name] = t
+		if t.RateLimit != nil {
+			limiters[t.Name] = ratelimit.New(t.RateLimit.Requests, t.RateLimit.Interval.Std(), t.RateLimit.Burst)
+		}
 	}
 	mcpServers := map[string]config.MCPServerConfig{}
 	for _, m := range cfg.MCP.Servers {
@@ -104,6 +110,7 @@ func New(cfg *config.Config, mgr *session.Manager, logger *slog.Logger) *Server 
 		broker:     broker.New(cfg.LLM, logger),
 		logger:     logger,
 		triggers:   triggersByName,
+		limiters:   limiters,
 		mcpServers: mcpServers,
 		tickets:    newTicketStore(),
 		web:        sub,

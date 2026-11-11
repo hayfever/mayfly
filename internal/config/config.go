@@ -211,17 +211,26 @@ type MCPServerConfig struct {
 
 // TriggerConfig defines one webhook endpoint at /hooks/<name>.
 type TriggerConfig struct {
-	Name          string   `yaml:"name"`
-	Type          string   `yaml:"type"` // generic, github, slack, datadog
-	SecretEnv     string   `yaml:"secret_env"`
-	AllowUnsigned bool     `yaml:"allow_unsigned"`
-	Template      string   `yaml:"template"`
-	TTL           Duration `yaml:"ttl"`
-	Model         string   `yaml:"model"`
-	Agent         string   `yaml:"agent"`
-	Skills        []string `yaml:"skills"`
-	MCPServers    []string `yaml:"mcp_servers"`
-	Secret        string   `yaml:"-"`
+	Name          string           `yaml:"name"`
+	Type          string           `yaml:"type"` // generic, github, slack, datadog
+	SecretEnv     string           `yaml:"secret_env"`
+	AllowUnsigned bool             `yaml:"allow_unsigned"`
+	Template      string           `yaml:"template"`
+	TTL           Duration         `yaml:"ttl"`
+	Model         string           `yaml:"model"`
+	Agent         string           `yaml:"agent"`
+	Skills        []string         `yaml:"skills"`
+	MCPServers    []string         `yaml:"mcp_servers"`
+	RateLimit     *RateLimitConfig `yaml:"rate_limit"`
+	Secret        string           `yaml:"-"`
+}
+
+// RateLimitConfig bounds how many sessions one trigger can request. Requests
+// refill over Interval up to Burst. Requests: 0 disables the limit.
+type RateLimitConfig struct {
+	Requests int      `yaml:"requests"`
+	Interval Duration `yaml:"interval"`
+	Burst    int      `yaml:"burst"`
 }
 
 // Default returns a configuration with safe defaults applied.
@@ -347,7 +356,34 @@ func (c *Config) applyDefaults() {
 	if c.Runtime.PollInterval.Std() <= 0 {
 		c.Runtime.PollInterval = Duration(2 * time.Second)
 	}
+	for i := range c.Triggers {
+		rl := c.Triggers[i].RateLimit
+		if rl == nil {
+			c.Triggers[i].RateLimit = &RateLimitConfig{
+				Requests: defaultTriggerRateRequests,
+				Interval: Duration(defaultTriggerRateInterval),
+				Burst:    defaultTriggerRateBurst,
+			}
+			continue
+		}
+		if rl.Interval.Std() <= 0 {
+			rl.Interval = Duration(defaultTriggerRateInterval)
+		}
+		if rl.Burst <= 0 {
+			rl.Burst = rl.Requests
+		}
+		if rl.Burst <= 0 {
+			rl.Burst = 1
+		}
+	}
 }
+
+// Default webhook rate limit: 30 sessions per minute with a burst of 10.
+const (
+	defaultTriggerRateRequests = 30
+	defaultTriggerRateInterval = time.Minute
+	defaultTriggerRateBurst    = 10
+)
 
 func (c *Config) resolveSecrets() error {
 	c.AdminToken = os.Getenv(c.Server.TokenEnv)
@@ -577,6 +613,17 @@ func (c *Config) Validate() error {
 		}
 		if t.Secret == "" && !t.AllowUnsigned {
 			return fmt.Errorf("trigger %q: secret_env %s is not set and allow_unsigned is false", t.Name, t.SecretEnv)
+		}
+		if t.RateLimit != nil {
+			if t.RateLimit.Requests < 0 {
+				return fmt.Errorf("trigger %q: rate_limit.requests must not be negative", t.Name)
+			}
+			if t.RateLimit.Requests > 0 && t.RateLimit.Interval.Std() <= 0 {
+				return fmt.Errorf("trigger %q: rate_limit.interval must be positive", t.Name)
+			}
+			if t.RateLimit.Burst < 0 {
+				return fmt.Errorf("trigger %q: rate_limit.burst must not be negative", t.Name)
+			}
 		}
 	}
 	return nil

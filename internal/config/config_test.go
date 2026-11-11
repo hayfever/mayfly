@@ -220,3 +220,47 @@ func TestValidateS3CredentialSources(t *testing.T) {
 		t.Fatalf("static credentials must be allowed: %v", err)
 	}
 }
+
+func TestTriggerRateLimitDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := []byte(`runtime:
+  backend: local
+  agent_binary: ./agent
+llm:
+  base_url: http://localhost:9099/v1
+  model: stub
+triggers:
+  - name: default-limit
+    type: generic
+    allow_unsigned: true
+  - name: unlimited
+    type: generic
+    allow_unsigned: true
+    rate_limit:
+      requests: 0
+  - name: custom
+    type: generic
+    allow_unsigned: true
+    rate_limit:
+      requests: 6
+      interval: 30s
+      burst: 2
+`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Triggers[0].RateLimit; got.Requests != 30 || got.Burst != 10 || got.Interval.Std() != time.Minute {
+		t.Fatalf("default rate limit = %+v", got)
+	}
+	if got := cfg.Triggers[1].RateLimit; got.Requests != 0 || got.Interval.Std() != time.Minute {
+		t.Fatalf("disabled rate limit = %+v", got)
+	}
+	if got := cfg.Triggers[2].RateLimit; got.Requests != 6 || got.Burst != 2 || got.Interval.Std() != 30*time.Second {
+		t.Fatalf("custom rate limit = %+v", got)
+	}
+}

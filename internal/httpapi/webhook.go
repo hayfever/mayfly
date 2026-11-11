@@ -4,6 +4,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/hayfever/mayfly/internal/triggers"
 )
@@ -35,6 +37,15 @@ func (s *Server) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	if result.Challenge != nil {
 		writeJSON(w, http.StatusOK, result.Challenge)
+		return
+	}
+	// Spend a rate-limit token only for a verified request that will create a
+	// session. Unsigned traffic must not be able to exhaust a trigger's budget.
+	if limiter := s.limiters[name]; !limiter.Allow() {
+		seconds := int(limiter.RetryAfter() / time.Second)
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		s.logger.Warn("webhook rate limited", "trigger", name, "retry_after_seconds", seconds)
+		writeError(w, http.StatusTooManyRequests, "trigger rate limit reached")
 		return
 	}
 	created, err := s.mgr.Create(r.Context(), result.Options)

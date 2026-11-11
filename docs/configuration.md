@@ -191,6 +191,10 @@ triggers:
     ttl: 30m
     skills: [incident-triage]
     mcp_servers: [github]
+    rate_limit:
+      requests: 30
+      interval: 1m
+      burst: 10
 ```
 
 | Key | Meaning |
@@ -201,6 +205,11 @@ triggers:
 | `allow_unsigned` | Skip verification. Use only for local development |
 | `template` | Optional Go `text/template` applied to a `Data` value |
 | `ttl`, `model`, `agent`, `skills`, `mcp_servers` | Session defaults for this trigger |
+| `rate_limit.requests` | Sessions admitted per `interval`. Default `30`. `0` disables the limit |
+| `rate_limit.interval` | Refill period. Default `1m` |
+| `rate_limit.burst` | Requests admitted at once before the rate applies. Default `10` |
+
+A trigger over its limit gets `429` with `Retry-After`. Only requests that pass signature verification spend a token, so unsigned traffic cannot shut a trigger. The limit is per trigger and per control-plane process; `queue.max_jobs` and `sessions.max_concurrent` remain the last lines of defense across all creation paths.
 
 Template data fields: `.Trigger`, `.Type`, `.Event`, `.Delivery`, `.Actor`, `.Agent`, `.Title`, `.Body`, `.URL`, `.Payload`.
 
