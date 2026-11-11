@@ -2,7 +2,7 @@
 
 ## Version policy
 
-- Tags are `vMAJOR.MINOR.PATCH`.
+- Tags are `vMAJOR.MINOR.PATCH`, or `vMAJOR.MINOR.PATCH-rc.N` for a release candidate.
 - The chart version and app version match the tag without the `v`.
 - Images are published as `ghcr.io/<owner>/mayflyd:<version>` and `ghcr.io/<owner>/mayfly-agent:<version>`.
 - The chart is published to `oci://ghcr.io/<owner>/charts/mayfly`.
@@ -41,6 +41,17 @@ The release workflow runs on `v*` tags:
 - GoReleaser builds CLI archives, checksums, and the GitHub release.
 - Docker Buildx publishes multi-arch control-plane and agent images with SBOM and provenance.
 - Helm packages the chart, pushes it to GHCR OCI, and attaches it to the release.
+
+## Release candidates
+
+Tag a candidate to exercise the full release path before the final tag:
+
+```bash
+git tag -a v0.1.0-rc.1 -m "Mayfly v0.1.0-rc.1"
+git push origin v0.1.0-rc.1
+```
+
+The same workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`), images are tagged `0.1.0-rc.1` without `latest` or `0.1`, and the chart is pushed as `0.1.0-rc.1`. Install it with `--version 0.1.0-rc.1`. When the candidate passes, tag `v0.1.0` on the same commit.
 
 ## Post-release verification
 
