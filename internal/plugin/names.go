@@ -11,6 +11,10 @@ import (
 const (
 	containerPrefix = "plugin-"
 	pluginDir       = "plugins"
+	// gatewayKeyPrefix names the Secret that holds a service plugin's
+	// call-token key. It must not use SecretPrefix: a bundle's own secret named
+	// mayfly-plugin-<name> must never resolve to the key that signs calls.
+	gatewayKeyPrefix = "mayfly-gateway-"
 )
 
 // ToolName is the model-visible name of one plugin tool. The shape matches
@@ -68,11 +72,19 @@ func ContainerName(name string) string {
 	return dnsName(containerPrefix, name)
 }
 
-// ObjectName is the name of the Deployment, Service, NetworkPolicy, and
-// Secret that mayflyd reconciles for one service plugin: a DNS-1035 label,
-// which must start with a letter.
+// ObjectName is the name of the Deployment, Service, and NetworkPolicy that
+// mayflyd reconciles for one service plugin: a DNS-1035 label, which must start
+// with a letter.
 func ObjectName(name string) string {
 	return dnsName(SecretPrefix, name)
+}
+
+// GatewayKeyName is the name of the Secret that holds one service plugin's
+// call-token key. The prefix differs from SecretPrefix on purpose: a bundle
+// cannot reference this Secret as a plugin secret, and pruning the plugin
+// cannot delete an operator's credential.
+func GatewayKeyName(name string) string {
+	return dnsName(gatewayKeyPrefix, name)
 }
 
 // dnsName maps a plugin name onto a DNS label. A name that does not fit keeps

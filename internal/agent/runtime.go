@@ -131,7 +131,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 		r.stopChildren()
 		return r.finalize(context.Background(), "failed", err)
 	}
-	grant, sidecarTokens, err := r.discoverTools(ctx)
+	grant, wildcards, sidecarTokens, err := r.discoverTools(ctx)
 	if err != nil {
 		if !permanentGatewayError(err) {
 			// The control plane is unreachable, not wrong. Exit without
@@ -160,6 +160,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 		MCP:          r.mcp,
 		Plugins:      r.plugins,
 		Grant:        grant,
+		Wildcards:    wildcards,
 		Artifacts:    artifacts,
 	})
 	if err != nil {
@@ -432,17 +433,17 @@ func (r *Runtime) reportHidden(ctx context.Context) {
 	}
 }
 
-// discoverTools reads the session's tool grant from the gateway. The runtime
-// routes exactly the granted tools through the gateway; anything else,
-// including the MCP servers it still reaches directly, keeps its local path.
-// The sidecar discovery tokens are returned with the grant.
-func (r *Runtime) discoverTools(ctx context.Context) (map[string]gateway.DiscoveryTool, map[string]gateway.SidecarToken, error) {
+// discoverTools reads the session's tool grant from the gateway. Every granted
+// tool and every tool of a wildcard stdio server goes through the gateway;
+// anything else keeps its local path. The wildcard owners and sidecar discovery
+// tokens are returned with the grant.
+func (r *Runtime) discoverTools(ctx context.Context) (map[string]gateway.DiscoveryTool, map[string]gateway.Placement, map[string]gateway.SidecarToken, error) {
 	discovery, err := retryGateway(ctx, r.logger, "list tools",
 		func(ctx context.Context) (gateway.Discovery, error) {
 			return r.gateway.Tools(ctx)
 		})
 	if err != nil {
-		return nil, nil, fmt.Errorf("read tool grant: %w", err)
+		return nil, nil, nil, fmt.Errorf("read tool grant: %w", err)
 	}
 	var required []error
 	for _, failure := range discovery.Errors {
@@ -454,13 +455,13 @@ func (r *Runtime) discoverTools(ctx context.Context) (map[string]gateway.Discove
 		r.events.Emit(ctx, model.EventSystem, "mayfly", "Plugin unavailable: "+err.Error(), nil)
 	}
 	if len(required) > 0 {
-		return nil, nil, errors.Join(required...)
+		return nil, nil, nil, errors.Join(required...)
 	}
 	grant := make(map[string]gateway.DiscoveryTool, len(discovery.Tools))
 	for _, tool := range discovery.Tools {
 		grant[tool.Name] = tool
 	}
-	return grant, discovery.Sidecars, nil
+	return grant, discovery.Wildcards, discovery.Sidecars, nil
 }
 
 // turnCounter counts turns that are queued or running. The idle timer must not

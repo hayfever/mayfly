@@ -4,10 +4,13 @@
 
 | Component | Responsibility |
 |---|---|
-| `mayflyd` | API, webhooks, session registry, thread bus, artifact storage, credential proxy, Kubernetes/local orchestration, timeouts, adoption |
+| `mayflyd` | API, webhooks, session registry, thread bus, artifact storage, credential proxy, tool gateway, Kubernetes/local orchestration, timeouts, adoption |
 | `mayfly-harness` | Image entrypoint: selects the named in-image harness or falls back to `mayfly-agent` |
-| `mayfly-agent` | Built-in agent loop, MCP clients, built-in tools, conversation and trace logs, bundle assembly and upload |
-| Agent manifest | Declarative agent name, prompt, model, skills, MCP servers, limits, optional runtime image |
+| `mayfly-agent` | Built-in agent loop, MCP clients, plugin host, built-in tools, conversation and trace logs, bundle assembly and upload |
+| `mayfly-plugin-shim` | Copies inline plugin trees into the pod, and serves a stdio plugin over streamable HTTP on a Unix socket or TCP for sidecar and service plugins |
+| Tool gateway | One choke point for every non-built-in tool call: grant, ledger, idempotency key, timeouts, rate limits, call tokens, audit |
+| Plugin workload | `inline` child in the agent container, `sidecar` container in the session pod, or reconciled `service` Deployment |
+| Agent manifest | Declarative agent name, prompt, model, skills, MCP servers, plugins, limits, optional runtime image |
 | Web UI / CLI | Human attach over WebSocket, message send, close, artifact download |
 | Kubernetes | Runs one pod per session with a per-session Secret and ConfigMap |
 | Artifact store | Local filesystem or S3-compatible object storage |
@@ -21,7 +24,10 @@ The control plane and runtime communicate over HTTP. The runtime initiates every
 - `POST /internal/v1/sessions/{id}/artifacts` — final bundle.
 - `POST /internal/v1/sessions/{id}/finalize` — terminal status.
 - `POST /internal/v1/llm/chat/completions` — model calls through the broker.
-- `* /internal/v1/mcp/{server}` — MCP HTTP calls through the broker.
+- `GET /internal/v1/sessions/{id}/tools` — the session's tool grant, sidecar discovery tokens, and unavailable owners.
+- `POST /internal/v1/sessions/{id}/tools/calls` — authorize one tool call. The answer is a recorded result or a dispatch with an idempotency key, a timeout, and for a sidecar a call token.
+- `POST /internal/v1/sessions/{id}/tools/calls/complete` — the result of a locally dispatched call.
+- `* /internal/v1/mcp/{server}` — MCP HTTP calls through the broker. The built-in harness uses it to list a server's tools; alternate harnesses also call tools through it.
 
 No inbound path to a session pod is required. The NetworkPolicy drops all ingress.
 
@@ -92,6 +98,44 @@ sequenceDiagram
   UI->>CP: GET artifact
 ```
 
+Before the runtime accepts a prompt it starts its inline plugins, reads the
+tool grant from the gateway, connects the session's sidecars with the discovery
+tokens the grant carries, and compares each plugin's `tools/list` with the
+manifest. A required plugin that is unavailable fails the session; an optional
+one records a `system` event and its tools are not offered.
+
+## Tool gateway
+
+A session's grant is fixed when it is created. `session.Manager` resolves the
+agent's `plugins` and `mcpServers`, builds a grant with `gateway.GrantFor`, and
+registers it before the pod starts. Adoption rebuilds the same grant from
+`session.json` and the bundle. A wildcard `mcp.servers` entry is resolved
+against the server's own tool list at call time.
+
+The model sees built-in tools, `mcp_<server>_<tool>`, and
+`plugin_<plugin>_<tool>`. Every non-built-in call follows one path:
+
+| Placement | Who makes the call | Ledger |
+|---|---|---|
+| `inline`, `sidecar`, stdio `mcp.servers` | The runtime, after the gateway authorizes it; the runtime reports the result | Written at begin and complete |
+| `service`, HTTP `mcp.servers` | The gateway, which holds the upstream client and credentials | Written and completed by the gateway |
+
+The idempotency key is `<session>/<turn>/<step>`. The gateway hashes the
+arguments and never stores them, and it caps a stored result at the tool's
+output limit. On resume, a `done` record returns the recorded result with
+`replayed`; a `pending` non-idempotent record returns an interrupted error
+result and is marked done; a `pending` idempotent record is dispatched again
+with the same key.
+
+Service plugins are rendered from the bundle by `internal/pluginsvc`: a
+Deployment, a Service, a NetworkPolicy, and a gateway key Secret. Reconcile runs
+at startup and every `plugins.reconcile_interval`. Sidecar call tokens are
+signed with the session's `gateway-key`; service call tokens with the
+per-plugin key. The audit record carries neither arguments nor results.
+
+If the gateway is unreachable, the runtime retries within a five-minute budget
+and exits without finalizing, so a replacement container resumes the turn.
+
 ## Turn journal
 
 A user message starts a turn. The runtime records the turn as a prefix of ordered steps:
@@ -134,7 +178,7 @@ On startup the runtime reads the journal; it does not need a flag, so a replacem
 
 A journal entry is deleted when its session finalizes. The artifact bundle is the durable history; the journal exists only to resume an active session.
 
-Exactly-once external side effects are out of scope. A tool that was executing when the container died has no journal entry and runs again after resume; `run_command` in particular may repeat. Streaming assistant deltas are not journaled, so the interrupted step can show duplicate deltas after a retry.
+Exactly-once external side effects hold for tools the gateway grants. A call that finished but whose journal step did not land replays its recorded result, and a non-idempotent call that was in flight when the container died is not repeated. Built-in tools are outside the ledger: `run_command` can repeat after a resume. Streaming assistant deltas are not journaled, so the interrupted step can show duplicate deltas after a retry.
 
 ## State model
 
@@ -189,11 +233,11 @@ Retention is bounded per session (`sessions.event_buffer`, default 5000 events).
 
 | Entry | Content |
 |---|---|
-| `manifest.json` | session id, title, agent, model, status, reason, skills, MCP servers, counts, file list, partial flag, truncation flag |
+| `manifest.json` | session id, title, agent, harness, model, status, reason, skills, MCP servers, plugins, counts, file list, partial flag, truncation flag |
 | `events.jsonl` | thread events (streaming deltas excluded) |
 | `conversation.jsonl` | full model-visible message history |
 | `traces.jsonl` | LLM requests/responses, tool calls/results, durations |
-| `files/...` | workspace files |
+| `files/...` | workspace files and one `plugins/<name>.stderr.log` per inline plugin |
 | `session.json` | runtime configuration for the session |
 
 `manifest.json` is written last and lists every other entry. The upload is content-addressed by SHA-256 and verified by the control plane.
@@ -207,7 +251,10 @@ Retention is bounded per session (`sessions.event_buffer`, default 5000 events).
 | Runtime exits without finalize | A pod that reaches `Succeeded` falls back after 20 s. A `Failed` pod is replaced while attempts remain, then falls back. On the local backend, a child exit after 2 s starts a replacement process in the same state directory |
 | Close does not finalize | After `sessions.close_grace` (default 90 s), force stop and fallback export |
 | Artifact upload fails | Runtime retries 3 times, then finalizes as `failed` with no bundle. The control-plane fallback runs only if that finalize report also fails and the runtime exits |
-| Control plane restarts | Running pods labeled `mayfly.io/managed=true` are adopted from their ConfigMap and Secret, the hub is seeded above the reserved sequence floor, and the last journaled turn is restored to the thread with its step keys. A runtime in flight retries transient model and journal requests through the replacement control plane for up to 5 minutes per step, then exits so a replacement resumes. A session that lost its pod but kept its ConfigMap, Secret, and workspace claim gets a replacement pod at startup. A pod whose ConfigMap is gone belongs to a session that finalized mid-cleanup (cleanup deletes the ConfigMap first) and is deleted. The rest of the objects are garbage-collected. With no journal state at all (persistence off), the hub is seeded at the current time in microseconds, so new messages never reuse the in-flight turn's key |
+| Tool gateway unreachable | The runtime retries each begin and complete for up to 5 minutes, then exits without finalizing so a replacement resumes. It never runs a tool without a successful begin |
+| Tool call interrupted by a restart | Non-idempotent: the gateway returns an interrupted error result and the runtime emits a `system` event. Idempotent: the call is dispatched again with the same key. A completed call whose journal step did not land replays the recorded result |
+| Plugin unavailable | `required: true` fails the session at start. Otherwise a `system` event and the session continues without its tools |
+| Control plane restarts | Running pods labeled `mayfly.io/managed=true` are adopted from their ConfigMap and Secret, the hub is seeded above the reserved sequence floor, and the last journaled turn is restored to the thread with its step keys. A runtime in flight retries transient model, tool gateway, and journal requests through the replacement control plane for up to 5 minutes per step, then exits so a replacement resumes. A session that lost its pod but kept its ConfigMap, Secret, and workspace claim gets a replacement pod at startup. A pod whose ConfigMap is gone belongs to a session that finalized mid-cleanup (cleanup deletes the ConfigMap first) and is deleted. The rest of the objects are garbage-collected. With no journal state at all (persistence off), the hub is seeded at the current time in microseconds, so new messages never reuse the in-flight turn's key |
 | TTL elapses | Close with reason `expired`; runtime finalizes; status becomes `expired` |
 | SIGTERM or SIGINT | A drain, eviction, preemption, or `kubectl delete` is not a close. The runtime stops the turn, closes its logs, and exits non-zero without finalizing, so the control plane starts a replacement. It finalizes when a close control event was received, or with its full bundle when the session cannot resume (`sessions.max_restarts: 0`, or a Kubernetes session without a persistent workspace) |
 

@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -315,6 +316,9 @@ func (g *Gateway) Discover(ctx context.Context, session string) (Discovery, erro
 	if len(sidecars) > 0 {
 		out.Sidecars = sidecars
 	}
+	if len(grant.Wildcards) > 0 {
+		out.Wildcards = grant.Wildcards
+	}
 	return out, nil
 }
 
@@ -464,7 +468,19 @@ func (g *Gateway) Complete(ctx context.Context, session string, req CompleteRequ
 		return errf(http.StatusNotFound, "unknown call %q", req.Key)
 	}
 	grant, hasGrant := g.grantFor(session)
-	tool := grant.Tools[rec.Tool]
+	tool, ok := grant.Tools[rec.Tool]
+	if !ok {
+		// A stdio mcp.servers entry without an allowlist is not in the fixed
+		// table. Keep the audit record's owner and placement for it.
+		tool = GrantTool{Name: rec.Tool, MaxOutput: plugin.MaxOutputBytes}
+		for owner, placement := range grant.Wildcards {
+			if placement == MCPStdio && strings.HasPrefix(rec.Tool, mcp.ToolPrefix(owner)) {
+				tool.Owner = owner
+				tool.Placement = placement
+				break
+			}
+		}
+	}
 	limit := tool.MaxOutput
 	if limit <= 0 {
 		limit = plugin.MaxOutputBytes

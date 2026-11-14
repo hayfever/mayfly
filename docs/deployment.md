@@ -74,6 +74,8 @@ helm install mayfly deploy/helm/mayfly \
 
 The chart creates the control-plane and agent ServiceAccounts, RBAC, ConfigMaps for skills and agent manifests, Service, optional Ingress, and optional LiteLLM deployment. Set `image.digest` and `agentImage.digest` for immutable images and `imagePullSecrets` for private registries. See [../deploy/helm/mayfly/README.md](../deploy/helm/mayfly/README.md).
 
+Service plugins need `config.plugins.namespace`. When it is empty it follows `config.sessions.namespace`. The chart renders the plugin Role and RoleBinding in that namespace when it differs from the release namespace: create, get, list, update, and delete on Secrets, Services, Deployments, and NetworkPolicies. Set `config.agents.allowed_images` to allow the plugin images, and `config.plugins.audit_path` when you want the call audit on the control-plane volume. Inline and sidecar plugins need no extra RBAC: their objects are part of the session pod.
+
 ## Real cluster with Kustomize
 
 1. Build and push images:
@@ -88,7 +90,7 @@ docker push registry.example.com/mayfly-agent:v0.1.0
 2. Edit the base manifests or overlay:
 
 - `deployment.yaml`: control-plane image and optional agent ConfigMap mount.
-- `configmap.yaml`: `runtime.image`, `server.public_url`, `server.internal_url`, LLM, MCP, agents, triggers, artifact store.
+- `configmap.yaml`: `runtime.image`, `server.public_url`, `server.internal_url`, LLM, MCP, agents, plugins, triggers, artifact store.
 - `serviceaccount.yaml` / `rbac.yaml`: namespace and permissions if you do not use `mayfly`.
 - `service.yaml`: use `ClusterIP` or `LoadBalancer` behind your ingress; NodePort is for the demo.
 
@@ -184,7 +186,7 @@ A job that exhausts `queue.max_attempts` is buried. List it with `GET /api/v1/qu
 
 For multiple model providers, deploy LiteLLM and point `llm.base_url` at its Service. A starting manifest is in [examples/litellm/deployment.yaml](../examples/litellm/deployment.yaml); see [providers.md](providers.md) for keys, IRSA, and model aliases.
 
-The control plane needs RBAC for pods, pod logs, secrets, configmaps, and networkpolicies in the session namespace. See [rbac.yaml](../deploy/k8s/base/rbac.yaml).
+The control plane needs RBAC for pods, pod logs, secrets, configmaps, networkpolicies, deployments, and services in the session namespace. Service plugins need the same permissions on secrets, services, deployments, and networkpolicies in `plugins.namespace`. See [rbac.yaml](../deploy/k8s/base/rbac.yaml).
 - Session pods use a dedicated ServiceAccount with no bindings and token automount disabled.
 - Set `runtime.network_policy: true` and verify your CNI enforces NetworkPolicy.
 - Add ResourceQuota and LimitRange to cap concurrent sessions.
@@ -212,6 +214,9 @@ Common causes:
 | Pod stays Pending | Image loaded or pullable; namespace quota; service account exists |
 | Runtime cannot reach control plane | `server.internal_url`, Service name/port, NetworkPolicy egress labels |
 | Model calls fail | `llm.base_url`, API key, model allowlist, egress from control plane |
-| MCP tool missing | Server assigned to session, upstream reachable from control plane, headers resolved |
+| MCP tool missing | Server assigned to session, upstream reachable from control plane, headers resolved, `tools` allowlist |
+| Plugin tool missing | Plugin in the agent `plugins` list, manifest under `plugins/`, `mayflyd -check` output, image allowlist |
+| Plugin unavailable at session start | Init and sidecar logs, service Deployment and probes, gateway Secret in `plugins.namespace`, `mayflyd` reconcile errors |
+| Service plugin tool fails | Service pod logs, NetworkPolicy egress to `service.egress` and DNS, call token key in `mayfly-gateway-<name>` |
 | No artifact | Runtime logs; close grace; fallback bundle; store credentials |
 | Attach fails | `server.public_url` scheme and host; ticket expiry; ingress WebSocket support |

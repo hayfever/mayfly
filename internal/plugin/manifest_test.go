@@ -618,6 +618,12 @@ func TestContainerAndObjectNames(t *testing.T) {
 	if got := ObjectName("Word_Stats.v2"); got != "mayfly-plugin-word-stats-v2" {
 		t.Fatalf("ObjectName = %q", got)
 	}
+	if got := GatewayKeyName("notify"); got != "mayfly-gateway-notify" {
+		t.Fatalf("GatewayKeyName = %q", got)
+	}
+	if GatewayKeyName("notify") == ObjectName("notify") {
+		t.Fatal("gateway key name matches a plugin object name")
+	}
 
 	label := regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
 	hashSuffix := regexp.MustCompile(`-[0-9a-f]{8}$`)

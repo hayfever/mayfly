@@ -81,6 +81,7 @@ config:
     dns_namespace: kube-system
     workspace_limit: 1Gi
     artifact_volume_limit: 1Gi
+    plugin_volume_limit: 512Mi
     storage_class: ""
     poll_interval: 2s
     resources:
@@ -132,6 +133,12 @@ config:
     backend: bbolt
     bbolt:
       path: /var/lib/mayfly/journal.db
+  plugins:
+    namespace: "" # defaults to config.sessions.namespace
+    reconcile_interval: 60s
+    prune: true
+    audit_path: ""
+    max_inflight_calls: 256
   mcp:
     servers: []
   triggers: []

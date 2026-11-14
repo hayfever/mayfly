@@ -19,8 +19,8 @@ design for the largest one.
 | Item | Status | Where |
 | --- | --- | --- |
 | 8.1 Inbound artifacts and `read_artifact` | Implemented. Reads check size and SHA-256 | `internal/session/manager.go` (`ReadArtifact`) |
-| 8.2 Delivery records for effectful tools | Open. A crash between an MCP call and its journal entry can repeat the call | `internal/agent/steps.go` |
-| 8.3 Per-agent MCP tool allowlist | Open. `mcpServers` selects servers, not tools | `internal/agents/agents.go` |
+| 8.2 Delivery records for effectful tools | Implemented for plugins and `mcp.servers` under the built-in harness. An alternate harness bypasses the gateway and can still repeat an in-flight call | `internal/gateway`, `internal/journal/ledger.go` |
+| 8.3 Per-agent MCP tool allowlist | Open. `mcp.servers[].tools` narrows a server's tools for every session; an agent cannot select a subset | `internal/agents/agents.go` |
 | 8.4 Data plane: connections, `http.json` sources, schedules | Implemented | `internal/project`, `internal/sources`, `internal/workflow` |
 | 9.7 Source job kind on the durable queue | Implemented, with lease renewal (`Store.Extend`) and a per-kind timeout (`sources.job_timeout`) | `internal/queue/worker.go` |
 | 9.13 Per-document state store | Not built. Firecrawl keeps the snapshot. Mayfly keeps only the slot watermark and the run artifact | `internal/workflow/scheduler.go` |
@@ -96,14 +96,23 @@ inbound role. Adding one removes the prompt cap as an architectural limit.
 
 ## 4. Gap 3: no effect guarantees
 
-The queue is at-least-once, and the documentation states the boundary plainly:
-a completed tool call is never repeated, but the tool call that was in flight
-when the container died can run again (`ARCHITECTURE.md`, Invariants, Session).
+The queue is at-least-once. A completed tool call is never repeated, but
+without a delivery record the tool call that was in flight when the container
+died could run again.
 
 For a read tool that is harmless. For `post_alert` it is a duplicate Slack
 message. MCP defines `isError` and content blocks. It does not define
 idempotency, a delivery record, or retry semantics. The model requests the
 effect and the platform cannot guarantee it once.
+
+Shipped: the tool gateway records every granted call in a ledger keyed by
+`<session>/<turn>/<step>`. A call that finished but whose journal step did not
+land replays its recorded result. A call that was in flight when the container
+died is not repeated when the tool is non-idempotent; the model gets an error
+result that says the effect may already have happened. Tools that are safe to
+repeat are listed in `idempotent_tools` or declared `idempotent: true`. This
+covers plugins and `mcp.servers` under the built-in harness. An alternate
+harness still uses `* /internal/v1/mcp/{server}` and has no delivery record.
 
 ## 5. Gap 4: an undefined auth stance
 
@@ -167,6 +176,16 @@ re-executes an in-flight tool call.
 
 Acceptance: kill the container between the tool call and the journal entry.
 The replacement session does not post a second message.
+
+Shipped in a different shape: the tool gateway, not the agent step code, holds
+the record. Every granted call begins in a ledger keyed by
+`<session>/<turn>/<step>` with the argument hash; the result is stored on
+completion. `internal/agent` consults the gateway before it runs a tool, and
+the gateway answers a pending non-idempotent call with an interrupted error
+instead of a second dispatch. The `idempotent` flag on a plugin tool and
+`idempotent_tools` on an `mcp.servers` entry are the per-tool declaration, and
+the default is non-idempotent. Per-agent subsets (8.3) remain open; a `tools`
+allowlist on `mcp.servers` narrows a server for every session.
 
 ### 8.3 Tool curation
 
@@ -617,7 +636,8 @@ Provider behavior lives in configuration:
 
 ### 9.10 Scheduler
 
-Add `internal/schedule` and use `github.com/robfig/cron/v3`.
+Shipped as `internal/workflow` (`scheduler.go`); it uses
+`github.com/robfig/cron/v3`.
 
 - Load enabled schedules at startup from agent files. A restart picks up
   changes. This matches agent loading.
@@ -761,7 +781,8 @@ Buckets: `meta` (`schedule/<name>/last_slot`), `sources` (`<source>/<key>`),
 Idempotency: one session per slot, enforced by the delivery key. The session
 is created with `CreateOptions.IdempotencyKey` set to the job ID, so the crash
 window between `Create` and `Ack` returns the existing session instead of a
-second one. The effect side (change 8.2) is still open.
+second one. The effect side (change 8.2) is covered by the tool gateway's
+ledger for plugins and `mcp.servers` under the built-in harness.
 
 ### 9.16 Admin API and logs
 
@@ -846,7 +867,7 @@ reads in windows, an oversize read is refused.
 ### Phase 1: config, connections, state, scheduler, queue
 
 `internal/config`, `internal/state`, `internal/sources` (types, registry, DAG
-runner), `internal/schedule`, queue `Kind` and `SourceJob`, the composite
+runner), `internal/workflow`, queue `Kind` and `SourceJob`, the composite
 handler, `cmd/mayflyd` wiring, `go.mod` (`github.com/robfig/cron/v3`).
 
 Tests: cron next-run across a DST boundary, invalid cron, invalid timezone,

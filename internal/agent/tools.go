@@ -47,7 +47,10 @@ type toolsetConfig struct {
 	MCP          *mcp.Manager
 	Plugins      *pluginhost.Host
 	Grant        map[string]gateway.DiscoveryTool
-	Artifacts    ArtifactReader
+	// Wildcards names the mcp.servers owners whose tools the grant does not
+	// list. A local stdio tool of such an owner is still a gateway call.
+	Wildcards map[string]gateway.Placement
+	Artifacts ArtifactReader
 }
 
 type toolset struct {
@@ -58,6 +61,7 @@ type toolset struct {
 	mcp          *mcp.Manager
 	plugins      *pluginhost.Host
 	grant        map[string]gateway.DiscoveryTool
+	wildcards    map[string]gateway.Placement
 	artifacts    ArtifactReader
 }
 
@@ -74,16 +78,38 @@ func newToolset(cfg toolsetConfig) (*toolset, error) {
 		mcp:          cfg.MCP,
 		plugins:      cfg.Plugins,
 		grant:        cfg.Grant,
+		wildcards:    cfg.Wildcards,
 		artifacts:    cfg.Artifacts,
 	}, nil
 }
 
 func (t *toolset) Close() error { return t.root.Close() }
 
-// Granted returns the gateway's grant for one tool.
+// Granted returns the gateway's grant for one tool. An mcp.servers entry
+// without an allowlist grants its tools by name prefix; the runtime can prove
+// the tool exists because its own manager listed it.
 func (t *toolset) Granted(name string) (gateway.DiscoveryTool, bool) {
 	tool, ok := t.grant[name]
-	return tool, ok
+	if ok {
+		return tool, true
+	}
+	if t.mcp == nil || len(t.wildcards) == 0 {
+		return gateway.DiscoveryTool{}, false
+	}
+	for _, local := range t.mcp.Tools() {
+		if local.Name != name {
+			continue
+		}
+		if t.wildcards[local.Server] != gateway.MCPStdio {
+			return gateway.DiscoveryTool{}, false
+		}
+		return gateway.DiscoveryTool{
+			Name:      name,
+			Owner:     local.Server,
+			Placement: gateway.MCPStdio,
+		}, true
+	}
+	return gateway.DiscoveryTool{}, false
 }
 
 // Tools returns the OpenAI tool declarations the model may call: built-ins,

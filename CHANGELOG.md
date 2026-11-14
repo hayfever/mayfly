@@ -12,8 +12,16 @@ First public release.
 - One hardened Kubernetes pod per session, with a local process backend for development.
 - Interactive shared thread over WebSocket, with a web UI and `mayfly attach` CLI.
 - MCP servers: stdio inside the session image and HTTP through the control-plane credential proxy.
+- Plugins: MCP servers declared in a bundle under `plugins/<name>/plugin.yaml`, in one of three placements. `inline` runs the plugin as a child of the runtime, `sidecar` runs it in the session pod behind a Unix-socket shim, and `service` runs a Deployment that `mayflyd` reconciles and shares across sessions. Tool names are `plugin_<plugin>_<tool>` in every placement.
+- A tool gateway in `mayflyd` for every non-built-in tool call. It holds the session's grant, records each call in a durable ledger keyed by `<session>/<turn>/<step>`, attaches the idempotency key, enforces call timeouts, plugin rate limits, and an in-flight cap, signs sidecar and service call tokens, and writes an audit record without arguments or results.
+- `cmd/mayfly-plugin-shim`: `install-self` and `copy` stage plugin trees into a pod; `serve` supervises a stdio plugin and serves it over streamable HTTP with token checks and replay dedupe; `probe` backs the startup and readiness probes.
+- `mayfly plugin init|check|test` for offline plugin work, with Go, Python, and TypeScript scaffolds, plus the `examples/plugins/notify` (sidecar), `tickets` (service), and `word-count` (inline) plugins.
+- Service plugin support in `internal/pluginsvc`: one Deployment, Service, NetworkPolicy, and gateway key Secret per plugin, reconciled at startup and on an interval, with pruning, a `resourceVersion` update on spec change, and an `http` transport for plugins that serve MCP themselves.
+- Sidecar support: native sidecar containers on a shared socket volume, one `gateway-key` in the session Secret mounted only into sidecars, and call tokens that the shim verifies.
+- `plugins:` configuration block (`namespace`, `reconcile_interval`, `prune`, `audit_path`, `max_inflight_calls`) and `runtime.plugin_volume_limit`.
+- `mcp.servers[].tools` to allowlist a server's tools, and `mcp.servers[].idempotent_tools` to mark the tools that are safe to repeat.
 - Markdown skills from local directories and SHA-256-pinned remote archives or repository links.
-- Selectable agent manifests with prompt templates, model, skills, MCP servers, limits, and shell policy.
+- Selectable agent manifests with prompt templates, model, skills, MCP servers, plugins, limits, and shell policy.
 - In-image harness selection through `mayfly-harness`, with a built-in Mayfly fallback.
 - Artifact export containing conversation, events, traces, workspace files, and a manifest.
 - Local filesystem and S3-compatible artifact stores.
@@ -96,6 +104,10 @@ First public release.
 - `sessions.persistent_workspace: false` now disables replacement containers instead of resuming onto an empty workspace.
 - The idle timer no longer finalizes a session while a turn is running, and only resets between turns.
 - Pod failure detection treats a pod that is terminating or Running but not ready as missing, and stops waiting on container configuration errors that cannot recover.
+- Every plugin call and every `mcp.servers` tool call now goes through the tool gateway under the built-in harness. Tool names do not change. `* /internal/v1/mcp/{server}` remains for alternate harnesses.
+- Resume no longer repeats a tool call that was in flight when the container died, unless the tool is marked idempotent. A completed call whose journal step did not land replays its recorded result instead of running again. Before this change an in-flight `mcp_*` call ran again after resume; now it returns an error result that says the effect may already have happened.
+- `mayflyd -check` prints the resolved plugins. It fails on an unknown or invisible plugin, an alternate harness that selects plugins, an inline plugin with secrets under `allowShell`, an image outside `agents.allowed_images`, and a `service.mcpServer` that is missing, not HTTP, or not visible to the agent.
+- The Helm chart renders a second Role and RoleBinding in `config.plugins.namespace` when that namespace differs from the release namespace, and `config.plugins` and `config.runtime.plugin_volume_limit` are chart values.
 
 ### Fixed
 
@@ -125,13 +137,16 @@ First public release.
 - No Prometheus metrics or tracing endpoint; structured logs only.
 - No OpenAPI schema. The HTTP API is documented manually and may change in 0.x.
 - No artifact encryption, image signing, or admission policy is provided by the platform itself.
-- Exactly-once external side effects are not provided. A tool that was executing when the container died can run again; `run_command` in particular may repeat.
+- Exactly-once external side effects hold for tools the gateway grants. Built-in tools are outside the ledger: a `run_command` that was executing when the container died can run again.
 - Streaming assistant deltas are not journaled, so a retried step can show duplicate deltas.
 - The journal keeps every turn of an active session until it finalizes, up to `journal.max_session_bytes`. A session that reaches the quota can no longer journal steps, so a crash after that point cannot resume the turn.
-- An MCP tool with external effects, such as a Slack post, can run twice if the container dies after the call and before the step is journaled.
+- An alternate harness bypasses the tool gateway through `* /internal/v1/mcp/{server}`, so its MCP calls have no ledger record and can repeat after a crash.
+- Plugins are trusted operator code and are not sandboxed beyond the pod security context. Do not load a plugin you would not run as a cluster workload.
 
 ### Security
 
 - Sessions receive one scoped token that expires with the session.
 - LLM and MCP credentials are injected by the control plane.
+- Sidecar and service plugin secrets stay outside the agent container. An inline plugin's secrets are files in the agent container, so an agent with `allowShell` cannot select such a plugin.
+- Sidecar calls carry a short-lived token signed with the session's `gateway-key`, which is mounted only into sidecars. Service calls carry a token signed with the per-plugin key in `mayfly-gateway-<name>`.
 - The default NetworkPolicy requires a CNI that enforces it. The e2e suite verifies enforcement.

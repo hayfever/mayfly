@@ -17,9 +17,10 @@ Sessions are the unit of work. There is no always-on agent.
 - Durable webhook intake: verified deliveries are queued (`memory`, `bbolt`, or any Redis-protocol cache) and answered immediately, then a worker creates the session.
 - Raw API and CLI creation.
 - One Kubernetes pod per session, or a local process backend for development.
-- Selectable agent manifests: prompt, model, skills, MCP servers, limits, and an in-image harness name.
+- Selectable agent manifests: prompt, model, skills, MCP servers, plugins, limits, and an in-image harness name.
 - `mayfly-harness` entrypoint selects a named harness or falls back to the built-in loop.
 - MCP servers (stdio in the container, HTTP through a credential proxy) and Markdown skills injected at startup, including verified remote skill sources from repo or archive links.
+- Plugins: MCP servers declared in the bundle as `inline`, `sidecar`, or `service` workloads, with one tool gateway, a delivery ledger, call tokens, per-plugin rate limits, and an audit log. `mayfly plugin init|check|test` works offline.
 - Shared interactive thread over WebSocket: many people can attach, send messages, and watch tool calls.
 - Explicit close, TTL expiry, idle timeout, and crash recovery.
 - A session cap (`sessions.max_concurrent`) and per-trigger webhook rate limits, so one noisy trigger cannot overrun the cluster.
@@ -49,7 +50,7 @@ flowchart LR
   M -->|"runner.Stop: teardown"| R
 ```
 
-`mayflyd` owns the trigger, queue, and session layers. The session runtime only makes outbound calls to it, and it never holds an LLM, MCP, or object-store credential. Delivery is at least once: jobs are leased, and a lease that expires makes the job claimable again.
+`mayflyd` owns the trigger, queue, session, and tool gateway layers. The session runtime only makes outbound calls to it, and it never holds an LLM, MCP, or object-store credential. Delivery is at least once: jobs are leased, and a lease that expires makes the job claimable again. Tool calls are recorded in a ledger, so a replacement container replays a completed call instead of repeating it.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the code map and invariants, and [docs/architecture.md](docs/architecture.md) for sequence diagrams and failure handling.
 
@@ -162,7 +163,7 @@ curl -sS http://localhost:8080/hooks/generic \
   -d '{"prompt":"Check the latest deploy"}'
 ```
 
-Full endpoint list: [docs/api.md](docs/api.md). Provider auth: [docs/providers.md](docs/providers.md). Scheduled sources: [docs/sources.md](docs/sources.md). Release process: [docs/release.md](docs/release.md). Testing: [docs/testing.md](docs/testing.md). Plugins (planned, not built yet): [docs/plugins.md](docs/plugins.md).
+Full endpoint list: [docs/api.md](docs/api.md). Provider auth: [docs/providers.md](docs/providers.md). Scheduled sources: [docs/sources.md](docs/sources.md). Release process: [docs/release.md](docs/release.md). Testing: [docs/testing.md](docs/testing.md). Plugins: [docs/plugins.md](docs/plugins.md).
 
 ## Configuration
 
@@ -207,9 +208,9 @@ Default session pod:
 - `automountServiceAccountToken: false`, service links disabled.
 - EmptyDir workspace, artifact, and tmp volumes with size limits.
 - NetworkPolicy: no ingress; egress only to the control plane, cluster DNS, and explicit CIDRs.
-- One random session token. It can only write that session's events, upload its artifact, read its inbox, and use the model and MCP servers assigned to the session.
+- One random session token. It can only write that session's events, upload its artifact, read its inbox, call its granted tools, and use the model and MCP servers assigned to the session.
 - `run_command` is off unless `sessions.allow_shell` or an agent manifest enables it.
-- No LLM key, object-store credential, or MCP credential in the container.
+- No LLM key, object-store credential, or MCP credential in the container. Sidecar and service plugin secrets stay outside it; an inline plugin's secrets are files in the agent container, so `allowShell` is refused with them.
 
 Read [docs/security.md](docs/security.md) before exposing the platform beyond localhost. The short version: this is a single-tenant core, not a multi-tenant SaaS. Use SSO/auth proxy, TLS, per-cluster RBAC, and a CNI that enforces NetworkPolicy.
 
@@ -221,6 +222,8 @@ Read [docs/security.md](docs/security.md) before exposing the platform beyond lo
 - **Trigger:** add a verifier and prompt builder in [internal/triggers](internal/triggers).
 - **MCP transport:** add a client in [internal/mcp](internal/mcp).
 - **Agent tools:** add built-ins in [internal/agent/tools.go](internal/agent/tools.go).
+- **Plugin:** declare an MCP server under `plugins/<name>/plugin.yaml` and select it from an agent manifest. Use `mayfly plugin init|check|test`; see [docs/plugins.md](docs/plugins.md). Every plugin call already goes through `internal/gateway`, so a new placement would add a dispatch mode there and not a second tool path.
+- **Plugin placement:** `internal/plugin` owns the manifest, `internal/pluginsvc` renders service workloads, and `internal/pluginhost` runs what is inside the pod.
 
 Keep the credential boundary: new tool backends should be reached through the control plane when they need secrets.
 
@@ -239,15 +242,21 @@ Keep the credential boundary: new tool backends should be reached through the co
 | `cmd/mayflyd` | control plane |
 | `cmd/mayfly-harness` | image entrypoint: selects an in-image harness or Mayfly fallback |
 | `cmd/mayfly-agent` | built-in session runtime |
+| `cmd/mayfly-plugin-shim` | copies plugin trees into a pod and serves a stdio plugin over HTTP |
 | `cmd/mayfly` | CLI |
 | `internal/session` | lifecycle, thread, agent registry, artifact export |
 | `internal/agents` | agent manifest loading and prompt templates |
+| `internal/plugin` | plugin manifest, validation, and names |
+| `internal/gateway` | tool grant, ledger, call tokens, rate limits, audit, remote dispatch |
+| `internal/pluginhost` | inline supervisor and sidecar client |
+| `internal/pluginsvc` | service plugin reconcile and local service children |
 | `internal/httpapi` | API, web UI, webhooks, WebSocket |
-| `internal/k8s` | pod, secret, config map, NetworkPolicy |
+| `internal/k8s` | pod, secret, config map, NetworkPolicy, plugin volumes and sidecars |
 | `internal/agent` | agent loop, tools, traces, bundle |
 | `internal/mcp`, `internal/llm` | protocol clients |
 | `internal/broker` | LLM and MCP credential proxy |
 | `internal/artifact` | local and S3-compatible stores |
+| `examples/plugins` | Go sidecar, Python service, and TypeScript inline examples |
 | `deploy/k8s` | base manifests and local overlay |
 | `deploy/helm/mayfly` | Helm chart with optional LiteLLM |
 | `hack` | local run, k3d cluster, e2e runner |
