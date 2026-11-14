@@ -2,6 +2,8 @@
 package k8s
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -12,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
+	"github.com/hayfever/mayfly/internal/plugin"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
@@ -30,6 +33,16 @@ const (
 	WorkspaceDir = "/workspace"
 	// ArtifactsDir holds logs and the bundle while it is built.
 	ArtifactsDir = "/artifacts"
+	// PluginsDir holds the copied trees of the inline plugins.
+	PluginsDir = "/opt/mayfly/plugins"
+	// PluginSecretsDir holds one directory of secret files per inline plugin.
+	PluginSecretsDir = "/var/run/mayfly/plugin-secrets"
+	// ToolsDir holds the shim that the copy init containers run.
+	ToolsDir = "/mayfly-tools"
+	// PluginShim is the shim's path in the agent image.
+	PluginShim = "/usr/local/bin/mayfly-plugin-shim"
+	// PluginImageDir is the directory a plugin image must contain.
+	PluginImageDir = "/mayfly-plugin"
 
 	// WorkspaceSubPath and ArtifactsSubPath select directories inside the
 	// per-session workspace volume.
@@ -76,6 +89,14 @@ type SessionSpec struct {
 	Args                []string
 	SessionJSON         []byte
 	Token               string
+	// Plugins are the session's plugins. This package renders only the inline
+	// placement; service plugins need no pod objects and sidecars come later.
+	Plugins []sessioncfg.Plugin
+	// ToolsImage is runtime.image. It supplies the shim and never follows the
+	// per-agent image override, so every pod that stages plugins has one.
+	ToolsImage string
+	// PluginVolumeLimit bounds the copied files of all inline plugins.
+	PluginVolumeLimit string
 	// NetworkPolicyName is the policy's own name. It must not follow the pod
 	// name: a replacement pod changes the name, while the policy stays.
 	NetworkPolicyName string
@@ -141,7 +162,46 @@ func (s *SessionSpec) Validate() error {
 	if _, err := resource.ParseQuantity(s.ArtifactLimit); err != nil {
 		return fmt.Errorf("invalid artifact limit: %w", err)
 	}
+	if len(s.inlinePlugins()) > 0 {
+		if s.ToolsImage == "" {
+			return fmt.Errorf("tools image is required with inline plugins")
+		}
+		if _, err := resource.ParseQuantity(s.PluginVolumeLimit); err != nil {
+			return fmt.Errorf("invalid plugin volume limit: %w", err)
+		}
+	}
 	return nil
+}
+
+// inlinePlugins returns the plugins that place files in the pod.
+func (s *SessionSpec) inlinePlugins() []sessioncfg.Plugin {
+	var out []sessioncfg.Plugin
+	for _, p := range s.Plugins {
+		if p.Placement == "inline" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// pluginSecretVolumeName is the volume that holds one inline plugin's secret
+// files. Volume names are DNS labels while manifest names allow dots and
+// underscores, so the volume name maps them.
+func pluginSecretVolumeName(name string) string {
+	return dnsName("plugin-secrets-", name)
+}
+
+// dnsName maps a name onto a DNS label. A name that does not fit keeps a hash
+// suffix, so two long names cannot truncate to the same label.
+func dnsName(prefix, name string) string {
+	label := prefix + strings.NewReplacer(".", "-", "_", "-").Replace(strings.ToLower(name))
+	if len(label) <= 63 {
+		return label
+	}
+	sum := sha256.Sum256([]byte(label))
+	suffix := hex.EncodeToString(sum[:])[:8]
+	keep := 63 - len(suffix) - 1
+	return strings.TrimRight(label[:keep], "-") + "-" + suffix
 }
 
 func values(m map[string]string) []string {
@@ -191,7 +251,6 @@ func (s *SessionSpec) Pod() *corev1.Pod {
 	no := false
 	yes := true
 	seccomp := corev1.SeccompProfileTypeRuntimeDefault
-	rootfs := true
 	deadline := int64(s.TTL.Seconds()) + 300
 
 	env := []corev1.EnvVar{
@@ -241,6 +300,7 @@ func (s *SessionSpec) Pod() *corev1.Pod {
 				FSGroup:        new(int64(agentGID)),
 				SeccompProfile: &corev1.SeccompProfile{Type: seccomp},
 			},
+			InitContainers: s.initContainers(),
 			Containers: []corev1.Container{{
 				Name:            "agent",
 				Image:           s.Image,
@@ -248,16 +308,7 @@ func (s *SessionSpec) Pod() *corev1.Pod {
 				Command:         s.Command,
 				Args:            s.Args,
 				Env:             env,
-				SecurityContext: &corev1.SecurityContext{
-					RunAsNonRoot:             &yes,
-					RunAsUser:                new(int64(agentUID)),
-					RunAsGroup:               new(int64(agentGID)),
-					AllowPrivilegeEscalation: &no,
-					ReadOnlyRootFilesystem:   &rootfs,
-					Privileged:               &no,
-					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-					SeccompProfile:           &corev1.SeccompProfile{Type: seccomp},
-				},
+				SecurityContext: s.containerSecurityContext(),
 				Resources: corev1.ResourceRequirements{
 					Requests: quantities(s.Resources.Requests),
 					Limits:   quantities(s.Resources.Limits),
@@ -266,6 +317,98 @@ func (s *SessionSpec) Pod() *corev1.Pod {
 			}},
 			Volumes: s.volumes(),
 		},
+	}
+}
+
+// containerSecurityContext is the hardened identity of every container in the
+// pod, including the copy init containers.
+func (s *SessionSpec) containerSecurityContext() *corev1.SecurityContext {
+	no := false
+	yes := true
+	seccomp := corev1.SeccompProfileTypeRuntimeDefault
+	rootfs := true
+	return &corev1.SecurityContext{
+		RunAsNonRoot:             &yes,
+		RunAsUser:                new(int64(agentUID)),
+		RunAsGroup:               new(int64(agentGID)),
+		AllowPrivilegeEscalation: &no,
+		ReadOnlyRootFilesystem:   &rootfs,
+		Privileged:               &no,
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		SeccompProfile:           &corev1.SeccompProfile{Type: seccomp},
+	}
+}
+
+// initContainers copies the shim and the inline plugin trees into the pod.
+// A pod without inline plugins has no init containers, so it renders exactly
+// as it did before plugins existed.
+func (s *SessionSpec) initContainers() []corev1.Container {
+	inline := s.inlinePlugins()
+	if len(inline) == 0 {
+		return nil
+	}
+	containers := []corev1.Container{s.toolsContainer()}
+	for _, p := range inline {
+		containers = append(containers, s.pluginCopyContainer(p))
+	}
+	return containers
+}
+
+// toolsContainer copies the shim out of the tools image, so the plugin copy
+// containers and the sidecars can run it whatever their own image holds.
+func (s *SessionSpec) toolsContainer() corev1.Container {
+	return corev1.Container{
+		Name:            "mayfly-tools",
+		Image:           s.ToolsImage,
+		ImagePullPolicy: corev1.PullPolicy(s.ImagePullPolicy),
+		Command:         []string{PluginShim, "install-self", ToolsDir + "/mayfly-plugin-shim"},
+		SecurityContext: s.containerSecurityContext(),
+		Resources: corev1.ResourceRequirements{
+			Requests: copyRequests(),
+			Limits:   copyLimits(),
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "mayfly-tools", MountPath: ToolsDir},
+		},
+	}
+}
+
+// pluginCopyContainer copies one inline plugin's tree into the plugins
+// volume. The plugin image's entrypoint never runs, so an image with only
+// /mayfly-plugin works even when its base is scratch.
+func (s *SessionSpec) pluginCopyContainer(p sessioncfg.Plugin) corev1.Container {
+	return corev1.Container{
+		Name:            plugin.ContainerName(p.Name),
+		Image:           p.Image,
+		ImagePullPolicy: corev1.PullPolicy(s.ImagePullPolicy),
+		Command: []string{
+			ToolsDir + "/mayfly-plugin-shim",
+			"copy", PluginImageDir, PluginsDir + "/" + p.Name,
+		},
+		SecurityContext: s.containerSecurityContext(),
+		Resources: corev1.ResourceRequirements{
+			Requests: copyRequests(),
+			Limits:   copyLimits(),
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "mayfly-tools", MountPath: ToolsDir, ReadOnly: true},
+			{Name: "plugins", MountPath: PluginsDir},
+		},
+	}
+}
+
+// copyRequests and copyLimits size a copy container; the work is a file copy
+// under a 1 GiB backstop, so the pod budget stays small.
+func copyRequests() corev1.ResourceList {
+	return corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("10m"),
+		corev1.ResourceMemory: resource.MustParse("32Mi"),
+	}
+}
+
+func copyLimits() corev1.ResourceList {
+	return corev1.ResourceList{
+		corev1.ResourceMemory: resource.MustParse("128Mi"),
 	}
 }
 
@@ -284,7 +427,21 @@ func (s *SessionSpec) volumeMounts() []corev1.VolumeMount {
 			corev1.VolumeMount{Name: "artifacts", MountPath: ArtifactsDir},
 		)
 	}
-	return append(mounts, corev1.VolumeMount{Name: "tmp", MountPath: "/tmp"})
+	mounts = append(mounts, corev1.VolumeMount{Name: "tmp", MountPath: "/tmp"})
+	if inline := s.inlinePlugins(); len(inline) > 0 {
+		mounts = append(mounts, corev1.VolumeMount{Name: "plugins", MountPath: PluginsDir, ReadOnly: true})
+		for _, p := range inline {
+			if len(p.Secrets) == 0 {
+				continue
+			}
+			mounts = append(mounts, corev1.VolumeMount{
+				Name:      pluginSecretVolumeName(p.Name),
+				MountPath: PluginSecretsDir + "/" + p.Name,
+				ReadOnly:  true,
+			})
+		}
+	}
+	return mounts
 }
 
 func (s *SessionSpec) volumes() []corev1.Volume {
@@ -319,7 +476,7 @@ func (s *SessionSpec) volumes() []corev1.Volume {
 			},
 		)
 	}
-	return append(volumes, corev1.Volume{
+	volumes = append(volumes, corev1.Volume{
 		Name: "tmp",
 		VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{
@@ -328,6 +485,64 @@ func (s *SessionSpec) volumes() []corev1.Volume {
 			},
 		},
 	})
+	if inline := s.inlinePlugins(); len(inline) > 0 {
+		volumes = append(volumes,
+			corev1.Volume{
+				Name: "mayfly-tools",
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: quantityPtr("64Mi")},
+				},
+			},
+			corev1.Volume{
+				Name: "plugins",
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: quantityPtr(s.PluginVolumeLimit)},
+				},
+			},
+		)
+		for _, p := range inline {
+			if len(p.Secrets) == 0 {
+				continue
+			}
+			volumes = append(volumes, s.pluginSecretVolume(p))
+		}
+	}
+	return volumes
+}
+
+// pluginSecretVolume projects one inline plugin's secrets as files. The
+// runtime reads them and passes them only to that plugin's process, so the
+// agent container mounts the volume but no other container does.
+func (s *SessionSpec) pluginSecretVolume(p sessioncfg.Plugin) corev1.Volume {
+	mode := int32(0o400)
+	var sources []corev1.VolumeProjection
+	index := map[string]int{}
+	for _, secret := range p.Secrets {
+		i, ok := index[secret.Secret]
+		if !ok {
+			i = len(sources)
+			index[secret.Secret] = i
+			sources = append(sources, corev1.VolumeProjection{
+				Secret: &corev1.SecretProjection{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secret.Secret},
+				},
+			})
+		}
+		sources[i].Secret.Items = append(sources[i].Secret.Items, corev1.KeyToPath{
+			Key:  secret.Key,
+			Path: secret.Env,
+			Mode: &mode,
+		})
+	}
+	return corev1.Volume{
+		Name: pluginSecretVolumeName(p.Name),
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				Sources:     sources,
+				DefaultMode: &mode,
+			},
+		},
+	}
 }
 
 // PersistentVolumeClaim returns the workspace claim shared by a session and
