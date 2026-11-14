@@ -1,0 +1,20 @@
+schemaVersion: 1
+name: notify
+version: 0.1.0
+description: Post messages to a team webhook.
+placement: inline
+image: ghcr.io/example/mayfly-plugin-notify:0.1.0
+command: bin/notify
+local:
+  command: go
+  args: [run, .]
+env:
+  NOTIFY_CHANNEL: "#ops"
+secrets:
+  - env: NOTIFY_WEBHOOK_URL
+    secret: mayfly-plugin-notify
+    key: webhook-url
+tools:
+  - name: post
+    idempotent: false
+    timeout: 30s

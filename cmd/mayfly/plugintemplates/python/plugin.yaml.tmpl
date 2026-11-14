@@ -1,0 +1,18 @@
+schemaVersion: 1
+name: {{.Name}}
+version: {{.Version}}
+description: Posts messages to an HTTP API.
+placement: inline
+image: {{.Image}}
+command: server/server
+local:
+  command: python3
+  args: [server.py]
+# The sample tool reads its target and its credential from the environment.
+# Set them here, or declare a secret for the credential:
+# env:
+#   SAMPLE_API_URL: https://api.example.com/events
+tools:
+  - name: send
+    idempotent: false
+    timeout: 30s

@@ -1,0 +1,117 @@
+"""{{.Name}} is a Mayfly plugin: a stdio MCP server with one tool.
+
+The runtime speaks MCP to this process over stdin and stdout. Stdout carries
+the protocol; write logs to stderr. The server uses only the standard library,
+so it runs with a bare interpreter.
+"""
+
+import json
+import os
+import sys
+import urllib.request
+
+PROTOCOL_VERSION = "2025-06-18"
+SERVER_INFO = {"name": "{{.Name}}", "version": "{{.Version}}"}
+
+TOOLS = [
+    {
+        "name": "send",
+        "description": "Send a message to SAMPLE_API_URL.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "the message to send"},
+            },
+            "required": ["text"],
+        },
+    }
+]
+
+
+def send(arguments, meta):
+    """Post one message and forward the gateway's idempotency key.
+
+    The gateway gives every call an idempotency key, the same key across
+    replacement containers. Forward it to the target API when that API accepts
+    one, as this function does.
+
+    The tool stays at `idempotent: false` in plugin.yaml. Set it to true only
+    when the target really deduplicates on the header: a target that ignores
+    it would take the effect twice after a restart.
+    """
+    key = meta.get("mayfly.io/idempotency-key", "")
+    text = arguments.get("text", "")
+    target = os.environ.get("SAMPLE_API_URL", "")
+    if not target:
+        return "SAMPLE_API_URL is not set; text %r, idempotency key %r" % (text, key)
+    request = urllib.request.Request(
+        target,
+        data=json.dumps({"text": text}).encode(),
+        method="POST",
+    )
+    request.add_header("Content-Type", "application/json")
+    if key:
+        request.add_header("Idempotency-Key", key)
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return "sent %r (status %d)" % (text, response.status)
+
+
+HANDLERS = {"send": send}
+
+
+def call_tool(params):
+    name = params.get("name", "")
+    handler = HANDLERS.get(name)
+    if handler is None:
+        raise ValueError("unknown tool %r" % name)
+    return text_result(handler(params.get("arguments") or {}, params.get("_meta") or {}))
+
+
+def text_result(text):
+    return {"content": [{"type": "text", "text": text}]}
+
+
+def error_result(error):
+    return {"content": [{"type": "text", "text": str(error)}], "isError": True}
+
+
+def handle(message):
+    """Return the JSON-RPC response object for one request."""
+    response = {"jsonrpc": "2.0", "id": message["id"]}
+    method = message.get("method", "")
+    if method == "initialize":
+        response["result"] = {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {"tools": {}},
+            "serverInfo": SERVER_INFO,
+        }
+    elif method == "tools/list":
+        response["result"] = {"tools": TOOLS}
+    elif method == "tools/call":
+        try:
+            response["result"] = call_tool(message.get("params") or {})
+        except Exception as error:  # a failed tool is an error result, not a crash
+            response["result"] = error_result(error)
+    else:
+        response["error"] = {"code": -32601, "message": "method not found: %s" % method}
+    return response
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            message = json.loads(line)
+        except ValueError as error:
+            print("decode request: %s" % error, file=sys.stderr)
+            continue
+        if "id" not in message:
+            continue  # a notification, for example notifications/initialized
+        sys.stdout.write(json.dumps(handle(message)) + "\n")
+        sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()
