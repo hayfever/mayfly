@@ -1,0 +1,25 @@
+schemaVersion: 1
+name: tickets
+version: 0.1.0
+description: Look up tickets through a cache shared by every session.
+placement: inline
+image: ghcr.io/example/mayfly-plugin-tickets:0.1.0
+command: server/server
+local:
+  command: python3
+  args: [server.py]
+# Point the plugin at the ticket API. Without it the server answers from
+# sample data, so the example runs offline.
+# env:
+#   TICKETS_URL: https://tickets.internal.example.com/api
+secrets:
+  - env: TICKETS_TOKEN
+    secret: mayfly-plugin-tickets
+    key: token
+tools:
+  - name: get_ticket
+    idempotent: true
+  - name: add_comment
+    idempotent: false
+limits:
+  rate: {requests: 30, interval: 1m}

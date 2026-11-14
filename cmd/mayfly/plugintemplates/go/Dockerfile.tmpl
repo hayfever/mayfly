@@ -1,0 +1,9 @@
+# The image holds one directory, /mayfly-plugin/. Mayfly never runs the image
+# entrypoint, so the final stage can be FROM scratch.
+FROM golang:1.27-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -o /out/{{.Name}} .
+
+FROM scratch
+COPY --from=build /out/{{.Name}} /mayfly-plugin/bin/{{.Name}}

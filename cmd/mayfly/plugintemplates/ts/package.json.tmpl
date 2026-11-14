@@ -1,0 +1,14 @@
+{
+  "name": "{{.Name}}",
+  "private": true,
+  "version": "{{.Version}}",
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-strip-types src/index.ts",
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

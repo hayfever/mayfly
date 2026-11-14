@@ -53,6 +53,8 @@ func main() {
 		return
 	case "agents":
 		err = cmdAgents(args)
+	case "plugin":
+		err = cmdPlugin(args)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -84,6 +86,9 @@ Commands:
   delete ID [--yes]
   artifact ID [-o FILE]
   transcript ID
+  plugin init --lang go|python|ts DIR
+  plugin check DIR
+  plugin test DIR TOOL JSON [--workspace DIR] [--key KEY] [--timeout 2m]
 `)
 }
 
