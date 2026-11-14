@@ -187,6 +187,7 @@ func main() {
 	}
 	handler := queue.Composite(queue.SessionHandler(mgr.Create), workflowRunner.Handle)
 	worker := queue.NewWorker(queueStore, handler, concurrency, mgr.FreeSlots, cfg.Queue.PollInterval.Std(), logger)
+	worker.SetTimeout(queue.KindSource, cfg.Sources.JobTimeout.Std())
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
