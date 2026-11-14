@@ -52,6 +52,7 @@ type Config struct {
 	Sources   SourcesConfig   `yaml:"sources"`
 	Queue     QueueConfig     `yaml:"queue"`
 	Journal   JournalConfig   `yaml:"journal"`
+	Plugins   PluginsConfig   `yaml:"plugins"`
 	Triggers  []TriggerConfig `yaml:"triggers"`
 
 	// AdminToken is resolved from the environment at load time and never
@@ -112,6 +113,22 @@ type JournalConfig struct {
 // BoltJournalConfig points at the journal database file.
 type BoltJournalConfig struct {
 	Path string `yaml:"path"`
+}
+
+// PluginsConfig controls service plugins and the tool gateway.
+type PluginsConfig struct {
+	// Namespace holds service plugin objects. An empty value follows
+	// sessions.namespace.
+	Namespace string `yaml:"namespace"`
+	// ReconcileInterval is how often service objects are reconciled.
+	ReconcileInterval Duration `yaml:"reconcile_interval"`
+	// Prune removes service objects whose manifest is gone. Nil means true.
+	Prune *bool `yaml:"prune"`
+	// AuditPath appends one JSONL record per tool call. An empty path logs
+	// to the process log only.
+	AuditPath string `yaml:"audit_path"`
+	// MaxInflightCalls bounds dispatched tool calls across every session.
+	MaxInflightCalls int `yaml:"max_inflight_calls"`
 }
 
 // RuntimeConfig selects and configures the session execution backend.
@@ -404,6 +421,11 @@ func Default() *Config {
 			MaxEntryBytes:   8 << 20,
 			MaxSessionBytes: 64 << 20,
 		},
+		Plugins: PluginsConfig{
+			ReconcileInterval: Duration(60 * time.Second),
+			Prune:             new(true),
+			MaxInflightCalls:  256,
+		},
 	}
 }
 
@@ -513,6 +535,18 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Runtime.ArtifactLimit == "" {
 		c.Runtime.ArtifactLimit = "1Gi"
+	}
+	if c.Plugins.Namespace == "" {
+		c.Plugins.Namespace = c.Sessions.Namespace
+	}
+	if c.Plugins.ReconcileInterval.Std() <= 0 {
+		c.Plugins.ReconcileInterval = Duration(60 * time.Second)
+	}
+	if c.Plugins.Prune == nil {
+		c.Plugins.Prune = new(true)
+	}
+	if c.Plugins.MaxInflightCalls <= 0 {
+		c.Plugins.MaxInflightCalls = 256
 	}
 	if c.Runtime.PollInterval.Std() <= 0 {
 		c.Runtime.PollInterval = Duration(2 * time.Second)
@@ -727,6 +761,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Journal.MaxSessionBytes < c.Journal.MaxEntryBytes {
 		return fmt.Errorf("journal.max_session_bytes must be at least journal.max_entry_bytes")
+	}
+	if c.Plugins.ReconcileInterval.Std() < 10*time.Second {
+		return fmt.Errorf("plugins.reconcile_interval must be at least 10s")
+	}
+	if c.Plugins.MaxInflightCalls < 1 {
+		return fmt.Errorf("plugins.max_inflight_calls must be positive")
 	}
 	// A session start can take up to 90s (runner start timeout); a shorter
 	// lease would expire while the first worker is still creating the session.
