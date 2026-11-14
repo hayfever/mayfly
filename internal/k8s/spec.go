@@ -37,6 +37,8 @@ const (
 	PluginsDir = "/opt/mayfly/plugins"
 	// PluginSecretsDir holds one directory of secret files per inline plugin.
 	PluginSecretsDir = "/var/run/mayfly/plugin-secrets"
+	// PluginSocketsDir holds one Unix socket per sidecar plugin.
+	PluginSocketsDir = "/run/mayfly/plugin-sockets"
 	// ToolsDir holds the shim that the copy init containers run.
 	ToolsDir = "/mayfly-tools"
 	// PluginShim is the shim's path in the agent image.

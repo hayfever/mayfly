@@ -380,6 +380,9 @@ func (m *Manager) cleanup(inst *instance, force bool) {
 			}
 		}
 	}
+	// The journal delete below removes the session's ledger records, which are
+	// the only remaining reason to keep the grant.
+	m.dropGrant(id)
 	m.deleteJournal(id)
 }
 
@@ -615,6 +618,7 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 				Model:        cfg.Model,
 				Skills:       skillNames(cfg.Skills),
 				MCPServers:   mcpNames(cfg.MCPServers),
+				Plugins:      pluginNames(cfg.Plugins),
 				Trigger:      model.TriggerInfo{Kind: "adopted"},
 				Backend:      "kubernetes",
 				PodName:      pod.Name,
@@ -665,6 +669,7 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 		m.sessions[id] = inst
 		m.tokenIndex[inst.tokenHash] = id
 		m.mu.Unlock()
+		m.registerGrant(inst)
 		m.hub.Create(id)
 		m.hub.Append(id, model.Event{Type: model.EventSystem, Actor: "mayfly", Text: "Session recovered by control plane restart."})
 		m.restoreJournalThread(id)
@@ -742,6 +747,7 @@ func (m *Manager) adoptPodless(ctx context.Context, id string, objs k8s.OrphanOb
 			Model:        cfg.Model,
 			Skills:       skillNames(cfg.Skills),
 			MCPServers:   mcpNames(cfg.MCPServers),
+			Plugins:      pluginNames(cfg.Plugins),
 			Trigger:      model.TriggerInfo{Kind: "adopted"},
 			Backend:      "kubernetes",
 			TTLSeconds:   cfg.TTLSeconds,
@@ -786,6 +792,7 @@ func (m *Manager) adoptPodless(ctx context.Context, id string, objs k8s.OrphanOb
 	m.sessions[id] = inst
 	m.tokenIndex[inst.tokenHash] = id
 	m.mu.Unlock()
+	m.registerGrant(inst)
 	m.hub.Create(id)
 	m.hub.Append(id, model.Event{Type: model.EventSystem, Actor: "mayfly", Text: "Session recovered by control plane restart."})
 	m.restoreJournalThread(id)

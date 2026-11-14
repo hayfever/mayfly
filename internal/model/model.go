@@ -50,6 +50,7 @@ type Session struct {
 	Model        string        `json:"model"`
 	Skills       []string      `json:"skills"`
 	MCPServers   []string      `json:"mcp_servers"`
+	Plugins      []string      `json:"plugins"`
 	Trigger      TriggerInfo   `json:"trigger"`
 	Backend      string        `json:"backend"`
 	PodName      string        `json:"pod_name,omitempty"`

@@ -13,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
 // Local runs sessions as child processes. It is for development and
@@ -69,6 +71,9 @@ func (l *Local) Start(ctx context.Context, spec Spec) (Handle, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return Handle{}, err
 	}
+	if err := writePluginSecrets(spec.Runtime.Plugins, spec.PluginSecrets); err != nil {
+		return Handle{}, err
+	}
 	raw, err := json.MarshalIndent(spec.Runtime, "", "  ")
 	if err != nil {
 		return Handle{}, err
@@ -117,6 +122,44 @@ func (l *Local) Start(ctx context.Context, spec Spec) (Handle, error) {
 		StateDir:  dir,
 		Done:      proc.done,
 	}, nil
+}
+
+// writePluginSecrets writes each inline plugin secret to its file. The runtime
+// reads the files and passes the value only to that plugin's process, so the
+// agent never inherits a secret through its own environment.
+func writePluginSecrets(plugins []sessioncfg.Plugin, values map[string]map[string]string) error {
+	for _, p := range plugins {
+		if p.Placement != "inline" || len(p.Secrets) == 0 {
+			continue
+		}
+		if p.SecretsDir == "" {
+			return fmt.Errorf("plugin %q: secrets directory is not set", p.Name)
+		}
+		if err := os.MkdirAll(p.SecretsDir, 0o700); err != nil {
+			return fmt.Errorf("plugin %q: create secrets directory: %w", p.Name, err)
+		}
+		// MkdirAll leaves an existing directory's mode alone, and a directory
+		// from an earlier start may have been wider.
+		if err := os.Chmod(p.SecretsDir, 0o700); err != nil {
+			return fmt.Errorf("plugin %q: restrict secrets directory: %w", p.Name, err)
+		}
+		for _, secret := range p.Secrets {
+			value, ok := values[p.Name][secret.Env]
+			if !ok {
+				return fmt.Errorf("plugin %q: environment variable %s is not set", p.Name, secret.Env)
+			}
+			path := filepath.Join(p.SecretsDir, secret.Env)
+			if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+				return fmt.Errorf("plugin %q: write secret %s: %w", p.Name, secret.Env, err)
+			}
+			// WriteFile applies its mode only when it creates the file; a
+			// replacement start must not keep a wider earlier mode.
+			if err := os.Chmod(path, 0o600); err != nil {
+				return fmt.Errorf("plugin %q: restrict secret %s: %w", p.Name, secret.Env, err)
+			}
+		}
+	}
+	return nil
 }
 
 // Stop signals the agent and waits for it to exit.

@@ -5,16 +5,27 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/hayfever/mayfly/internal/agents"
 	"github.com/hayfever/mayfly/internal/artifact"
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/hub"
+	"github.com/hayfever/mayfly/internal/journal"
+	"github.com/hayfever/mayfly/internal/k8s"
 	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/plugin"
+	"github.com/hayfever/mayfly/internal/project"
 	"github.com/hayfever/mayfly/internal/runner"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
@@ -374,5 +385,460 @@ func TestCreateIsIdempotentPerKey(t *testing.T) {
 	}
 	if _, err := m.Create(ctx, CreateOptions{Prompt: "other", IdempotencyKey: "job-2"}); !errors.Is(err, ErrCapacity) {
 		t.Fatalf("new key at capacity err = %v, want ErrCapacity", err)
+	}
+}
+
+// fakeGateway records the grants the manager registers and drops.
+type fakeGateway struct {
+	mu     sync.Mutex
+	grants map[string]gateway.Grant
+	drops  []string
+}
+
+func newFakeGateway() *fakeGateway {
+	return &fakeGateway{grants: map[string]gateway.Grant{}}
+}
+
+func (f *fakeGateway) Register(grant gateway.Grant) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.grants[grant.SessionID] = grant
+}
+
+func (f *fakeGateway) Drop(session string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.grants, session)
+	f.drops = append(f.drops, session)
+}
+
+func (f *fakeGateway) grant(session string) (gateway.Grant, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	grant, ok := f.grants[session]
+	return grant, ok
+}
+
+func (f *fakeGateway) dropped() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.drops...)
+}
+
+// parseManifest parses and validates one manifest as the bundle loader does.
+func parseManifest(t *testing.T, dir, raw string, requireImage bool) plugin.Manifest {
+	t.Helper()
+	manifest, err := plugin.Parse([]byte(raw), filepath.Join("plugins", "manifest", plugin.ManifestFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manifest.Validate(plugin.ValidateOptions{RequireImage: requireImage}); err != nil {
+		t.Fatal(err)
+	}
+	manifest.Dir = dir
+	return manifest
+}
+
+// pluginManager returns a manager whose bundle holds these manifests and one
+// agent that selects them all.
+func pluginManager(t *testing.T, manifests ...plugin.Manifest) *Manager {
+	t.Helper()
+	m := testManager(t)
+	m.cfg.LLM.Model = "test-model"
+	m.cfg.Server.InternalURL = "http://mayfly:8080"
+	m.stateDir = t.TempDir()
+	names := make([]string, 0, len(manifests))
+	bundle := &project.Bundle{Plugins: map[string]plugin.Manifest{}}
+	for _, manifest := range manifests {
+		bundle.Plugins[manifest.Name] = manifest
+		names = append(names, manifest.Name)
+	}
+	agent, err := agents.Build(agents.Definition{Name: "tester", Plugins: &names}, "agent.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.Agents = []agents.Agent{agent}
+	m.bundle = bundle
+	if err := m.loadAgents(); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+const notifyManifest = `
+schemaVersion: 1
+name: notify
+version: 1.0.0
+placement: inline
+image: example/notify:1
+command: /plugin/notify
+args: ["serve"]
+env:
+  MODE: prod
+secrets:
+  - env: SLACK_TOKEN
+    secret: mayfly-plugin-slack
+    key: token
+tools:
+  - name: post_message
+    idempotent: false
+    timeout: 30s
+  - name: list_channels
+    idempotent: true
+`
+
+const ticketsManifest = `
+schemaVersion: 1
+name: tickets
+placement: service
+image: example/tickets:1
+command: /plugin/tickets
+service:
+  replicas: 1
+tools:
+  - name: get_ticket
+    idempotent: true
+    timeout: 30s
+`
+
+const wordCountManifest = `
+schemaVersion: 1
+name: word-count
+image: example/word-count:1
+command: /plugin/word-count
+local:
+  command: ./word-count
+tools:
+  - name: count
+    idempotent: true
+    timeout: 10s
+`
+
+// TestCreateResolvesPlugins checks the runtime copy of each manifest: pod
+// paths on the Kubernetes backend, the service entry trimmed to a grant, and
+// the declared tools with their timeouts.
+func TestCreateResolvesPlugins(t *testing.T) {
+	notify := parseManifest(t, "/bundle/plugins/notify", notifyManifest, true)
+	tickets := parseManifest(t, "/bundle/plugins/tickets", ticketsManifest, true)
+	m := pluginManager(t, notify, tickets)
+	m.runner = &fakeRunner{handle: runner.Handle{Backend: "kubernetes", SessionID: "s1"}}
+
+	session, err := m.Create(context.Background(), CreateOptions{Prompt: "hello", Agent: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Plugins) != 2 || session.Plugins[0] != "notify" || session.Plugins[1] != "tickets" {
+		t.Fatalf("session plugins = %v", session.Plugins)
+	}
+	inst, ok := m.instance(session.ID)
+	if !ok {
+		t.Fatal("session is not registered")
+	}
+	plugins := inst.runtimeCfg.Plugins
+	if len(plugins) != 2 {
+		t.Fatalf("runtime plugins = %+v", plugins)
+	}
+	inline := plugins[0]
+	if inline.Name != "notify" || inline.Placement != "inline" {
+		t.Fatalf("inline plugin = %+v", inline)
+	}
+	if inline.Dir != k8s.PluginsDir+"/notify" || inline.SecretsDir != k8s.PluginSecretsDir+"/notify" {
+		t.Fatalf("inline paths = %q %q", inline.Dir, inline.SecretsDir)
+	}
+	if inline.Image != "example/notify:1" || inline.Command != "/plugin/notify" {
+		t.Fatalf("inline launch = %q %q", inline.Image, inline.Command)
+	}
+	if len(inline.Args) != 1 || inline.Args[0] != "serve" || inline.Workdir != "plugin" {
+		t.Fatalf("inline args/workdir = %v %q", inline.Args, inline.Workdir)
+	}
+	if inline.MaxRestarts != 2 || inline.StderrBytes != 1<<20 {
+		t.Fatalf("inline restarts/stderr = %d %d", inline.MaxRestarts, inline.StderrBytes)
+	}
+	if len(inline.Secrets) != 1 || inline.Secrets[0].Secret != "mayfly-plugin-slack" || inline.Secrets[0].Key != "token" {
+		t.Fatalf("inline secrets = %+v", inline.Secrets)
+	}
+	if len(inline.Tools) != 2 || inline.Tools[0].Name != "post_message" || inline.Tools[0].TimeoutSeconds != 30 {
+		t.Fatalf("inline tools = %+v", inline.Tools)
+	}
+	if inline.Env["MODE"] != "prod" {
+		t.Fatalf("inline env = %v", inline.Env)
+	}
+
+	service := plugins[1]
+	if service.Name != "tickets" || service.Placement != "service" {
+		t.Fatalf("service plugin = %+v", service)
+	}
+	if service.Dir != "" || service.Image != "" || service.Command != "" || service.Socket != "" {
+		t.Fatalf("service plugin carries launch fields: %+v", service)
+	}
+	if len(service.Tools) != 1 || service.Tools[0].Name != "get_ticket" || service.InitTimeoutSeconds != 30 {
+		t.Fatalf("service grant fields = %+v", service)
+	}
+	if service.MaxOutputBytes != plugin.MaxOutputBytes {
+		t.Fatalf("service max output = %d", service.MaxOutputBytes)
+	}
+
+	// A request that selects an MCP server takes the plugins its agent names,
+	// unchanged.
+	m.mcpByName = map[string]config.MCPServerConfig{
+		"search": {Name: "search", Transport: "stdio", Command: "/usr/bin/search"},
+	}
+	withMCP, err := m.Create(context.Background(), CreateOptions{
+		Prompt:     "hello",
+		Agent:      "tester",
+		MCPServers: []string{"search"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withMCP.MCPServers) != 1 || withMCP.MCPServers[0] != "search" {
+		t.Fatalf("session MCP servers = %v", withMCP.MCPServers)
+	}
+	if len(withMCP.Plugins) != 2 || withMCP.Plugins[0] != "notify" || withMCP.Plugins[1] != "tickets" {
+		t.Fatalf("plugins changed with mcp_servers = %v", withMCP.Plugins)
+	}
+}
+
+// TestCreatePluginSessionJSONHasNoSecrets checks the document the runtime
+// mounts: Kubernetes paths, and no secret value.
+func TestCreatePluginSessionJSONHasNoSecrets(t *testing.T) {
+	const sentinel = "dont-leak-me-7f3c"
+	t.Setenv("SLACK_TOKEN", sentinel)
+	notify := parseManifest(t, "/bundle/plugins/notify", notifyManifest, true)
+	m := pluginManager(t, notify)
+	runner := &fakeRunner{handle: runner.Handle{Backend: "kubernetes", SessionID: "s1"}}
+	m.runner = runner
+
+	session, err := m.Create(context.Background(), CreateOptions{Prompt: "hello", Agent: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	starts := runner.specs()
+	if len(starts) != 1 {
+		t.Fatalf("starts = %d", len(starts))
+	}
+	raw, err := json.Marshal(starts[0].Runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := string(raw)
+	if strings.Contains(document, sentinel) {
+		t.Fatalf("session.json holds a secret value:\n%s", document)
+	}
+	if !strings.Contains(document, k8s.PluginsDir+"/notify") || !strings.Contains(document, k8s.PluginSecretsDir+"/notify") {
+		t.Fatalf("session.json is missing the Kubernetes plugin paths:\n%s", document)
+	}
+	if strings.Contains(document, k8s.PluginSecretsDir+"/notify/SLACK_TOKEN") {
+		t.Fatalf("session.json names a secret file:\n%s", document)
+	}
+	if _, ok := m.instance(session.ID); !ok {
+		t.Fatal("session is not registered")
+	}
+}
+
+// TestCreateRegistersGrant checks the grant holds exactly the declared tools,
+// fixed before the container starts.
+func TestCreateRegistersGrant(t *testing.T) {
+	notify := parseManifest(t, "/bundle/plugins/notify", notifyManifest, true)
+	tickets := parseManifest(t, "/bundle/plugins/tickets", ticketsManifest, true)
+	m := pluginManager(t, notify, tickets)
+	m.runner = &fakeRunner{handle: runner.Handle{Backend: "kubernetes", SessionID: "s1"}}
+	registry := newFakeGateway()
+	m.SetGateway(registry)
+
+	session, err := m.Create(context.Background(), CreateOptions{Prompt: "hello", Agent: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, ok := registry.grant(session.ID)
+	if !ok {
+		t.Fatal("create did not register a grant")
+	}
+	want := map[string]string{
+		"plugin_notify_post_message":  "notify",
+		"plugin_notify_list_channels": "notify",
+		"plugin_tickets_get_ticket":   "tickets",
+	}
+	if len(grant.Tools) != len(want) {
+		t.Fatalf("grant tools = %+v", grant.Tools)
+	}
+	for name, owner := range want {
+		tool, ok := grant.Tools[name]
+		if !ok {
+			t.Fatalf("grant is missing %q: %+v", name, grant.Tools)
+		}
+		if tool.Owner != owner {
+			t.Fatalf("%s owner = %q, want %q", name, tool.Owner, owner)
+		}
+	}
+	if grant.Tools["plugin_notify_post_message"].Placement != gateway.Inline {
+		t.Fatalf("notify placement = %q", grant.Tools["plugin_notify_post_message"].Placement)
+	}
+	if grant.Tools["plugin_tickets_get_ticket"].Placement != gateway.Service {
+		t.Fatalf("tickets placement = %q", grant.Tools["plugin_tickets_get_ticket"].Placement)
+	}
+	if grant.Tools["plugin_notify_post_message"].Idempotent {
+		t.Fatal("post_message must be non-idempotent")
+	}
+	if grant.Tools["plugin_notify_post_message"].Timeout != 30*time.Second {
+		t.Fatalf("post_message timeout = %s", grant.Tools["plugin_notify_post_message"].Timeout)
+	}
+	if grant.Tools["plugin_notify_list_channels"].Timeout != 2*time.Minute {
+		t.Fatalf("list_channels timeout = %s, want the plugin call timeout", grant.Tools["plugin_notify_list_channels"].Timeout)
+	}
+	if grant.SidecarKey != nil {
+		t.Fatal("a session without sidecars must not carry a sidecar key")
+	}
+}
+
+// TestFinalizeDropsLedger checks finalize forgets the grant and removes the
+// session's ledger records with the journal.
+func TestFinalizeDropsLedger(t *testing.T) {
+	notify := parseManifest(t, "/bundle/plugins/notify", notifyManifest, true)
+	m := pluginManager(t, notify)
+	m.runner = &fakeRunner{handle: runner.Handle{Backend: "kubernetes", SessionID: "s1"}}
+	registry := newFakeGateway()
+	m.SetGateway(registry)
+	ledger := journal.NewMemory()
+	m.journal = ledger
+
+	session, err := m.Create(context.Background(), CreateOptions{Prompt: "hello", Agent: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := session.ID + "/1/1"
+	if _, _, err := ledger.Begin(context.Background(), journal.Call{
+		Key:        key,
+		SessionID:  session.ID,
+		Turn:       1,
+		Step:       1,
+		Tool:       "plugin_notify_post_message",
+		ArgsSHA256: "aa",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	inst, ok := m.instance(session.ID)
+	if !ok {
+		t.Fatal("session is not registered")
+	}
+	m.finalize(inst, model.StatusCompleted, "done", "")
+	m.wg.Wait()
+
+	if _, ok := registry.grant(session.ID); ok {
+		t.Fatal("finalize kept the grant")
+	}
+	if drops := registry.dropped(); len(drops) != 1 || drops[0] != session.ID {
+		t.Fatalf("drops = %v", drops)
+	}
+	if _, found, err := ledger.Get(context.Background(), session.ID, key); err != nil {
+		t.Fatal(err)
+	} else if found {
+		t.Fatal("finalize kept the ledger record")
+	}
+}
+
+// TestLocalMissingPluginSecret checks a missing local secret fails before a
+// session starts, both for a webhook's Validate and for Create.
+func TestLocalMissingPluginSecret(t *testing.T) {
+	const envName = "WP7_TEST_UNSET_PLUGIN_TOKEN"
+	t.Setenv(envName, "")
+	if err := os.Unsetenv(envName); err != nil {
+		t.Fatal(err)
+	}
+	raw := strings.Replace(notifyManifest, "SLACK_TOKEN", envName, 1)
+	notify := parseManifest(t, t.TempDir(), raw, false)
+	m := pluginManager(t, notify)
+	m.cfg.Runtime.Backend = "local"
+	m.runner = &fakeRunner{handle: runner.Handle{Backend: "local", SessionID: "s1"}}
+
+	want := `plugin "notify": environment variable ` + envName + " is not set"
+	err := m.Validate(CreateOptions{Prompt: "hello", Agent: "tester"})
+	if err == nil || err.Error() != want {
+		t.Fatalf("Validate error = %v, want %q", err, want)
+	}
+	session, err := m.Create(context.Background(), CreateOptions{Prompt: "hello", Agent: "tester"})
+	if err == nil || err.Error() != want {
+		t.Fatalf("Create error = %v, want %q", err, want)
+	}
+	if session != nil {
+		t.Fatalf("Create started a session: %+v", session)
+	}
+	if n := len(m.sessions); n != 0 {
+		t.Fatalf("sessions registered = %d", n)
+	}
+}
+
+// TestLocalSidecarRunsInline checks the local backend resolves a sidecar
+// plugin as inline, with its secret values read from the mayflyd environment.
+func TestLocalSidecarRunsInline(t *testing.T) {
+	const envName = "WP7_TEST_SIDECAR_TOKEN"
+	t.Setenv(envName, "value")
+	sidecar := `
+schemaVersion: 1
+name: notify
+placement: sidecar
+image: example/notify:1
+command: /plugin/notify
+secrets:
+  - env: ` + envName + `
+    secret: mayfly-plugin-slack
+    key: token
+  - env: WP7_TEST_SIDECAR_OTHER
+    secret: mayfly-plugin-slack
+    key: other
+tools:
+  - name: post_message
+sidecar:
+  resources:
+    requests:
+      cpu: 10m
+    limits:
+      memory: 64Mi
+  workspace: read
+`
+	t.Setenv("WP7_TEST_SIDECAR_OTHER", "other")
+	manifest := parseManifest(t, t.TempDir(), sidecar, false)
+	m := pluginManager(t, manifest)
+	m.cfg.Runtime.Backend = "local"
+	runner := &fakeRunner{handle: runner.Handle{Backend: "local", SessionID: "s1"}}
+	m.runner = runner
+	registry := newFakeGateway()
+	m.SetGateway(registry)
+
+	session, err := m.Create(context.Background(), CreateOptions{Prompt: "hello", Agent: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	starts := runner.specs()
+	if len(starts) != 1 {
+		t.Fatalf("starts = %d", len(starts))
+	}
+	plugin := starts[0].Runtime.Plugins[0]
+	if plugin.Placement != "inline" {
+		t.Fatalf("placement = %q, want inline on the local backend", plugin.Placement)
+	}
+	if plugin.Socket != "" {
+		t.Fatalf("socket = %q, want none for an inline plugin", plugin.Socket)
+	}
+	if plugin.SecretsDir != filepath.Join(m.stateDir, "sessions", session.ID, "plugin-secrets", "notify") {
+		t.Fatalf("secrets dir = %q", plugin.SecretsDir)
+	}
+	if len(plugin.Secrets) != 2 || plugin.Secrets[0].Secret != "" || plugin.Secrets[0].Key != "" {
+		t.Fatalf("local secrets = %+v", plugin.Secrets)
+	}
+	if plugin.MaxRestarts != 2 || plugin.Workdir != "plugin" || plugin.StderrBytes != 1<<20 {
+		t.Fatalf("inline defaults = %+v", plugin)
+	}
+	secrets := starts[0].PluginSecrets["notify"]
+	if secrets[envName] != "value" || secrets["WP7_TEST_SIDECAR_OTHER"] != "other" {
+		t.Fatalf("plugin secret values = %v", secrets)
+	}
+	grant, ok := registry.grant(session.ID)
+	if !ok {
+		t.Fatal("create did not register a grant")
+	}
+	tool, ok := grant.Tools["plugin_notify_post_message"]
+	if !ok || tool.Placement != gateway.Inline {
+		t.Fatalf("grant tool = %+v", tool)
 	}
 }
