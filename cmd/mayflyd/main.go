@@ -18,10 +18,12 @@ import (
 
 	"github.com/hayfever/mayfly/internal/artifact"
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/httpapi"
 	"github.com/hayfever/mayfly/internal/hub"
 	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/k8s"
+	"github.com/hayfever/mayfly/internal/plugin"
 	"github.com/hayfever/mayfly/internal/project"
 	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/runner"
@@ -98,9 +100,11 @@ func main() {
 	}()
 
 	var journalStore journal.Durable
+	var ledger journal.Ledger
 	switch cfg.Journal.Backend {
 	case "memory":
-		journalStore = journal.NewMemory()
+		memory := journal.NewMemory()
+		journalStore, ledger = memory, memory
 	case "bbolt":
 		boltJournal, err := journal.OpenBolt(cfg.Journal.Bolt.Path)
 		if err != nil {
@@ -112,7 +116,7 @@ func main() {
 				logger.Warn("close journal", "error", err)
 			}
 		}()
-		journalStore = boltJournal
+		journalStore, ledger = boltJournal, boltJournal
 	default:
 		logger.Error("configure journal", "error", fmt.Errorf("unknown backend %q", cfg.Journal.Backend))
 		os.Exit(2)
@@ -153,6 +157,35 @@ func main() {
 		logger.Error("create session manager", "error", err)
 		os.Exit(2)
 	}
+
+	// The tool gateway is the only path to plugin and remote MCP tools. Its
+	// ledger lives in the journal store, so a call record and the journal that
+	// references it are deleted together at finalize.
+	manifests := make([]plugin.Manifest, 0, len(bundle.Plugins))
+	for _, manifest := range bundle.Plugins {
+		manifests = append(manifests, manifest)
+	}
+	mcpServers := make(map[string]config.MCPServerConfig, len(cfg.MCP.Servers))
+	for _, server := range cfg.MCP.Servers {
+		mcpServers[server.Name] = server
+	}
+	audit, auditErr := gateway.NewAudit(cfg.Plugins.AuditPath, logger)
+	if auditErr != nil {
+		logger.Error("configure plugin audit log", "error", auditErr)
+		os.Exit(2)
+	}
+	toolGateway := gateway.New(gateway.Options{
+		Ledger:    ledger,
+		Sequencer: journalStore,
+		Manifests: func() []plugin.Manifest { return manifests },
+		MCPServer: func(name string) (config.MCPServerConfig, bool) {
+			server, ok := mcpServers[name]
+			return server, ok
+		},
+		MaxInflight: cfg.Plugins.MaxInflightCalls,
+		Audit:       audit,
+		Logger:      logger,
+	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -197,7 +230,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              cfg.Server.Addr,
-		Handler:           httpapi.New(cfg, mgr, queueStore, logger, httpapi.WithSchedules(scheduleAPI)).Handler(),
+		Handler:           httpapi.New(cfg, mgr, queueStore, logger, httpapi.WithSchedules(scheduleAPI), httpapi.WithGateway(toolGateway)).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
