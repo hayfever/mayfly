@@ -21,6 +21,7 @@ First public release.
 - Pod isolation defaults: non-root, read-only root filesystem, all capabilities dropped, no service-account token, and default-deny ingress with limited egress.
 - LiteLLM gateway configuration and deployment examples for OpenAI, Anthropic, Bedrock, OpenRouter, and internal backends.
 - Helm chart with optional LiteLLM, ingress, inline skills and agent manifests, image digests, and LiteLLM IRSA support.
+- `mayfly transcript <id>` prints the session's agent prompt and model messages, including tool calls and results.
 - Versioned CLI, control-plane, and agent builds with commit and date metadata.
 - End-to-end suite on k3d (`make e2e`, bbolt and Redis in CI). k3s ships a kube-router controller that enforces NetworkPolicy on flannel, so no second CNI is installed: signed webhooks for every trigger type, dedupe, rate limits, queue durability across a control plane restart, dead letters, enforced network isolation, MCP, WebSocket attach, close, artifacts, TTL expiry, and cleanup. It also runs against an existing cluster.
 - CI and release workflows: tests, Helm lint, k3d e2e, multi-arch GHCR images, SBOMs, provenance, CLI archives, and OCI chart publishing.
@@ -103,6 +104,7 @@ First public release.
 - `mayflyd -check` now builds the session manager as startup does, so a missing model, a model outside `llm.allow_models`, or an unknown MCP server fails the check instead of the first run.
 - Adopted sessions keep their agent, artifacts, and idempotency key after a control-plane restart.
 - `read_artifact` checks the declared SHA-256 and never splits a UTF-8 character at a window edge.
+- `mayfly transcript` reads only the top-level `conversation.jsonl` and strips terminal control sequences from untrusted text.
 - The `local` runtime starts the agent with a minimal environment instead of mayflyd's.
 - Fanout dedupes identical requests, fails fast on `401` and `403`, and drops filtered-out responses. `maxItems` counts items after `filter`. A `removed` page without a diff counts as changed. `sources.timeout` is enforced.
 - A scheduled slot comes from the cron time, not the wake time, so a late tick keeps the same delivery key.
