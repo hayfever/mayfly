@@ -57,6 +57,10 @@ const (
 	shutdownTimeout = 5 * time.Second
 	// sessionHeader carries the MCP session id.
 	sessionHeader = "Mcp-Session-Id"
+	// keyReloadInterval bounds how often a failed signature check reads the
+	// key file again, so a recreated Secret is picked up without a restart
+	// and a bad token cannot cause a read per request.
+	keyReloadInterval = time.Second
 )
 
 // JSON-RPC error codes the shim uses itself.
@@ -217,8 +221,13 @@ func probe(ctx context.Context, listen string, timeout time.Duration) error {
 // the arguments, and the idempotency key.
 type serveServer struct {
 	opts serveOptions
-	key  []byte
 	spec childSpec
+
+	// keyMu guards key, which a recreated Secret changes under a running
+	// shim. keyReadAt rate-limits reading the key file again.
+	keyMu     sync.Mutex
+	key       []byte
+	keyReadAt time.Time
 
 	mu    sync.Mutex
 	child *child
@@ -386,20 +395,54 @@ func (s *serveServer) handleMCP(w http.ResponseWriter, r *http.Request) {
 }
 
 // authorize verifies the token's signature, expiry, and the scopes the shim
-// knows from its own command line.
+// knows from its own command line. A failed signature reads the key file
+// again, because a Secret that was deleted and recreated gives the running
+// shim a new key without a restart.
 func (s *serveServer) authorize(r *http.Request) (gateway.Claims, error) {
 	token := bearerToken(r.Header.Get("Authorization"))
 	if token == "" {
 		return gateway.Claims{}, errors.New("invalid call token: missing token")
 	}
-	claims, err := gateway.VerifyToken(s.key, token, gateway.TokenScope{
+	scope := gateway.TokenScope{
 		SessionID: s.opts.session,
 		Plugin:    s.opts.plugin,
-	}, time.Now())
-	if err != nil {
+	}
+	now := time.Now()
+	claims, err := gateway.VerifyToken(s.currentKey(), token, scope, now)
+	if err == nil {
+		return claims, nil
+	}
+	if reloadErr := s.reloadKey(now); reloadErr != nil {
 		return gateway.Claims{}, err
 	}
-	return claims, nil
+	return gateway.VerifyToken(s.currentKey(), token, scope, now)
+}
+
+// currentKey returns the gateway key in use.
+func (s *serveServer) currentKey() []byte {
+	s.keyMu.Lock()
+	defer s.keyMu.Unlock()
+	return s.key
+}
+
+// reloadKey reads the key file again after a failed signature check, at most
+// once per keyReloadInterval so a bad token cannot cause a read per request.
+func (s *serveServer) reloadKey(now time.Time) error {
+	if s.opts.keyFile == "" {
+		return errors.New("the shim was started without a key file")
+	}
+	s.keyMu.Lock()
+	defer s.keyMu.Unlock()
+	if now.Sub(s.keyReadAt) < keyReloadInterval {
+		return errors.New("the key file was read recently")
+	}
+	s.keyReadAt = now
+	key, err := readKey(s.opts.keyFile)
+	if err != nil {
+		return err
+	}
+	s.key = key
+	return nil
 }
 
 // handleInitialize answers a client handshake with the child's capabilities.
@@ -688,6 +731,7 @@ type child struct {
 	writeMu sync.Mutex
 
 	waitErr error
+	readErr error
 }
 
 // rpcReply is the part of one child response the shim needs.
@@ -779,7 +823,13 @@ func spawnChild(spec childSpec) (*child, error) {
 		pending: map[int64]chan rpcReply{},
 	}
 	go func() {
-		child.read(stdout)
+		child.readErr = child.read(stdout)
+		if child.readErr != nil && cmd.Process != nil {
+			// A response line over the scanner limit leaves the child
+			// blocked on a full pipe, so Wait would never return. Kill the
+			// process group so the supervisor restarts the child.
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
 		child.waitErr = cmd.Wait()
 		close(child.done)
 	}()
@@ -788,8 +838,9 @@ func spawnChild(spec childSpec) (*child, error) {
 
 // read dispatches the child's responses to their waiters. A notification or
 // a server-to-client request is dropped: the shim offers no client
-// capabilities, and the child has no other client.
-func (c *child) read(stdout io.Reader) {
+// capabilities, and the child has no other client. It returns the scanner's
+// error, which is non-nil when a line is too long or stdout fails.
+func (c *child) read(stdout io.Reader) error {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8<<20)
 	for scanner.Scan() {
@@ -817,6 +868,7 @@ func (c *child) read(stdout io.Reader) {
 			waiter <- rpcReply{result: message.Result, err: message.Error}
 		}
 	}
+	return scanner.Err()
 }
 
 // request sends one JSON-RPC request and waits for its response. started,
@@ -902,11 +954,15 @@ func (c *child) exitError() error {
 	if err == nil {
 		err = errors.New("no exit status")
 	}
+	detail := fmt.Sprintf("%v", err)
+	if c.readErr != nil {
+		detail = fmt.Sprintf("%v; read child output: %v", err, c.readErr)
+	}
 	tail := strings.TrimSpace(c.tail.String())
 	if tail == "" {
-		return fmt.Errorf("%w: %v", errChildExited, err)
+		return fmt.Errorf("%w: %s", errChildExited, detail)
 	}
-	return fmt.Errorf("%w: %v: %s", errChildExited, err, tail)
+	return fmt.Errorf("%w: %s: %s", errChildExited, detail, tail)
 }
 
 // stop ends the child: stdin first, then SIGTERM to the process group, then

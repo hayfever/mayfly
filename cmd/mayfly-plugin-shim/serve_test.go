@@ -52,7 +52,13 @@ type shim struct {
 func startShim(t *testing.T, opts serveOptions) *shim {
 	t.Helper()
 	key := bytes.Repeat([]byte("k"), 32)
-	opts.keyFile = ""
+	if opts.keyFile != "" {
+		raw, err := readKey(opts.keyFile)
+		if err != nil {
+			t.Fatalf("read key file: %v", err)
+		}
+		key = raw
+	}
 	opts.plugin = "demo"
 	opts.stderr = io.Discard
 	if opts.maxConcurrency == 0 {
@@ -331,6 +337,31 @@ func mustHash(t *testing.T, args json.RawMessage) string {
 	return hash
 }
 
+// TestServeKeyReload proves a shim that keeps running keeps working after the
+// gateway Secret is deleted and recreated: the first request that carries the
+// new key reads the key file again.
+func TestServeKeyReload(t *testing.T) {
+	t.Setenv("FIXTURE_TOOLS", "echo")
+	keyFile := filepath.Join(t.TempDir(), "gateway-key")
+	oldKey := bytes.Repeat([]byte("o"), 32)
+	if err := os.WriteFile(keyFile, oldKey, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := startShim(t, serveOptions{listen: "", session: "s1", keyFile: keyFile})
+	client := newShimClient(t, s.listen)
+
+	rotated := bytes.Repeat([]byte("n"), 32)
+	if err := os.WriteFile(keyFile, rotated, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := client.post("tools/list", 1, nil, discoveryToken(t, rotated, "s1")); status != http.StatusOK {
+		t.Fatalf("tools/list with the rotated key: status %d: %s", status, body)
+	}
+	if status, body := client.post("tools/list", 2, nil, discoveryToken(t, oldKey, "s1")); status != http.StatusUnauthorized {
+		t.Fatalf("tools/list with the old key: status %d, want 401: %s", status, body)
+	}
+}
+
 func TestServeReplayDedupe(t *testing.T) {
 	t.Run("replay returns the stored result", func(t *testing.T) {
 		logPath := filepath.Join(t.TempDir(), "calls.jsonl")
@@ -513,6 +544,32 @@ func TestServeChildRestart(t *testing.T) {
 	if err := probe(context.Background(), s.listen, 2*time.Second); err != nil {
 		t.Fatalf("probe after restart: %v", err)
 	}
+}
+
+// TestServeChildLineTooLong covers a child that writes a response line over
+// the scanner limit. The child stays alive, blocked on the full pipe, so the
+// shim must kill it: otherwise the call hangs until its context ends and the
+// supervisor never restarts the child.
+func TestServeChildLineTooLong(t *testing.T) {
+	t.Setenv("FIXTURE_TOOLS", "bigline")
+	s := startShim(t, serveOptions{listen: "", session: "s1"})
+	client := newShimClient(t, s.listen)
+	args := json.RawMessage(`{}`)
+
+	started := time.Now()
+	status, body := client.post("tools/call", 1, map[string]any{"name": "bigline", "arguments": args},
+		callToken(t, s.key, "s1", "bigline", args, "s1/1/1"))
+	if status != http.StatusOK {
+		t.Fatalf("tools/call: status %d: %s", status, body)
+	}
+	text, isError := toolText(t, body)
+	if !isError || !strings.Contains(text, "token too long") {
+		t.Fatalf("tools/call = %q isError=%v, want the reader's token-too-long error", text, isError)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("the call took %v, want the child killed at once", elapsed)
+	}
+	waitReady(t, s)
 }
 
 func TestServeEnv(t *testing.T) {

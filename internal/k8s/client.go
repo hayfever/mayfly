@@ -372,47 +372,61 @@ func (c *Client) SessionConfig(ctx context.Context, configMapName string) ([]byt
 // the plugin app label, so the session selectors never see them.
 const pluginSelector = LabelManaged + "=true," + LabelApp + "=" + PluginAppName
 
-// PluginObjects is the four objects that back one service plugin.
+// AnnotationGatewayKeyHash records the gateway key a plugin pod was rendered
+// with. A Secret that is deleted and recreated changes the hash, so the
+// Deployment update rolls the pods onto the new key.
+const AnnotationGatewayKeyHash = "mayfly.io/gateway-key-hash"
+
+// PluginObjects is the three workload objects that back one service plugin.
+// The gateway Secret is separate, because the Deployment is rendered with the
+// hash of the key the Secret holds.
 type PluginObjects struct {
 	Deployment    *appsv1.Deployment
 	Service       *corev1.Service
 	NetworkPolicy *networkingv1.NetworkPolicy
-	// Secret holds a fresh gateway key. EnsurePluginObjects creates the
-	// Secret only when it is absent, so an existing key is never rotated.
-	Secret *corev1.Secret
 }
 
-// EnsurePluginObjects creates the missing objects and updates the ones whose
-// spec hash changed. It returns the gateway key stored in the Secret: the
-// fresh key on the first create, and the key already in the cluster after
-// that.
-func (c *Client) EnsurePluginObjects(ctx context.Context, objects PluginObjects) ([]byte, error) {
-	if objects.Deployment == nil || objects.Service == nil || objects.NetworkPolicy == nil || objects.Secret == nil {
-		return nil, errors.New("plugin objects need a deployment, a service, a network policy, and a secret")
+// EnsurePluginSecret creates the gateway Secret when it is absent and returns
+// the key it holds: the fresh key on the first create, and the key already in
+// the cluster after that, so a reconcile never rotates a live key and never
+// leaves the pods with the wrong one.
+func (c *Client) EnsurePluginSecret(ctx context.Context, secret *corev1.Secret) ([]byte, error) {
+	if secret == nil {
+		return nil, errors.New("a plugin secret is required")
+	}
+	if len(secret.Data["key"]) == 0 {
+		return nil, fmt.Errorf("plugin secret %s holds no key", secret.Name)
 	}
 	secrets := c.cs.CoreV1().Secrets(c.namespace)
-	switch _, err := secrets.Get(ctx, objects.Secret.Name, metav1.GetOptions{}); {
+	switch _, err := secrets.Get(ctx, secret.Name, metav1.GetOptions{}); {
 	case apierrors.IsNotFound(err):
-		if _, err := secrets.Create(ctx, objects.Secret, metav1.CreateOptions{}); err != nil {
+		if _, err := secrets.Create(ctx, secret, metav1.CreateOptions{}); err != nil {
 			return nil, fmt.Errorf("create plugin secret: %w", err)
 		}
 	case err != nil:
 		return nil, fmt.Errorf("get plugin secret: %w", err)
 	}
+	return c.pluginKey(ctx, secret.Name)
+}
+
+// ApplyPluginObjects creates the missing objects and updates the ones whose
+// rendered annotations changed.
+func (c *Client) ApplyPluginObjects(ctx context.Context, objects PluginObjects) error {
+	if objects.Deployment == nil || objects.Service == nil || objects.NetworkPolicy == nil {
+		return errors.New("plugin objects need a deployment, a service, and a network policy")
+	}
 	if err := c.applyPluginDeployment(ctx, objects.Deployment); err != nil {
-		return nil, err
+		return err
 	}
 	if err := c.applyPluginService(ctx, objects.Service); err != nil {
-		return nil, err
+		return err
 	}
-	if err := c.applyPluginNetworkPolicy(ctx, objects.NetworkPolicy); err != nil {
-		return nil, err
-	}
-	return c.pluginKey(ctx, objects.Secret.Name)
+	return c.applyPluginNetworkPolicy(ctx, objects.NetworkPolicy)
 }
 
 // applyPluginDeployment creates the Deployment, or updates it when the
-// rendered spec hash differs from the stored annotation.
+// annotations the renderer set, the spec hash and the gateway key hash,
+// differ from the stored ones.
 func (c *Client) applyPluginDeployment(ctx context.Context, desired *appsv1.Deployment) error {
 	deployments := c.cs.AppsV1().Deployments(c.namespace)
 	current, err := deployments.Get(ctx, desired.Name, metav1.GetOptions{})
@@ -424,7 +438,7 @@ func (c *Client) applyPluginDeployment(ctx context.Context, desired *appsv1.Depl
 		return nil
 	case err != nil:
 		return fmt.Errorf("get plugin deployment: %w", err)
-	case current.Annotations[AnnotationSpecHash] == desired.Annotations[AnnotationSpecHash]:
+	case sameAnnotations(current.Annotations, desired.Annotations):
 		return nil
 	}
 	desired.ResourceVersion = current.ResourceVersion
@@ -434,8 +448,9 @@ func (c *Client) applyPluginDeployment(ctx context.Context, desired *appsv1.Depl
 	return nil
 }
 
-// applyPluginService creates the Service, or updates it on a spec hash change.
-// The cluster-assigned addresses stay, because they are immutable.
+// applyPluginService creates the Service, or updates it when a rendered
+// annotation changed. The cluster-assigned addresses stay, because they are
+// immutable.
 func (c *Client) applyPluginService(ctx context.Context, desired *corev1.Service) error {
 	services := c.cs.CoreV1().Services(c.namespace)
 	current, err := services.Get(ctx, desired.Name, metav1.GetOptions{})
@@ -447,7 +462,7 @@ func (c *Client) applyPluginService(ctx context.Context, desired *corev1.Service
 		return nil
 	case err != nil:
 		return fmt.Errorf("get plugin service: %w", err)
-	case current.Annotations[AnnotationSpecHash] == desired.Annotations[AnnotationSpecHash]:
+	case sameAnnotations(current.Annotations, desired.Annotations):
 		return nil
 	}
 	desired.ResourceVersion = current.ResourceVersion
@@ -459,8 +474,8 @@ func (c *Client) applyPluginService(ctx context.Context, desired *corev1.Service
 	return nil
 }
 
-// applyPluginNetworkPolicy creates the NetworkPolicy, or updates it on a spec
-// hash change.
+// applyPluginNetworkPolicy creates the NetworkPolicy, or updates it when a
+// rendered annotation changed.
 func (c *Client) applyPluginNetworkPolicy(ctx context.Context, desired *networkingv1.NetworkPolicy) error {
 	policies := c.cs.NetworkingV1().NetworkPolicies(c.namespace)
 	current, err := policies.Get(ctx, desired.Name, metav1.GetOptions{})
@@ -472,7 +487,7 @@ func (c *Client) applyPluginNetworkPolicy(ctx context.Context, desired *networki
 		return nil
 	case err != nil:
 		return fmt.Errorf("get plugin network policy: %w", err)
-	case current.Annotations[AnnotationSpecHash] == desired.Annotations[AnnotationSpecHash]:
+	case sameAnnotations(current.Annotations, desired.Annotations):
 		return nil
 	}
 	desired.ResourceVersion = current.ResourceVersion
@@ -480,6 +495,18 @@ func (c *Client) applyPluginNetworkPolicy(ctx context.Context, desired *networki
 		return fmt.Errorf("update plugin network policy: %w", err)
 	}
 	return nil
+}
+
+// sameAnnotations reports whether the live object already carries every
+// annotation the renderer set. The spec hash and the gateway key hash are both
+// compared, so a changed tools image or a recreated Secret updates the object.
+func sameAnnotations(current, desired map[string]string) bool {
+	for key, value := range desired {
+		if current[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 // DeletePluginObjects removes the four objects of one service plugin. Missing
@@ -502,14 +529,52 @@ func (c *Client) DeletePluginObjects(ctx context.Context, name string) error {
 	return errors.Join(errs...)
 }
 
-// PluginDeployments lists the Deployments of every service plugin. Reconcile
-// prunes the ones whose manifest is gone.
-func (c *Client) PluginDeployments(ctx context.Context) ([]appsv1.Deployment, error) {
-	list, err := c.cs.AppsV1().Deployments(c.namespace).List(ctx, metav1.ListOptions{LabelSelector: pluginSelector})
+// PluginObjectNames lists the plugin label of every object that backs a
+// service plugin, across all four kinds. Reconcile prunes a name that the
+// bundle no longer holds even when a create failed partway and left no
+// Deployment behind.
+func (c *Client) PluginObjectNames(ctx context.Context) ([]string, error) {
+	list := metav1.ListOptions{LabelSelector: pluginSelector}
+	names := map[string]struct{}{}
+	record := func(name string) {
+		if name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	deployments, err := c.cs.AppsV1().Deployments(c.namespace).List(ctx, list)
 	if err != nil {
 		return nil, fmt.Errorf("list plugin deployments: %w", err)
 	}
-	return list.Items, nil
+	for _, object := range deployments.Items {
+		record(object.Labels[LabelPlugin])
+	}
+	services, err := c.cs.CoreV1().Services(c.namespace).List(ctx, list)
+	if err != nil {
+		return nil, fmt.Errorf("list plugin services: %w", err)
+	}
+	for _, object := range services.Items {
+		record(object.Labels[LabelPlugin])
+	}
+	policies, err := c.cs.NetworkingV1().NetworkPolicies(c.namespace).List(ctx, list)
+	if err != nil {
+		return nil, fmt.Errorf("list plugin network policies: %w", err)
+	}
+	for _, object := range policies.Items {
+		record(object.Labels[LabelPlugin])
+	}
+	secrets, err := c.cs.CoreV1().Secrets(c.namespace).List(ctx, list)
+	if err != nil {
+		return nil, fmt.Errorf("list plugin secrets: %w", err)
+	}
+	for _, object := range secrets.Items {
+		record(object.Labels[LabelPlugin])
+	}
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // PluginGatewayKey reads the gateway key of one service plugin.

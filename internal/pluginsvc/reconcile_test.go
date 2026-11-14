@@ -165,8 +165,8 @@ func TestReconcileCreates(t *testing.T) {
 			t.Fatalf("deployment label %s = %q, want %q", key, got, want)
 		}
 	}
-	if got := deployment.Annotations[k8s.AnnotationSpecHash]; got != manifest.SpecHash() {
-		t.Fatalf("spec hash annotation = %q, want %q", got, manifest.SpecHash())
+	if got, want := deployment.Annotations[k8s.AnnotationSpecHash], renderHash(manifest, testRender()); got != want {
+		t.Fatalf("spec hash annotation = %q, want %q", got, want)
 	}
 	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 2 {
 		t.Fatalf("replicas = %v", deployment.Spec.Replicas)
@@ -300,8 +300,8 @@ func TestReconcileUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Annotations[k8s.AnnotationSpecHash] != changed.SpecHash() {
-		t.Fatalf("spec hash = %q", after.Annotations[k8s.AnnotationSpecHash])
+	if got, want := after.Annotations[k8s.AnnotationSpecHash], renderHash(changed, testRender()); got != want {
+		t.Fatalf("spec hash = %q, want %q", got, want)
 	}
 	command := strings.Join(after.Spec.Template.Spec.Containers[0].Command, " ")
 	if !strings.HasSuffix(command, "server/other") {
@@ -329,6 +329,12 @@ func TestReconcilePrune(t *testing.T) {
 		if _, err := cs.AppsV1().Deployments("plugins").Get(ctx, plugin.ObjectName(name), metav1.GetOptions{}); err != nil {
 			t.Fatalf("deployment %s: %v", name, err)
 		}
+	}
+
+	// A create that failed partway leaves a Service, a NetworkPolicy, and a
+	// Secret with no Deployment. Prune must still find the plugin.
+	if err := cs.AppsV1().Deployments("plugins").Delete(ctx, plugin.ObjectName("word"), metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
 	}
 
 	manifests = []plugin.Manifest{serviceManifest("tickets")}
@@ -424,6 +430,131 @@ func TestServiceNetworkPolicy(t *testing.T) {
 	}
 }
 
+// TestReconcileGatewayKeyVolume covers the key a stdio service plugin reads.
+// Kubelet writes a Secret volume as root:root, so the pod needs an fsGroup
+// and a group-readable mode for the unprivileged shim to read the key.
+func TestReconcileGatewayKeyVolume(t *testing.T) {
+	manifests := []plugin.Manifest{serviceManifest("tickets")}
+	reconciler, cs := newReconciler(t, &manifests, true)
+	ctx := context.Background()
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	deployment, err := cs.AppsV1().Deployments("plugins").Get(ctx, plugin.ObjectName("tickets"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod := deployment.Spec.Template.Spec
+	if pod.SecurityContext == nil || pod.SecurityContext.FSGroup == nil || *pod.SecurityContext.FSGroup != serviceUID {
+		t.Fatalf("pod security context = %+v, want fsGroup %d", pod.SecurityContext, serviceUID)
+	}
+	var keyVolume *corev1.Volume
+	for i, volume := range pod.Volumes {
+		if volume.Secret != nil {
+			keyVolume = &pod.Volumes[i]
+		}
+	}
+	if keyVolume == nil {
+		t.Fatalf("volumes = %+v, want a secret volume", pod.Volumes)
+	}
+	if keyVolume.Secret.SecretName != plugin.GatewayKeyName("tickets") {
+		t.Fatalf("secret volume = %+v", keyVolume.Secret)
+	}
+	if len(keyVolume.Secret.Items) != 1 {
+		t.Fatalf("secret items = %+v", keyVolume.Secret.Items)
+	}
+	if mode := keyVolume.Secret.Items[0].Mode; mode == nil || *mode != 0o440 {
+		t.Fatalf("secret item mode = %v, want 0440", mode)
+	}
+	if mode := keyVolume.Secret.DefaultMode; mode == nil || *mode != 0o440 {
+		t.Fatalf("secret default mode = %v, want 0440", mode)
+	}
+	command := strings.Join(pod.Containers[0].Command, " ")
+	if !strings.Contains(command, "--key-file "+k8s.GatewayKeyDir+"/key") {
+		t.Fatalf("command %q does not read the projected key", command)
+	}
+}
+
+// TestReconcileRenderConfigUpdate covers a change that the manifest does not
+// carry: a new tools image and different platform labels must update the
+// objects that already exist.
+func TestReconcileRenderConfigUpdate(t *testing.T) {
+	manifests := []plugin.Manifest{serviceManifest("tickets")}
+	reconciler, cs := newReconciler(t, &manifests, true)
+	ctx := context.Background()
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reconciler.opts.Render.ToolsImage = "ghcr.io/example/mayfly-agent:next"
+	reconciler.opts.Render.PlatformLabels = map[string]string{"app.kubernetes.io/name": "mayfly"}
+	cs.ClearActions()
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	object := plugin.ObjectName("tickets")
+	deployment, err := cs.AppsV1().Deployments("plugins").Get(ctx, object, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := deployment.Spec.Template.Spec.InitContainers[0].Image; got != reconciler.opts.Render.ToolsImage {
+		t.Fatalf("tools image = %q, want %q", got, reconciler.opts.Render.ToolsImage)
+	}
+	if got, want := deployment.Annotations[k8s.AnnotationSpecHash], renderHash(manifests[0], reconciler.opts.Render); got != want {
+		t.Fatalf("spec hash = %q, want %q", got, want)
+	}
+	policy, err := cs.NetworkingV1().NetworkPolicies("plugins").Get(ctx, object, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := policy.Spec.Ingress[0].From[0]
+	if peer.PodSelector == nil || len(peer.PodSelector.MatchLabels) != 1 ||
+		peer.PodSelector.MatchLabels["app.kubernetes.io/name"] != "mayfly" {
+		t.Fatalf("ingress pods = %+v", peer.PodSelector)
+	}
+}
+
+// TestReconcileGatewayKeyRotation covers a Secret that was deleted and
+// recreated: the pods roll onto the new key, and ServiceURL returns it.
+func TestReconcileGatewayKeyRotation(t *testing.T) {
+	manifests := []plugin.Manifest{serviceManifest("tickets")}
+	reconciler, cs := newReconciler(t, &manifests, true)
+	ctx := context.Background()
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	secretName := plugin.GatewayKeyName("tickets")
+	before, err := cs.CoreV1().Secrets("plugins").Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.CoreV1().Secrets("plugins").Delete(ctx, secretName, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after, err := cs.CoreV1().Secrets("plugins").Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after.Data["key"]) == string(before.Data["key"]) {
+		t.Fatal("the recreated Secret kept the old key")
+	}
+	if _, key, err := reconciler.ServiceURL("tickets"); err != nil {
+		t.Fatal(err)
+	} else if string(key) != string(after.Data["key"]) {
+		t.Fatal("ServiceURL returns the key of the deleted Secret")
+	}
+	deployment, err := cs.AppsV1().Deployments("plugins").Get(ctx, plugin.ObjectName("tickets"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := deployment.Spec.Template.Annotations[k8s.AnnotationGatewayKeyHash], keyHash(after.Data["key"]); got != want {
+		t.Fatalf("pod template key hash = %q, want %q (secret %q)", got, want, keyHash(after.Data["key"]))
+	}
+}
+
 // TestReconcileHTTPTransport covers service.transport: http: the plugin runs
 // its own command, gets the gateway key as an environment variable, and is
 // probed on its own port.
@@ -489,10 +620,9 @@ func TestLocalServiceChild(t *testing.T) {
 	workDir := t.TempDir()
 	pidFile := filepath.Join(workDir, "pid")
 	logFile := filepath.Join(workDir, "calls.jsonl")
-	t.Setenv("FIXTURE_TOOLS", "query")
-	t.Setenv("FIXTURE_PID_FILE", pidFile)
-	t.Setenv("FIXTURE_LOG", logFile)
-
+	// The fixture reads its settings from the manifest's env, because the
+	// plugin environment is an allowlist and the parent's variables do not
+	// reach the child.
 	manifest := plugin.Manifest{
 		SchemaVersion: 1,
 		Name:          "tickets",
@@ -500,7 +630,12 @@ func TestLocalServiceChild(t *testing.T) {
 		Local:         &plugin.LocalRun{Command: fixturePath},
 		Tools:         []plugin.Tool{{Name: "query", Idempotent: true}},
 		Service:       &plugin.ServiceSpec{Concurrency: 4, Transport: "stdio"},
-		Dir:           workDir,
+		Env: map[string]string{
+			"FIXTURE_TOOLS":    "query",
+			"FIXTURE_PID_FILE": pidFile,
+			"FIXTURE_LOG":      logFile,
+		},
+		Dir: workDir,
 	}
 	manifests := []plugin.Manifest{manifest}
 	local, err := NewLocal(LocalConfig{
@@ -590,6 +725,65 @@ func TestLocalServiceChild(t *testing.T) {
 	if err := waitGone(socket, pid); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestLocalEnvAllowList covers the environment a local service plugin starts
+// from: the control plane's provider keys, header secrets, and session token
+// never reach it, while the manifest's env and declared secrets do.
+func TestLocalEnvAllowList(t *testing.T) {
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("OPENAI_API_KEY", "provider-key")
+	t.Setenv("NOTION_TOKEN", "header-secret")
+	t.Setenv("GITHUB_TOKEN", "cloud-token")
+	t.Setenv("MAYFLY_SESSION_TOKEN", "session-token")
+	t.Setenv("TICKETS_TOKEN", "declared-secret")
+
+	manifest := serviceManifest("tickets")
+	manifest.Dir = "/plugins/tickets"
+	tmpDir := filepath.Join(t.TempDir(), "tmp")
+	env, err := localEnv(manifest, tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := parseEnv(t, env)
+	for _, name := range []string{"OPENAI_API_KEY", "NOTION_TOKEN", "GITHUB_TOKEN", "MAYFLY_SESSION_TOKEN"} {
+		if value, ok := values[name]; ok {
+			t.Errorf("plugin environment has %s=%q", name, value)
+		}
+	}
+	for name, want := range map[string]string{
+		"PATH":               "/usr/local/bin:/usr/bin:/bin",
+		"TMPDIR":             tmpDir,
+		"TICKETS_URL":        "https://tickets.example.test/api",
+		"TICKETS_TOKEN":      "declared-secret",
+		"MAYFLY_PLUGIN_NAME": "tickets",
+		"MAYFLY_PLUGIN_DIR":  "/plugins/tickets",
+	} {
+		if values[name] != want {
+			t.Errorf("plugin environment has %s=%q, want %q", name, values[name], want)
+		}
+	}
+	info, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatalf("temporary directory: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o700 {
+		t.Fatalf("temporary directory mode = %o, want 700", mode)
+	}
+}
+
+// parseEnv turns an environment slice into a map.
+func parseEnv(t *testing.T, env []string) map[string]string {
+	t.Helper()
+	values := map[string]string{}
+	for _, entry := range env {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			t.Fatalf("environment entry %q has no value", entry)
+		}
+		values[name] = value
+	}
+	return values
 }
 
 // waitReady waits for a shim on a Unix socket to report a ready child.
