@@ -11,12 +11,14 @@ import (
 )
 
 type stream struct {
-	mu     sync.Mutex
-	seq    int64
-	events []model.Event
-	inbox  []model.Event
-	subs   map[*subscription]struct{}
-	max    int
+	mu       sync.Mutex
+	seq      int64
+	events   []model.Event
+	inbox    []model.Event
+	subs     map[*subscription]struct{}
+	max      int
+	keys     map[string]struct{}
+	keyOrder []string
 }
 
 type subscription struct {
@@ -47,6 +49,7 @@ func (h *Hub) Create(sessionID string) {
 		h.streams[sessionID] = &stream{
 			subs: map[*subscription]struct{}{},
 			max:  h.max,
+			keys: map[string]struct{}{},
 		}
 	}
 }
@@ -69,8 +72,21 @@ func (h *Hub) Remove(sessionID string) {
 }
 
 // Append records an event and broadcasts it. The returned event has Seq,
-// Time, and SessionID set.
+// Time, and SessionID set. An event with a StepKey that this session already
+// accepted is dropped and returned with Seq 0.
 func (h *Hub) Append(sessionID string, ev model.Event) model.Event {
+	return h.append(sessionID, ev, true)
+}
+
+// Restore records a recovered event on the visible thread without adding it
+// to the inbox. Adoption uses it to rebuild the part of a turn that the
+// control plane lost; a live or replacement runtime resumes from the journal,
+// not from a second delivery of an old message.
+func (h *Hub) Restore(sessionID string, ev model.Event) model.Event {
+	return h.append(sessionID, ev, false)
+}
+
+func (h *Hub) append(sessionID string, ev model.Event, inbox bool) model.Event {
 	h.Create(sessionID)
 	h.mu.Lock()
 	s := h.streams[sessionID]
@@ -78,9 +94,24 @@ func (h *Hub) Append(sessionID string, ev model.Event) model.Event {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ev.SessionID = sessionID
+	if ev.StepKey != "" {
+		if _, seen := s.keys[ev.StepKey]; seen {
+			ev.Seq = 0
+			return ev
+		}
+		s.keys[ev.StepKey] = struct{}{}
+		s.keyOrder = append(s.keyOrder, ev.StepKey)
+		if len(s.keyOrder) > s.max {
+			delete(s.keys, s.keyOrder[0])
+			// Clear the slot so the dropped key is not kept alive by the
+			// backing array until the next append reallocates it.
+			s.keyOrder[0] = ""
+			s.keyOrder = s.keyOrder[1:]
+		}
+	}
 	s.seq++
 	ev.Seq = s.seq
-	ev.SessionID = sessionID
 	if ev.Time.IsZero() {
 		ev.Time = time.Now().UTC()
 	}
@@ -88,7 +119,7 @@ func (h *Hub) Append(sessionID string, ev model.Event) model.Event {
 	if len(s.events) > s.max {
 		s.events = append([]model.Event(nil), s.events[len(s.events)-s.max:]...)
 	}
-	if ev.IsInbox() {
+	if inbox && ev.IsInbox() {
 		s.inbox = append(s.inbox, ev)
 		if len(s.inbox) > s.max {
 			s.inbox = append([]model.Event(nil), s.inbox[len(s.inbox)-s.max:]...)
@@ -105,6 +136,21 @@ func (h *Hub) Append(sessionID string, ev model.Event) model.Event {
 		}
 	}
 	return ev
+}
+
+// Seed advances a session's sequence above every number a previous control
+// plane handed out. A fresh process numbers events from zero, so an adopted
+// session would otherwise reuse the turn keys of its journal.
+func (h *Hub) Seed(sessionID string, floor int64) {
+	h.Create(sessionID)
+	h.mu.Lock()
+	s := h.streams[sessionID]
+	h.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if floor > s.seq {
+		s.seq = floor
+	}
 }
 
 // LastSeq returns the latest assigned sequence for a session.
