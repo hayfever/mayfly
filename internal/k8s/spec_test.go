@@ -1,10 +1,15 @@
 package k8s
 
 import (
+	"encoding/json"
+	"os"
+	"reflect"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
 func testSpec() *SessionSpec {
@@ -236,5 +241,262 @@ func TestPersistentWorkspaceUsesOnePVC(t *testing.T) {
 	}
 	if pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Fatal("replacement is handled by the control plane, not the kubelet")
+	}
+}
+
+func TestSessionSpecValidatePlugins(t *testing.T) {
+	spec := testSpec()
+	spec.Plugins = []sessioncfg.Plugin{{Name: "tickets", Placement: "inline"}}
+	if err := spec.Validate(); err == nil {
+		t.Fatal("expected a missing tools image error")
+	}
+	spec.ToolsImage = "mayfly-agent:tools"
+	if err := spec.Validate(); err == nil {
+		t.Fatal("expected a missing plugin volume limit error")
+	}
+	spec.PluginVolumeLimit = "lots"
+	if err := spec.Validate(); err == nil {
+		t.Fatal("expected an invalid plugin volume limit error")
+	}
+	spec.PluginVolumeLimit = "512Mi"
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	// A service plugin needs no pod objects, so it needs neither setting.
+	serviceOnly := testSpec()
+	serviceOnly.Plugins = []sessioncfg.Plugin{{Name: "crm", Placement: "service"}}
+	if err := serviceOnly.Validate(); err != nil {
+		t.Fatalf("Validate service plugin: %v", err)
+	}
+}
+
+func TestPodWithoutPluginsUnchanged(t *testing.T) {
+	want, err := os.ReadFile("testdata/pod.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.MarshalIndent(testSpec().Pod(), "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = append(body, '\n')
+	if string(body) != string(want) {
+		t.Fatalf("pod without plugins changed:\n%s", body)
+	}
+}
+
+func TestPodServiceOnlyUnchanged(t *testing.T) {
+	spec := testSpec()
+	spec.Plugins = []sessioncfg.Plugin{{
+		Name:      "crm",
+		Placement: "service",
+		Tools:     []sessioncfg.PluginTool{{Name: "lookup", TimeoutSeconds: 30}},
+	}}
+	want, err := os.ReadFile("testdata/pod.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.MarshalIndent(spec.Pod(), "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = append(body, '\n')
+	if string(body) != string(want) {
+		t.Fatalf("service plugins changed the pod:\n%s", body)
+	}
+}
+
+func inlinePlugin(name, image string) sessioncfg.Plugin {
+	return sessioncfg.Plugin{
+		Name:               name,
+		Placement:          "inline",
+		Image:              image,
+		Dir:                PluginsDir + "/" + name,
+		Command:            "node",
+		Workdir:            "plugin",
+		InitTimeoutSeconds: 30,
+		MaxOutputBytes:     4096,
+		Tools:              []sessioncfg.PluginTool{{Name: "run", TimeoutSeconds: 30}},
+	}
+}
+
+func TestPodPluginInitContainers(t *testing.T) {
+	spec := testSpec()
+	spec.ToolsImage = "mayfly-agent:tools"
+	spec.PluginVolumeLimit = "512Mi"
+	spec.Plugins = []sessioncfg.Plugin{
+		inlinePlugin("tickets", "example.com/tickets:1"),
+		inlinePlugin("word-count", "example.com/word-count:1"),
+		{Name: "notify", Placement: "sidecar"},
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	pod := spec.Pod()
+
+	init := pod.Spec.InitContainers
+	if len(init) != 3 {
+		t.Fatalf("init containers = %d, want tools and two inline plugins", len(init))
+	}
+	wantNames := []string{"mayfly-tools", "plugin-tickets", "plugin-word-count"}
+	for i, name := range wantNames {
+		if init[i].Name != name {
+			t.Fatalf("init container %d = %q, want %q", i, init[i].Name, name)
+		}
+	}
+
+	tools := init[0]
+	if tools.Image != spec.ToolsImage {
+		t.Fatalf("tools image = %q", tools.Image)
+	}
+	if !reflect.DeepEqual(tools.Command, []string{PluginShim, "install-self", ToolsDir + "/mayfly-plugin-shim"}) {
+		t.Fatalf("tools command = %v", tools.Command)
+	}
+	if got := tools.VolumeMounts; len(got) != 1 || got[0].Name != "mayfly-tools" || got[0].MountPath != ToolsDir || got[0].ReadOnly {
+		t.Fatalf("tools mounts = %+v", got)
+	}
+
+	agent := pod.Spec.Containers[0]
+	for i, p := range spec.Plugins[:2] {
+		container := init[i+1]
+		if container.Image != p.Image {
+			t.Fatalf("%s image = %q", p.Name, container.Image)
+		}
+		wantCommand := []string{ToolsDir + "/mayfly-plugin-shim", "copy", PluginImageDir, PluginsDir + "/" + p.Name}
+		if !reflect.DeepEqual(container.Command, wantCommand) {
+			t.Fatalf("%s command = %v, want %v", p.Name, container.Command, wantCommand)
+		}
+		if !reflect.DeepEqual(container.SecurityContext, agent.SecurityContext) {
+			t.Fatalf("%s security context differs from the agent container's", p.Name)
+		}
+		if len(container.Env) != 0 || len(container.EnvFrom) != 0 {
+			t.Fatalf("%s must not receive environment", p.Name)
+		}
+		assertQuantity(t, p.Name+" cpu request", container.Resources.Requests, corev1.ResourceCPU, "10m")
+		assertQuantity(t, p.Name+" memory request", container.Resources.Requests, corev1.ResourceMemory, "32Mi")
+		assertQuantity(t, p.Name+" memory limit", container.Resources.Limits, corev1.ResourceMemory, "128Mi")
+		mounts := map[string]corev1.VolumeMount{}
+		for _, m := range container.VolumeMounts {
+			mounts[m.Name] = m
+		}
+		if mount, ok := mounts["mayfly-tools"]; !ok || !mount.ReadOnly || mount.MountPath != ToolsDir {
+			t.Fatalf("%s tools mount = %+v", p.Name, mount)
+		}
+		if mount, ok := mounts["plugins"]; !ok || mount.ReadOnly || mount.MountPath != PluginsDir {
+			t.Fatalf("%s plugins mount = %+v", p.Name, mount)
+		}
+	}
+
+	volumes := map[string]corev1.Volume{}
+	for _, v := range pod.Spec.Volumes {
+		volumes[v.Name] = v
+	}
+	if got := volumes["mayfly-tools"].EmptyDir; got == nil || got.SizeLimit == nil || got.SizeLimit.String() != "64Mi" {
+		t.Fatalf("mayfly-tools volume = %+v", volumes["mayfly-tools"])
+	}
+	if got := volumes["plugins"].EmptyDir; got == nil || got.SizeLimit == nil || got.SizeLimit.String() != "512Mi" {
+		t.Fatalf("plugins volume = %+v", volumes["plugins"])
+	}
+
+	var pluginsMount *corev1.VolumeMount
+	for i := range agent.VolumeMounts {
+		if agent.VolumeMounts[i].Name == "plugins" {
+			pluginsMount = &agent.VolumeMounts[i]
+		}
+	}
+	if pluginsMount == nil || !pluginsMount.ReadOnly || pluginsMount.MountPath != PluginsDir {
+		t.Fatalf("agent plugins mount = %+v", pluginsMount)
+	}
+}
+
+func TestPodPluginSecretsProjected(t *testing.T) {
+	spec := testSpec()
+	spec.ToolsImage = "mayfly-agent:tools"
+	spec.PluginVolumeLimit = "512Mi"
+	secrets := inlinePlugin("word_count", "example.com/word-count:1")
+	secrets.Secrets = []sessioncfg.PluginSecret{
+		{Env: "WORD_STATS_TOKEN", Secret: "mayfly-plugin-word-stats", Key: "token"},
+		{Env: "WORD_STATS_KEY", Secret: "mayfly-plugin-word-stats", Key: "api-key"},
+		{Env: "SHARED_TOKEN", Secret: "mayfly-plugin-shared", Key: "token"},
+	}
+	secrets.SecretsDir = PluginSecretsDir + "/" + secrets.Name
+	spec.Plugins = []sessioncfg.Plugin{secrets}
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	pod := spec.Pod()
+
+	var volume *corev1.Volume
+	for i := range pod.Spec.Volumes {
+		if pod.Spec.Volumes[i].Name == "plugin-secrets-word-count" {
+			volume = &pod.Spec.Volumes[i]
+		}
+	}
+	if volume == nil {
+		t.Fatalf("secret volume missing: %+v", pod.Spec.Volumes)
+	}
+	projected := volume.Projected
+	if projected == nil {
+		t.Fatalf("secret volume is not projected: %+v", volume.VolumeSource)
+	}
+	if projected.DefaultMode == nil || *projected.DefaultMode != 0o400 {
+		t.Fatalf("default mode = %v", projected.DefaultMode)
+	}
+	if len(projected.Sources) != 2 {
+		t.Fatalf("sources = %d, want one per Secret", len(projected.Sources))
+	}
+	items := map[string]corev1.KeyToPath{}
+	for _, source := range projected.Sources {
+		if source.Secret == nil {
+			t.Fatalf("source is not a secret: %+v", source)
+		}
+		for _, item := range source.Secret.Items {
+			if item.Mode == nil || *item.Mode != 0o400 {
+				t.Fatalf("%s mode = %v, want 0400", item.Path, item.Mode)
+			}
+			items[item.Path] = item
+		}
+	}
+	if got := items["WORD_STATS_TOKEN"]; got.Key != "token" {
+		t.Fatalf("WORD_STATS_TOKEN key = %q", got.Key)
+	}
+	if got := items["WORD_STATS_KEY"]; got.Key != "api-key" {
+		t.Fatalf("WORD_STATS_KEY key = %q", got.Key)
+	}
+	if got := items["SHARED_TOKEN"]; got.Key != "token" {
+		t.Fatalf("SHARED_TOKEN key = %q", got.Key)
+	}
+
+	var mount *corev1.VolumeMount
+	for i := range pod.Spec.Containers[0].VolumeMounts {
+		m := pod.Spec.Containers[0].VolumeMounts[i]
+		if m.Name == "plugin-secrets-word-count" {
+			mount = &pod.Spec.Containers[0].VolumeMounts[i]
+		}
+	}
+	if mount == nil || !mount.ReadOnly || mount.MountPath != PluginSecretsDir+"/word_count" {
+		t.Fatalf("secret mount = %+v", mount)
+	}
+	// No other container may read the secret files.
+	for _, container := range pod.Spec.InitContainers {
+		for _, m := range container.VolumeMounts {
+			if m.Name == "plugin-secrets-word-count" {
+				t.Fatalf("%s mounts the plugin secret volume", container.Name)
+			}
+		}
+	}
+}
+
+// assertQuantity checks one resource quantity without leaning on Quantity's
+// pointer methods, which a map index cannot call.
+func assertQuantity(t *testing.T, what string, list corev1.ResourceList, name corev1.ResourceName, want string) {
+	t.Helper()
+	got, ok := list[name]
+	if !ok {
+		t.Fatalf("%s is unset", what)
+	}
+	if got.String() != want {
+		t.Fatalf("%s = %s, want %s", what, got.String(), want)
 	}
 }

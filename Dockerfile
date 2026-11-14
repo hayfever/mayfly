@@ -16,6 +16,7 @@ RUN LDFLAGS="-s -w -X github.com/hayfever/mayfly/internal/version.Version=${VERS
  && go build -trimpath -ldflags "$LDFLAGS" -o /out/mayfly-agent ./cmd/mayfly-agent \
  && go build -trimpath -ldflags "$LDFLAGS" -o /out/mayfly ./cmd/mayfly \
  && go build -trimpath -ldflags "$LDFLAGS" -o /out/mayfly-harness ./cmd/mayfly-harness \
+ && go build -trimpath -ldflags "$LDFLAGS" -o /out/mayfly-plugin-shim ./cmd/mayfly-plugin-shim \
  && go build -trimpath -ldflags "$LDFLAGS" -o /out/llmstub ./cmd/llmstub \
  && go build -trimpath -ldflags "$LDFLAGS" -o /out/mcpstub ./cmd/mcpstub
 
@@ -45,7 +46,8 @@ RUN groupadd --gid 65532 mayfly \
  && useradd --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin mayfly
 COPY --from=build /out/mayfly-agent /usr/local/bin/mayfly-agent
 COPY --from=build /out/mayfly-harness /usr/local/bin/mayfly-harness
-RUN mkdir -p /opt/mayfly/harnesses
+COPY --from=build /out/mayfly-plugin-shim /usr/local/bin/mayfly-plugin-shim
+RUN mkdir -p /opt/mayfly/harnesses /opt/mayfly/plugins
 ENV HOME=/tmp \
     XDG_CACHE_HOME=/tmp/cache \
     NPM_CONFIG_CACHE=/tmp/npm

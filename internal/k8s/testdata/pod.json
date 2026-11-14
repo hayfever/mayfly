@@ -1,0 +1,153 @@
+{
+  "metadata": {
+    "name": "mayfly-abc123",
+    "namespace": "mayfly",
+    "labels": {
+      "app.kubernetes.io/managed-by": "mayfly",
+      "app.kubernetes.io/name": "mayfly-agent",
+      "mayfly.io/managed": "true",
+      "mayfly.io/session": "abc123"
+    },
+    "annotations": {
+      "mayfly.io/session": "abc123"
+    }
+  },
+  "spec": {
+    "volumes": [
+      {
+        "name": "config",
+        "configMap": {
+          "name": "mayfly-abc123"
+        }
+      },
+      {
+        "name": "workspace",
+        "emptyDir": {
+          "sizeLimit": "128Mi"
+        }
+      },
+      {
+        "name": "artifacts",
+        "emptyDir": {
+          "sizeLimit": "256Mi"
+        }
+      },
+      {
+        "name": "tmp",
+        "emptyDir": {
+          "medium": "Memory",
+          "sizeLimit": "256Mi"
+        }
+      }
+    ],
+    "containers": [
+      {
+        "name": "agent",
+        "image": "mayfly-agent:test",
+        "command": [
+          "/usr/local/bin/agent"
+        ],
+        "args": [
+          "--mode",
+          "rpc"
+        ],
+        "env": [
+          {
+            "name": "MAYFLY_CONFIG",
+            "value": "/etc/mayfly/session.json"
+          },
+          {
+            "name": "HOME",
+            "value": "/tmp"
+          },
+          {
+            "name": "XDG_CACHE_HOME",
+            "value": "/tmp/cache"
+          },
+          {
+            "name": "NPM_CONFIG_CACHE",
+            "value": "/tmp/npm"
+          },
+          {
+            "name": "MAYFLY_SESSION_TOKEN",
+            "valueFrom": {
+              "secretKeyRef": {
+                "name": "mayfly-abc123",
+                "key": "token"
+              }
+            }
+          },
+          {
+            "name": "AGENT_MODE",
+            "value": "rpc"
+          }
+        ],
+        "resources": {
+          "limits": {
+            "memory": "1Gi"
+          },
+          "requests": {
+            "cpu": "100m"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "config",
+            "readOnly": true,
+            "mountPath": "/etc/mayfly"
+          },
+          {
+            "name": "workspace",
+            "mountPath": "/workspace"
+          },
+          {
+            "name": "artifacts",
+            "mountPath": "/artifacts"
+          },
+          {
+            "name": "tmp",
+            "mountPath": "/tmp"
+          }
+        ],
+        "imagePullPolicy": "IfNotPresent",
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "privileged": false,
+          "runAsUser": 65532,
+          "runAsGroup": 65532,
+          "runAsNonRoot": true,
+          "readOnlyRootFilesystem": true,
+          "allowPrivilegeEscalation": false,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        }
+      }
+    ],
+    "restartPolicy": "Never",
+    "terminationGracePeriodSeconds": 20,
+    "activeDeadlineSeconds": 3900,
+    "serviceAccountName": "mayfly-agent",
+    "automountServiceAccountToken": false,
+    "securityContext": {
+      "runAsUser": 65532,
+      "runAsGroup": 65532,
+      "runAsNonRoot": true,
+      "fsGroup": 65532,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "imagePullSecrets": [
+      {
+        "name": "registry-credentials"
+      }
+    ],
+    "enableServiceLinks": false
+  },
+  "status": {}
+}
