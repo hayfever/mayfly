@@ -19,6 +19,7 @@ import (
 
 	"net/http"
 
+	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/model"
 )
@@ -258,6 +259,144 @@ func (c *Client) Finalize(ctx context.Context, status model.SessionStatus, reaso
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+// Tool gateway errors, one per outcome the runtime acts on. A ToolError
+// unwraps to the sentinel for its status, so a caller can use errors.Is.
+var (
+	// ErrToolNotGranted reports a tool the session may not call (403).
+	ErrToolNotGranted = errors.New("tool is not granted to this session")
+	// ErrToolConflict reports a call key reused for another tool or with
+	// other arguments (409). The runtime treats it as fatal.
+	ErrToolConflict = errors.New("tool call key conflicts with an earlier call")
+	// ErrToolRateLimited reports a plugin rate limit (429). ToolError
+	// carries the server's RetryAfter.
+	ErrToolRateLimited = errors.New("tool call is rate limited")
+	// ErrToolUnavailable reports no free in-flight slot (503). The call can
+	// proceed after the runtime waits.
+	ErrToolUnavailable = errors.New("tool gateway is unavailable")
+)
+
+// ToolError is a rejected tool gateway request. Status is the HTTP status and
+// Message is the server's text; Unwrap maps the status to the sentinel the
+// runtime switches on.
+type ToolError struct {
+	Op         string
+	Status     int
+	Message    string
+	RetryAfter time.Duration
+}
+
+func (e *ToolError) Error() string {
+	return fmt.Sprintf("%s: status %d: %s", e.Op, e.Status, e.Message)
+}
+
+// Unwrap reports the typed outcome for the status.
+func (e *ToolError) Unwrap() error {
+	switch e.Status {
+	case http.StatusForbidden:
+		return ErrToolNotGranted
+	case http.StatusConflict:
+		return ErrToolConflict
+	case http.StatusTooManyRequests:
+		return ErrToolRateLimited
+	case http.StatusServiceUnavailable:
+		return ErrToolUnavailable
+	}
+	return nil
+}
+
+// Tools lists the session's tool grant.
+func (c *Client) Tools(ctx context.Context) (gateway.Discovery, error) {
+	var discovery gateway.Discovery
+	if err := c.toolRequest(ctx, "list tools", http.MethodGet, "/tools", nil, &discovery); err != nil {
+		return gateway.Discovery{}, err
+	}
+	if discovery.Tools == nil {
+		discovery.Tools = []gateway.DiscoveryTool{}
+	}
+	return discovery, nil
+}
+
+// BeginCall asks the gateway to authorize one tool call. The answer is either
+// a recorded result or a dispatch for the runtime to perform.
+func (c *Client) BeginCall(ctx context.Context, req gateway.BeginRequest) (gateway.BeginResponse, error) {
+	var resp gateway.BeginResponse
+	if err := c.toolRequest(ctx, "begin tool call", http.MethodPost, "/tools/calls", req, &resp); err != nil {
+		return gateway.BeginResponse{}, err
+	}
+	return resp, nil
+}
+
+// CompleteCall reports the result of a locally dispatched call. Repeating it
+// with the same content succeeds.
+func (c *Client) CompleteCall(ctx context.Context, req gateway.CompleteRequest) error {
+	return c.toolRequest(ctx, "complete tool call", http.MethodPost, "/tools/calls/complete", req, nil)
+}
+
+// toolRequest sends one gateway request and decodes the response into dst. A
+// non-2xx answer becomes a ToolError. dst may be nil for an empty response.
+func (c *Client) toolRequest(ctx context.Context, op, method, suffix string, body, dst any) error {
+	var reader io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.path(suffix), reader)
+	if err != nil {
+		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return &ToolError{
+			Op:         op,
+			Status:     resp.StatusCode,
+			Message:    errorMessage(msg),
+			RetryAfter: retryAfter(resp.Header.Get("Retry-After")),
+		}
+	}
+	if dst == nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	return nil
+}
+
+// errorMessage reads the gateway's {"error": "..."} envelope so the runtime
+// can show its message as the tool result. Anything else is passed through
+// trimmed, as the journal routes do.
+func errorMessage(body []byte) string {
+	var envelope struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err == nil && envelope.Error != "" {
+		return envelope.Error
+	}
+	return strings.TrimSpace(string(body))
+}
+
+// retryAfter reads a Retry-After header in delta-seconds.
+func retryAfter(value string) time.Duration {
+	seconds, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // httpStatusError carries a non-2xx response from the control plane.

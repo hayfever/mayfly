@@ -4,20 +4,29 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/hayfever/mayfly/internal/agents"
 	"github.com/hayfever/mayfly/internal/artifact"
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/hub"
 	"github.com/hayfever/mayfly/internal/journal"
+	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/plugin"
+	"github.com/hayfever/mayfly/internal/project"
 	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/ratelimit"
+	"github.com/hayfever/mayfly/internal/runner"
 	"github.com/hayfever/mayfly/internal/session"
 )
 
@@ -294,5 +303,263 @@ func TestQueueAdminEndpoints(t *testing.T) {
 	}
 	if rec = do(http.MethodGet, "/api/v1/queue/jobs/missing"); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown job status = %d", rec.Code)
+	}
+}
+
+// recordingRunner stands in for a runtime process and keeps the session token
+// the manager handed it, so a test can authenticate like a real runtime.
+type recordingRunner struct {
+	mu     sync.Mutex
+	tokens map[string]string
+}
+
+func (r *recordingRunner) Start(_ context.Context, spec runner.Spec) (runner.Handle, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.tokens == nil {
+		r.tokens = map[string]string{}
+	}
+	r.tokens[spec.SessionID] = spec.Token
+	return runner.Handle{Backend: spec.Backend, SessionID: spec.SessionID}, nil
+}
+
+func (r *recordingRunner) Stop(context.Context, runner.Handle, bool) error { return nil }
+
+func (r *recordingRunner) Logs(context.Context, runner.Handle, int64) (string, error) {
+	return "", nil
+}
+
+func (r *recordingRunner) token(id string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.tokens[id]
+}
+
+// toolFixture is one API server whose manager holds a real session per
+// harness, so the tool routes authenticate exactly as they do in production.
+type toolFixture struct {
+	handler   http.Handler
+	gateway   *gateway.Gateway
+	runner    *recordingRunner
+	helper    model.Session
+	alternate model.Session
+}
+
+func newToolFixture(t *testing.T, manifests ...plugin.Manifest) *toolFixture {
+	t.Helper()
+	cfg := config.Default()
+	cfg.Runtime.Backend = "local"
+	cfg.Runtime.StateDir = t.TempDir()
+	cfg.Runtime.Image = "example/agent:1"
+	cfg.LLM.Model = "stub"
+	cfg.Server.InternalURL = "http://mayfly:8080"
+	bundle := &project.Bundle{
+		Agents: []agents.Agent{
+			{Definition: agents.Definition{Name: "helper"}, Source: "test"},
+			{Definition: agents.Definition{Name: "alternate", Harness: "pi"}, Source: "test"},
+		},
+	}
+	store, err := artifact.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	mgr, err := session.New(cfg, bundle, store, hub.New(10), journal.NewMemory(), runner, nil, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gateway.New(gateway.Options{
+		Ledger:    journal.NewMemory(),
+		Manifests: func() []plugin.Manifest { return manifests },
+		Logger:    testLogger(),
+	})
+	server := New(cfg, mgr, nil, testLogger(), WithGateway(gw))
+
+	ctx := context.Background()
+	helper, err := mgr.Create(ctx, session.CreateOptions{Prompt: "one", Agent: "helper"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alternate, err := mgr.Create(ctx, session.CreateOptions{Prompt: "two", Agent: "alternate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := gateway.Grant{
+		SessionID: helper.ID,
+		Agent:     "helper",
+		MaxSteps:  4,
+		Tools: map[string]gateway.GrantTool{
+			"plugin_alpha_get": {
+				Name:       "plugin_alpha_get",
+				Owner:      "alpha",
+				Remote:     "get",
+				Placement:  gateway.Inline,
+				Idempotent: true,
+				Timeout:    30 * time.Second,
+				MaxOutput:  4096,
+			},
+		},
+	}
+	gw.Register(grant)
+	// The alternate harness gets a grant too, so its 404 can only come from
+	// the harness rule and not from a missing session.
+	alternateGrant := grant
+	alternateGrant.SessionID = alternate.ID
+	alternateGrant.Agent = "alternate"
+	gw.Register(alternateGrant)
+
+	return &toolFixture{
+		handler:   server.Handler(),
+		gateway:   gw,
+		runner:    runner,
+		helper:    *helper,
+		alternate: *alternate,
+	}
+}
+
+func (f *toolFixture) do(method, id, suffix, token, body string) *httptest.ResponseRecorder {
+	target := "/internal/v1/sessions/" + id + suffix
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, target, reader)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestInternalToolsAuth(t *testing.T) {
+	f := newToolFixture(t)
+	token := f.runner.token(f.helper.ID)
+	if token == "" {
+		t.Fatal("manager did not hand the runtime a token")
+	}
+
+	rec := f.do(http.MethodGet, f.helper.ID, "/tools", "wrong-token", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong token status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = f.do(http.MethodGet, f.helper.ID, "/tools", "", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token status = %d", rec.Code)
+	}
+
+	rec = f.do(http.MethodGet, f.alternate.ID, "/tools", f.runner.token(f.alternate.ID), "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("alternate harness status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = f.do(http.MethodPost, f.helper.ID, "/tools/calls", token, `{"turn":1,"step":1,"tool":"plugin_beta_query"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("ungranted tool status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = f.do(http.MethodGet, f.helper.ID, "/tools", token, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tools status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var discovery gateway.Discovery
+	if err := json.Unmarshal(rec.Body.Bytes(), &discovery); err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Tools) != 1 || discovery.Tools[0].Name != "plugin_alpha_get" || discovery.Tools[0].Owner != "alpha" {
+		t.Fatalf("discovery = %+v", discovery.Tools)
+	}
+	if discovery.Tools[0].TimeoutMS != 30000 || discovery.Tools[0].Placement != gateway.Inline {
+		t.Fatalf("grant fields = %+v", discovery.Tools[0])
+	}
+}
+
+func TestInternalToolCallRoundTrip(t *testing.T) {
+	f := newToolFixture(t)
+	token := f.runner.token(f.helper.ID)
+	calls := "/tools/calls"
+
+	rec := f.do(http.MethodPost, f.helper.ID, calls, token, `{"turn":0,"step":1,"tool":"plugin_alpha_get"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad turn status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	begin := `{"turn":1,"step":1,"call_id":"call_ab","tool":"plugin_alpha_get","arguments":{"b":2,"a":1}}`
+	rec = f.do(http.MethodPost, f.helper.ID, calls, token, begin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("begin status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp gateway.BeginResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Dispatch == nil || resp.Result != nil {
+		t.Fatalf("begin response = %+v", resp)
+	}
+	wantKey := f.helper.ID + "/1/1"
+	if resp.Dispatch.Key != wantKey || resp.Dispatch.TimeoutMS != 30000 || resp.Dispatch.Token != "" {
+		t.Fatalf("dispatch = %+v", resp.Dispatch)
+	}
+
+	rec = f.do(http.MethodPost, f.helper.ID, calls+"/complete", token, `{"key":"`+wantKey+`","content":"done"}`)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("complete status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = f.do(http.MethodPost, f.helper.ID, calls+"/complete", token, `{"key":"`+wantKey+`","content":"done"}`)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("repeated complete status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = f.do(http.MethodPost, f.helper.ID, calls+"/complete", token, `{"key":"`+wantKey+`","content":"other"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("differing complete status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = f.do(http.MethodPost, f.helper.ID, calls+"/complete", token, `{"key":"missing","content":"x"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown key status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = f.do(http.MethodPost, f.helper.ID, calls, token, begin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("replay status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	resp = gateway.BeginResponse{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Result == nil || resp.Dispatch != nil {
+		t.Fatalf("replay response = %+v", resp)
+	}
+	if resp.Result.Content != "done" || !resp.Result.Replayed || resp.Result.IsError {
+		t.Fatalf("replay result = %+v", resp.Result)
+	}
+
+	other := `{"turn":1,"step":1,"tool":"plugin_alpha_get","arguments":{"a":2}}`
+	rec = f.do(http.MethodPost, f.helper.ID, calls, token, other)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("changed arguments status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestInternalToolCallRateLimited(t *testing.T) {
+	f := newToolFixture(t, plugin.Manifest{
+		Name:   "alpha",
+		Limits: plugin.Limits{Rate: &plugin.Rate{Requests: 1, Interval: "1h", Burst: 1}},
+	})
+	token := f.runner.token(f.helper.ID)
+
+	begin := func(step int) *httptest.ResponseRecorder {
+		body := fmt.Sprintf(`{"turn":1,"step":%d,"tool":"plugin_alpha_get"}`, step)
+		return f.do(http.MethodPost, f.helper.ID, "/tools/calls", token, body)
+	}
+	if rec := begin(1); rec.Code != http.StatusOK {
+		t.Fatalf("first call status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec := begin(2)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second call status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	retry := rec.Header().Get("Retry-After")
+	if seconds, err := strconv.Atoi(retry); err != nil || seconds < 1 {
+		t.Fatalf("Retry-After = %q", retry)
 	}
 }
