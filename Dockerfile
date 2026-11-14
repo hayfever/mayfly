@@ -38,7 +38,7 @@ ENTRYPOINT ["/mcpstub"]
 # The agent image includes Node, npm/npx, git, curl, jq, and ripgrep so stdio
 # MCP servers can be installed or run in the session. The runtime filesystem is
 # read-only; HOME and caches point at the writable /tmp mount.
-FROM node:22-bookworm-slim AS mayfly-agent
+FROM node:26-bookworm-slim AS mayfly-agent
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates git curl jq ripgrep \
  && rm -rf /var/lib/apt/lists/*
