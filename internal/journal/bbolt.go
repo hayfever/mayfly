@@ -17,6 +17,7 @@ var (
 	bucketJournal = []byte("journal")
 	bucketSeq     = []byte("seq")
 	bucketLast    = []byte("last")
+	bucketCalls   = []byte("calls")
 )
 
 // Bolt is a single-file durable store. Each session has its own bucket, and
@@ -42,6 +43,9 @@ func OpenBolt(path string) (*Bolt, error) {
 			return err
 		}
 		if _, err := tx.CreateBucketIfNotExists(bucketSeq); err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucketIfNotExists(bucketCalls); err != nil {
 			return err
 		}
 		_, err := tx.CreateBucketIfNotExists(bucketLast)
@@ -180,7 +184,7 @@ func (s *Bolt) Reserve(_ context.Context, session string, floor int64) error {
 	})
 }
 
-// Delete removes a session's steps and sequence reservation.
+// Delete removes a session's steps, sequence reservation, and tool calls.
 func (s *Bolt) Delete(_ context.Context, session string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		if err := tx.Bucket(bucketJournal).DeleteBucket([]byte(session)); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
@@ -189,8 +193,116 @@ func (s *Bolt) Delete(_ context.Context, session string) error {
 		if err := tx.Bucket(bucketSeq).Delete([]byte(session)); err != nil {
 			return err
 		}
+		if err := tx.Bucket(bucketCalls).DeleteBucket([]byte(session)); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
+			return err
+		}
 		return tx.Bucket(bucketLast).Delete([]byte(session))
 	})
+}
+
+// Begin returns the existing call record for c.Key, or stores c as pending.
+func (s *Bolt) Begin(_ context.Context, c Call) (Call, bool, error) {
+	if err := validateCall(c); err != nil {
+		return Call{}, false, err
+	}
+	c.State = CallPending
+	if c.Attempts <= 0 {
+		c.Attempts = 1
+	}
+	if c.StartedAt.IsZero() {
+		c.StartedAt = time.Now().UTC()
+	}
+	var rec Call
+	var created bool
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		root := tx.Bucket(bucketCalls)
+		calls, err := root.CreateBucketIfNotExists([]byte(c.SessionID))
+		if err != nil {
+			return err
+		}
+		if raw := calls.Get([]byte(c.Key)); raw != nil {
+			if err := json.Unmarshal(raw, &rec); err != nil {
+				return fmt.Errorf("decode call record: %w", err)
+			}
+			if rec.State == CallPending {
+				rec.Attempts++
+				payload, err := json.Marshal(rec)
+				if err != nil {
+					return err
+				}
+				return calls.Put([]byte(c.Key), payload)
+			}
+			return nil
+		}
+		payload, err := json.Marshal(c)
+		if err != nil {
+			return err
+		}
+		if err := calls.Put([]byte(c.Key), payload); err != nil {
+			return err
+		}
+		rec = c
+		created = true
+		return nil
+	})
+	return rec, created, err
+}
+
+// Complete marks a call done. The same content again is a no-op.
+func (s *Bolt) Complete(_ context.Context, session, key, content string, isError, interrupted bool) (Call, error) {
+	var rec Call
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		calls := tx.Bucket(bucketCalls).Bucket([]byte(session))
+		if calls == nil {
+			return fmt.Errorf("%w: %s", ErrCallNotFound, key)
+		}
+		raw := calls.Get([]byte(key))
+		if raw == nil {
+			return fmt.Errorf("%w: %s", ErrCallNotFound, key)
+		}
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			return fmt.Errorf("decode call record: %w", err)
+		}
+		if rec.State == CallDone {
+			if rec.Content == content && rec.IsError == isError && rec.Interrupted == interrupted {
+				return nil
+			}
+			return fmt.Errorf("%w: %s", ErrCallConflict, key)
+		}
+		rec.State = CallDone
+		rec.Content = content
+		rec.IsError = isError
+		rec.Interrupted = interrupted
+		rec.DoneAt = time.Now().UTC()
+		payload, err := json.Marshal(rec)
+		if err != nil {
+			return err
+		}
+		return calls.Put([]byte(key), payload)
+	})
+	return rec, err
+}
+
+// Get returns the call record for key.
+func (s *Bolt) Get(_ context.Context, session, key string) (Call, bool, error) {
+	var rec Call
+	found := false
+	err := s.db.View(func(tx *bolt.Tx) error {
+		calls := tx.Bucket(bucketCalls).Bucket([]byte(session))
+		if calls == nil {
+			return nil
+		}
+		raw := calls.Get([]byte(key))
+		if raw == nil {
+			return nil
+		}
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			return fmt.Errorf("decode call record: %w", err)
+		}
+		found = true
+		return nil
+	})
+	return rec, found, err
 }
 
 func entryKey(turn int64, step int) []byte {
