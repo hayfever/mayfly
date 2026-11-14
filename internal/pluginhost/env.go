@@ -14,20 +14,7 @@ import (
 const pluginTmpRoot = "/tmp/plugins"
 
 // defaultPath is used when the parent process has no PATH.
-const defaultPath = "/usr/local/bin:/usr/bin:/bin"
-
-// passthroughEnv lists the parent variables a plugin inherits unchanged. A
-// plugin needs the locale and the proxy settings of the container it runs in.
-// The lowercase forms are inherited too, because tools read both.
-var passthroughEnv = []string{
-	"LANG",
-	"TZ",
-	"SSL_CERT_FILE",
-	"SSL_CERT_DIR",
-	"HTTP_PROXY",
-	"HTTPS_PROXY",
-	"NO_PROXY",
-}
+const defaultPath = sessioncfg.DefaultPath
 
 // baseEnv returns the complete environment for one inline plugin:
 //
@@ -54,12 +41,8 @@ func baseEnv(p sessioncfg.Plugin, sessionID, workspaceDir string) ([]string, err
 		}
 		values[name] = dir
 	}
-	for _, name := range passthroughEnv {
-		for _, key := range []string{name, strings.ToLower(name)} {
-			if value, ok := os.LookupEnv(key); ok {
-				values[key] = value
-			}
-		}
+	for name, value := range sessioncfg.PassthroughEnv() {
+		values[name] = value
 	}
 	values["MAYFLY_PLUGIN_NAME"] = p.Name
 	values["MAYFLY_PLUGIN_DIR"] = p.Dir

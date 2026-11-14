@@ -114,6 +114,7 @@ func copyTree(src, dst string) error {
 
 	var copied int64
 	var dirs []directoryMode
+	var links []string
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -150,7 +151,11 @@ func copyTree(src, dst string) error {
 			if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
 				return err
 			}
-			return os.Symlink(link, target)
+			if err := os.Symlink(link, target); err != nil {
+				return err
+			}
+			links = append(links, target)
+			return nil
 		case mode.IsRegular():
 			copied += entryInfo.Size()
 			if copied > maxCopyBytes {
@@ -172,7 +177,10 @@ func copyTree(src, dst string) error {
 			return err
 		}
 	}
-	return nil
+	// checkLink already refused an absolute or lexically escaping target. The
+	// copy is complete, so the links can be resolved for real: a chain through
+	// another link can leave the tree although every target looks local.
+	return checkResolvedLinks(dst, links)
 }
 
 // checkLink refuses a symlink that leaves the plugin tree. The copy is mounted
@@ -185,6 +193,38 @@ func checkLink(rel, link string) error {
 	joined := filepath.Clean(filepath.Join(filepath.Dir(rel), link))
 	if joined == ".." || strings.HasPrefix(joined, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("%s: symlink target %q escapes the plugin directory", rel, link)
+	}
+	return nil
+}
+
+// checkResolvedLinks refuses a copied symlink whose target resolves outside
+// dst. links holds the copied link paths, and the destination is resolved as a
+// whole first, so the comparison is against the real directory the pod mounts.
+//
+// A lexical check alone accepts a/s -> .. and then t -> a/s/../..: both targets
+// look local, but together they point above the plugin directory. EvalSymlinks
+// follows the chain.
+func checkResolvedLinks(dst string, links []string) error {
+	if len(links) == 0 {
+		return nil
+	}
+	root, err := filepath.EvalSymlinks(dst)
+	if err != nil {
+		return err
+	}
+	for _, link := range links {
+		rel, err := filepath.Rel(dst, link)
+		if err != nil {
+			return err
+		}
+		resolved, err := filepath.EvalSymlinks(link)
+		if err != nil {
+			return fmt.Errorf("%s: symlink target: %w", rel, err)
+		}
+		inside, err := filepath.Rel(root, resolved)
+		if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("%s: symlink target %q escapes the plugin directory", rel, resolved)
+		}
 	}
 	return nil
 }

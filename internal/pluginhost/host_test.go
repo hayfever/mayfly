@@ -628,6 +628,58 @@ func TestHostClose(t *testing.T) {
 	}
 }
 
+func TestHostCloseDuringCall(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "calls.jsonl")
+	pidPath := filepath.Join(t.TempDir(), "pid")
+	plugin := fixturePlugin("busy", t.TempDir(), "sleep")
+	// A tool timeout far beyond the pod's grace period: a Close that waited
+	// for the call would lose the bundle and the finalize step.
+	plugin.Tools[0].TimeoutSeconds = 60
+	plugin.Env = map[string]string{
+		"FIXTURE_TOOLS":    "sleep",
+		"FIXTURE_SLEEP_MS": "60000",
+		"FIXTURE_LOG":      logPath,
+		"FIXTURE_PID_FILE": pidPath,
+	}
+	host, errs := startHost(t, Options{Logger: discardLogger()}, plugin)
+	if len(errs) != 0 {
+		t.Fatalf("errors: %v", errs)
+	}
+	pid := readPID(t, pidPath)
+
+	done := make(chan struct{})
+	var isErr bool
+	var callErr error
+	go func() {
+		defer close(done)
+		_, isErr, callErr = host.Call(context.Background(), "plugin_busy_sleep", json.RawMessage(`{}`), "key", "")
+	}()
+	waitFor(t, "the fixture to receive the call", func() bool {
+		return len(callsOnly(readEvents(t, logPath))) == 1
+	})
+
+	started := time.Now()
+	host.Close()
+	elapsed := time.Since(started)
+	if elapsed > 5*time.Second {
+		t.Fatalf("Close waited %s for the in-flight call", elapsed)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the in-flight call did not return after Close")
+	}
+	if callErr != nil {
+		t.Fatalf("the call returned a dispatch error: %v", callErr)
+	}
+	if !isErr {
+		t.Fatal("the call reported a successful result after the plugin stopped")
+	}
+	if err := syscall.Kill(pid, 0); err == nil {
+		t.Fatalf("process %d is still running", pid)
+	}
+}
+
 // callsOnly keeps the tools/call events of the fixture log.
 func callsOnly(events []map[string]json.RawMessage) []map[string]json.RawMessage {
 	var out []map[string]json.RawMessage

@@ -157,17 +157,19 @@ container takes over. It never calls a tool without a successful begin.
 
 Chosen: streamable HTTP MCP (the HTTP transport that `internal/mcp/http.go`
 already speaks) over a Unix socket at
-`/run/mayfly/plugin-sockets/<name>.sock`, on an emptyDir named
-`plugin-sockets` mounted into the agent container and the sidecar. HTTP over
-a socket gives request framing, status codes, and an existing client; a
-socket file needs no port and no NetworkPolicy change.
+`/run/mayfly/plugin-sockets/<name>/<name>.sock`, on one emptyDir named
+`plugin-sockets-<name>` per sidecar, mounted into the agent container and that
+sidecar only. HTTP over a socket gives request framing, status codes, and an
+existing client; a socket file needs no port and no NetworkPolicy change.
 
-The socket alone is not access control: the agent container mounts the
-volume, so `run_command` can reach it too. Every sidecar call therefore
-carries a call token signed by the gateway, and the shim rejects calls
-without a valid one. `initialize` and `tools/list` use a discovery token
-(gateway-signed, `tool: "*"`, no key) so the runtime can verify tools at
-start.
+A per-plugin volume is part of the isolation: with one shared, writable volume
+any sidecar could unlink another plugin's socket and listen in its place, then
+receive that plugin's call tokens and arguments. The socket is still not access
+control by itself, because `run_command` runs in the agent container, which
+mounts every socket directory. Every sidecar call therefore carries a call
+token signed with that plugin's key, and the shim rejects calls without a valid
+one. `initialize` and `tools/list` use a discovery token (gateway-signed,
+`tool: "*"`, no key) so the runtime can verify tools at start.
 
 The plugin process stays stdio. `mayfly-plugin-shim serve` is the sidecar's
 command: it supervises the stdio child, serves streamable HTTP MCP on the
@@ -187,18 +189,22 @@ Format: `v1.<base64url(claims JSON)>.<base64url(HMAC-SHA256(key, "v1." + claims)
 Claims: `{"sid": session, "plugin": name, "tool": remote tool name or "*",
 "key": idempotency key or "", "args_sha256": hex or "", "exp": unix seconds}`.
 
-- Sidecar: the key is a per-session random 32-byte value, stored as a new key
-  `gateway-key` in the existing session Secret (`SessionSpec.Secret`, today
-  only `token`). Mounted as a file only into sidecar containers, never into
-  the agent container. `mayflyd` keeps it in memory and reads it back from
-  the Secret on adoption (generalize `Client.SessionToken` into
-  `SessionKeys`).
+- Sidecar: one key per plugin and session, derived as
+  `HMAC(sessionKey, "mayfly/sidecar/" + plugin)` from the per-session random
+  32-byte value. It is stored in the existing session Secret
+  (`SessionSpec.Secret`, today only `token`) as item `gateway-key-<plugin>`,
+  and only that item is mounted, as a file, into that plugin's sidecar
+  container. Neither the agent container nor another sidecar mounts it, so a
+  token minted for plugin B fails the signature check at plugin A. `mayflyd`
+  derives the keys from the session key it keeps in memory and from the Secret
+  on adoption (generalize `Client.SessionToken` into `SessionKeys`).
 - Service: the key is per plugin, in Secret `mayfly-gateway-<name>` in
   `plugins.namespace`, created by the reconciler. The name deliberately does
   not use the `mayfly-plugin-` prefix, so a bundle cannot reference it as a
   plugin secret.
 - `exp` is the call timeout plus 30 seconds. The shim rejects an expired
-  token, a token whose `tool` or `args_sha256` does not match the request,
+  token, a token whose `plugin` is not the plugin it serves, a token whose
+  `tool` or `args_sha256` does not match the request,
   and a second use of the same `key` while the first is in flight. It keeps
   the last 1024 completed keys with their result until `exp`, and returns
   the cached result for a replay, so a retry after a dropped response does
@@ -213,8 +219,8 @@ The plugin never sees the token; it sees only `_meta`.
 
 | Object | Name | Content |
 |---|---|---|
-| Secret | `mayfly-gateway-<name>` | `key`: 32 random bytes. Created once, not rotated by reconcile (open question 8) |
-| Deployment | `mayfly-plugin-<name>` | Init container `mayfly-tools` (copies the shim); container `plugin` from `image`, command `/mayfly-tools/mayfly-plugin-shim serve --listen tcp::8080 --key-file /var/run/mayfly/gateway/key --max-concurrency <n> -- <command> <args>`; env from `env` plus `secretKeyRef` per secret; hardened security context; `resources`; `replicas`; startup and readiness probes via `shim probe` |
+| Secret | `mayfly-gateway-<name>` | `key`: 32 random bytes. Created once, not rotated by reconcile (open question 8). A Secret that is deleted and recreated changes the key hash the Deployment carries, so the pods roll |
+| Deployment | `mayfly-plugin-<name>` | Init container `mayfly-tools` (copies the shim); container `plugin` from `image`, command `/mayfly-tools/mayfly-plugin-shim serve --listen tcp::8080 --key-file /var/run/mayfly/gateway/key --max-concurrency <n> -- <command> <args>`; env from `env` plus `secretKeyRef` per secret; hardened security context with `fsGroup` set to the pod UID and Secret volume mode 0440, so the non-root container can read its key; `resources`; `replicas`; startup and readiness probes via `shim probe`; annotation `mayfly.io/gateway-key-hash` with the SHA-256 of the key |
 | Service | `mayfly-plugin-<name>` | ClusterIP, port 8080 |
 | NetworkPolicy | `mayfly-plugin-<name>` | Ingress only from pods matching `runtime.platform_labels` in `runtime.platform_namespace`, on 8080; egress to DNS (`runtime.dns_namespace`) and `service.egress` |
 
@@ -262,7 +268,13 @@ layer on top of it:
 
 - `(*Broker).HTTPClient() *http.Client` (new accessor) returns the broker's
   client with its dial, TLS, and response-header timeouts. The gateway's
-  upstream MCP clients use it through a new `mcp.NewHTTPWithClient`.
+  upstream MCP clients use it through a new `mcp.NewHTTPWithClient`. `mayflyd`
+  builds the broker once and passes the same client to the gateway and to the
+  HTTP API, instead of building a second client inside `httpapi.New`.
+- The upstream clients set no `http.Client.Timeout`. A client-level timeout
+  hard-kills any call that outlives it, and manifests allow up to 15 minutes.
+  Each call is bounded by its own context deadline instead; the transport's
+  `ResponseHeaderTimeout`, dial, and TLS timeouts stay.
 - HTTP `mcp.servers` credentials stay in `config.MCPServerConfig.ResolvedHeaders`,
   resolved once by `config.(*Config).resolveSecrets`. The gateway reads them
   and resolves nothing itself.
@@ -279,15 +291,25 @@ gateway key (a Mayfly-owned secret), and `service.mcpServer` reuses the
 
 - Tool names stay `mcp_<server>_<tool>`.
 - HTTP servers: remote dispatch. Discovery moves to the gateway, which calls
-  `tools/list` once per session per server (open question 9).
+  `tools/list` once per session per server (open question 9). The runtime does
+  not start an HTTP server or connect to the proxy; the gateway adds the
+  discovered tools to the grant, with their descriptions and schemas. When
+  discovery fails the tools are absent for that session, and the runtime
+  refuses an `mcp_*` name it neither holds as a local stdio tool nor received
+  from the grant, so a call cannot fall back to the proxy and skip the ledger.
 - Stdio servers: local dispatch; begin and complete wrap `mcp.Manager.Call`.
 - New optional keys on `mcp.servers[]`: `tools` (allowlist; empty means all,
   today's behavior) and `idempotent_tools` (default empty: every tool is
   non-idempotent). Behavior change for resumed sessions only: today an
   in-flight `mcp_*` call is re-run on resume; after this change it is not,
   unless listed in `idempotent_tools` (open question 4).
-- The `mergeEnv` leak (stdio servers inherit `os.Environ()`, including
-  `MAYFLY_SESSION_TOKEN`) is not fixed here (open question 12).
+- A stdio server no longer inherits `os.Environ()` (open question 12). It gets
+  `sessioncfg.StdioEnv`: `PATH`, `HOME`, `TMPDIR`, `LANG`, `TZ`,
+  `SSL_CERT_FILE`, `SSL_CERT_DIR`, the proxy variables in both cases, and the
+  entry's `env`. `MAYFLY_SESSION_TOKEN`, `MAYFLY_CONFIG`, provider keys, and
+  webhook secrets stay in the runtime. The same allowlist builder feeds the
+  inline plugin environment (`sessioncfg.PassthroughEnv`), so the two cannot
+  drift apart.
 
 ### Packaging (inline): init container copy
 
@@ -313,7 +335,7 @@ Image volumes (`volumes[].image`, beta and on by default in 1.35, stable in
 | Subcommand | Used by | Behavior |
 |---|---|---|
 | `install-self <dst>` | `mayfly-tools` init container | Copies its own executable to `dst`, mode 0755 |
-| `copy <src> <dst>` | `plugin-<name>` init containers (inline) | The v1 copier: copies the tree, keeps modes minus group/other write, refuses escaping symlinks and device files, fails with `plugin image has no /mayfly-plugin directory`, 1 GiB backstop |
+| `copy <src> <dst>` | `plugin-<name>` init containers (inline) | The v1 copier: copies the tree, keeps modes minus group/other write, refuses escaping symlinks (checked lexically before the copy, and resolved with `filepath.EvalSymlinks` inside the destination afterwards, because a chain through another link can escape) and device files, fails with `plugin image has no /mayfly-plugin directory`, 1 GiB backstop |
 | `serve --listen unix:PATH\|tcp:ADDR --key-file F [--session S] [--max-concurrency N] [--init-timeout D] -- CMD ARGS...` | Sidecar and service containers, local service children | Supervises the stdio child, serves streamable HTTP MCP on `POST /mcp`, verifies call tokens, multiplexes, restarts the child with back-off |
 | `probe --listen ...` | Startup and readiness probes | Exits 0 when `serve` has initialized the child and listed its tools |
 
@@ -392,7 +414,8 @@ New:
 | `internal/gateway/remote.go` | Upstream MCP clients per (session, server), discovery | WP9 |
 | `internal/gateway/remote_test.go` | Against an in-process streamable HTTP MCP server | WP9 |
 | `internal/pluginhost/host.go` | Inline supervisor: start, verify, call, restart, close | WP6 |
-| `internal/pluginhost/env.go` | Process environment builder | WP6 |
+| `internal/pluginhost/env.go` | Process environment builder, on the shared `sessioncfg` allowlist | WP6 |
+| `internal/sessioncfg/env.go` | Child environment allowlist: `StdioEnv`, `PassthroughEnv`, `DefaultPath` | WP6 |
 | `internal/pluginhost/stderr.go` | Capped stderr sink | WP6 |
 | `internal/pluginhost/host_test.go` | Tests against a fixture plugin | WP6 |
 | `internal/pluginhost/testdata/fixture/main.go` | Go fixture MCP server (build tag `ignore`) | WP6 |
@@ -429,7 +452,7 @@ Modified:
 | `internal/session/restart.go` | Local replacement re-resolves plugin secrets | WP7 |
 | `internal/runner/runner.go`, `internal/runner/local.go` | `Spec.PluginSecrets`; write secret files | WP7 |
 | `internal/model/model.go` | `Session.Plugins` | WP7 |
-| `internal/k8s/spec.go` | Inline init containers and mounts (WP5); sidecars, socket volume, `gateway-key` (WP13) | WP5, WP13 |
+| `internal/k8s/spec.go` | Inline init containers and mounts (WP5); sidecars, per-plugin socket volumes, `gateway-key-<name>` (WP13) | WP5, WP13 |
 | `internal/k8s/client.go` | Plugin object helpers (WP12); `SessionKeys` (WP13) | WP12, WP13 |
 | `internal/mcp/stdio.go`, `internal/mcp/mcp.go`, `internal/mcp/http.go` | `NewStdioExact`, `CallToolMeta`, `Cancel`, `Exited`, `NewHTTPWithClient` (WP6); UDS dialer (WP13) | WP6, WP13 |
 | `internal/mcp/manager.go` | Optional tool allowlist; naming unchanged | WP9 |
@@ -633,6 +656,11 @@ type PluginTool struct {
 // MCPServer gains:
 //	Tools           []string `json:"tools,omitempty"`
 //	IdempotentTools []string `json:"idempotent_tools,omitempty"`
+
+// Child environment policy (env.go):
+const DefaultPath = "/usr/local/bin:/usr/bin:/bin"
+func StdioEnv(extra map[string]string) []string // complete env of a stdio MCP server
+func PassthroughEnv() map[string]string         // locale, TZ, TLS trust, proxies, both cases
 ```
 
 Service plugins appear in `Config.Plugins` with only `Name`, `Placement`,
@@ -793,6 +821,11 @@ type SessionSpec struct {
 	ToolsImage        string // runtime.image
 	PluginVolumeLimit string
 	GatewayKey        []byte // session Secret key gateway-key; nil without sidecars
+	// SidecarKeys holds one derived key per sidecar plugin, from
+	// HMAC(GatewayKey, "mayfly/sidecar/" + name). The pod builder writes each
+	// as session Secret item gateway-key-<name> and mounts only that item into
+	// that sidecar.
+	SidecarKeys map[string][]byte
 }
 ```
 
@@ -804,22 +837,29 @@ each with the agent container's security context (non-root 65532, read-only
 root, no escalation, drop ALL, RuntimeDefault seccomp), the session pull
 policy, requests `{cpu: 10m, memory: 32Mi}`, limits `{memory: 128Mi}`, no
 env, no secrets. The agent container mounts `plugins` read-only at
-`PluginsDir` and each secret volume at `PluginSecretsDir/<name>`.
+`PluginsDir` and each secret volume at `PluginSecretsDir/<name>`. Inline
+plugins run as the agent's UID, so the runtime clears its dumpable flag at
+startup: a plugin then cannot read the session token from
+`/proc/<pid>/environ`, although it can still read a sibling plugin's secret
+files.
 
-Sidecar pod additions (WP13): volume `plugin-sockets` (emptyDir, `medium:
-Memory`, 1Mi); the session Secret gains `gateway-key`; one native sidecar
+Sidecar pod additions (WP13): one volume `plugin-sockets-<name>` per sidecar
+plugin (emptyDir, `medium: Memory`, 1Mi); the session Secret gains
+`gateway-key-<name>` for each sidecar plugin; one native sidecar
 `plugin-<name>` per sidecar plugin, after `mayfly-tools`, with
 `restartPolicy: Always`, image `Image`, command
-`/mayfly-tools/mayfly-plugin-shim serve --listen unix:/run/mayfly/plugin-sockets/<name>.sock --key-file /var/run/mayfly/gateway/gateway-key --session <id> -- <command> <args>`;
+`/mayfly-tools/mayfly-plugin-shim serve --listen unix:/run/mayfly/plugin-sockets/<name>/<name>.sock --key-file /var/run/mayfly/gateway/gateway-key --session <id> -- <command> <args>`;
 env `Env`, `secretKeyRef` per secret, `MAYFLY_PLUGIN_NAME`,
 `MAYFLY_PLUGIN_DIR=/mayfly-plugin`, `MAYFLY_SESSION_ID`, and
 `MAYFLY_WORKSPACE_DIR` when mounted; mounts `mayfly-tools` read-only,
-`plugin-sockets` read-write, the session Secret with only
-`items: [gateway-key]` at `GatewayKeyDir`, the workspace per
+its own `plugin-sockets-<name>` read-write at
+`/run/mayfly/plugin-sockets/<name>/`, the session Secret with only
+`items: [gateway-key-<name>]` at `GatewayKeyDir`, the workspace per
 `Sidecar.Workspace`, and a private emptyDir at `/tmp`; the agent security
 context with `runAsUser` from the manifest; manifest resources; a
-`startupProbe` running `shim probe`. The agent container mounts
-`plugin-sockets` read-write and never mounts `gateway-key`. Today the token
+`startupProbe` running `shim probe`. The agent container mounts every
+`plugin-sockets-<name>` read-write at its directory and never mounts any
+`gateway-key-*` item. Today the token
 reaches the agent through `secretKeyRef` on key `token` in `Pod()`; keep it
 that way and add no volume of the whole session Secret.
 
@@ -1021,9 +1061,10 @@ func (h *Host) Close()
 ```
 
 - Environment: `PATH` = `<Dir>/bin:` + container `PATH`; private `HOME` and
-  `TMPDIR` under `/tmp/plugins/<name>/`; copy `LANG`, `TZ`, `SSL_CERT_FILE`,
-  `SSL_CERT_DIR`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and lowercase forms
-  when set; `MAYFLY_PLUGIN_NAME`, `MAYFLY_PLUGIN_DIR`, `MAYFLY_SESSION_ID`,
+  `TMPDIR` under `/tmp/plugins/<name>/`; the `LANG`, `TZ`,
+  `SSL_CERT_FILE`, `SSL_CERT_DIR`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`
+  variables and their lowercase forms from `sessioncfg.PassthroughEnv`;
+  `MAYFLY_PLUGIN_NAME`, `MAYFLY_PLUGIN_DIR`, `MAYFLY_SESSION_ID`,
   `MAYFLY_WORKSPACE_DIR`; then `Env`; then secrets read from
   `SecretsDir/<env>` (one trailing newline trimmed). Nothing else is
   inherited; test that `MAYFLY_SESSION_TOKEN` and `MAYFLY_CONFIG` are absent
@@ -1045,7 +1086,11 @@ func (h *Host) Close()
   `StderrBytes`, then one `[stderr truncated]` marker; debug log lines cut at
   2 KiB; last 8 KiB kept (`tailBuffer`).
 - `Close`: per plugin in parallel, close stdin, wait 2s, SIGTERM the group,
-  wait 2s, SIGKILL.
+  wait 2s, SIGKILL. It holds no call lock. The client pointer sits behind its
+  own lock, so `Close` kills a process whose call is in flight and that call
+  returns the exit result; a shutdown must not wait for a tool timeout of up
+  to 15 minutes, or the bundle and the finalize step are lost. The stdio
+  transport's `Close` takes no call lock either, for the same reason.
 
 Sidecar members (WP13): an `mcp.Client` over HTTP with a Unix-socket
 dialer, sending `Authorization: Bearer <token>` (discovery token for
@@ -1626,7 +1671,7 @@ Every package ends with `gofmt`, `go vet ./...`,
 
 - **Depends on:** WP8, WP11, WP12.
 - **Files:** modify `internal/k8s/spec.go`, `internal/k8s/spec_test.go`
-  (sidecar containers, socket volume, `gateway-key`),
+  (sidecar containers, per-plugin socket volumes, `gateway-key-<name>`),
   `internal/k8s/client.go` (`SessionKeys`), `internal/session/manager.go`
   (key generation; adoption reads it), `internal/session/adopt_test.go`,
   `internal/gateway/gateway.go` (sidecar tokens in dispatch and discovery),
@@ -1642,9 +1687,11 @@ Every package ends with `gofmt`, `go vet ./...`,
 - **Acceptance:**
   - Pod: one native sidecar per plugin after `mayfly-tools`, with
     `restartPolicy: Always`, a startup probe, manifest resources and UID,
-    `secretKeyRef` env, and `gateway-key` mounted only in sidecars. The
-    agent container has no env or mount for sidecar secrets and no
-    `gateway-key`.
+    `secretKeyRef` env, its own socket volume, and only its own
+    `gateway-key-<name>` item mounted. The agent container has no env or
+    mount for sidecar secrets and no `gateway-key-*` item.
+  - No two sidecars share a key file or a socket volume, and a token signed
+    for one plugin fails the signature check at another.
   - `session.json` for a sidecar plugin holds no secret values.
   - A replacement pod and an adopted session use the same gateway key.
   - The runtime calls the sidecar through the socket with a call token.
@@ -1753,12 +1800,12 @@ placements.
 11. **Service autoscaling.** Recommendation: v2 owns `replicas`. Later,
     `service.autoscale: {min, max, cpu}` renders an HPA and reconcile stops
     writing `replicas`.
-12. **The `mergeEnv` leak.** Stdio `mcp.servers` inherit `os.Environ()`,
-    including `MAYFLY_SESSION_TOKEN` (`internal/mcp/stdio.go`). v2 does not
-    change this. Recommendation: a separate small change right after WP6
-    that moves them to `NewStdioExact` with the pluginhost base environment,
-    documented as a behavior change. The session token now also authorizes
-    tool calls, which makes the fix more urgent.
+12. **The `mergeEnv` leak.** Resolved. Stdio `mcp.servers` used to inherit
+    `os.Environ()`, including `MAYFLY_SESSION_TOKEN`, which with the gateway
+    also authorizes tool calls. They now use `sessioncfg.StdioEnv`, the same
+    allowlist as an inline plugin, and `NewStdioExact` with that environment.
+    This is a behavior change for a server that depended on inheriting an
+    unrelated variable; set it in the entry's `env` instead.
 13. **Arguments in the ledger.** v2 stores only their hash. Recommendation:
     keep it that way. The journal already holds arguments for replay; the
     ledger should not become a second copy of sensitive inputs.
