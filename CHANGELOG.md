@@ -128,6 +128,7 @@ First public release.
 - Exactly-once external side effects are not provided. A tool that was executing when the container died can run again; `run_command` in particular may repeat.
 - Streaming assistant deltas are not journaled, so a retried step can show duplicate deltas.
 - The journal keeps every turn of an active session until it finalizes, up to `journal.max_session_bytes`. A session that reaches the quota can no longer journal steps, so a crash after that point cannot resume the turn.
+- An MCP tool with external effects, such as a Slack post, can run twice if the container dies after the call and before the step is journaled.
 
 ### Security
 
