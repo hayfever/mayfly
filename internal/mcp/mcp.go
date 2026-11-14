@@ -71,7 +71,9 @@ type Tool struct {
 }
 
 // NewStdio starts and returns an uninitialized stdio client. The server
-// inherits the agent's environment, with env applied on top.
+// inherits the runtime's PATH, HOME, TMPDIR, locale, TLS trust store, and proxy
+// settings, with env applied on top. Nothing else is inherited: see
+// sessioncfg.StdioEnv.
 func NewStdio(ctx context.Context, name, command string, args []string, env map[string]string) (*Client, error) {
 	t, err := newStdioTransport(ctx, command, args, env)
 	if err != nil {
