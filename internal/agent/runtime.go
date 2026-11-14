@@ -131,7 +131,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 		r.stopChildren()
 		return r.finalize(context.Background(), "failed", err)
 	}
-	grant, err := r.discoverTools(ctx)
+	grant, sidecarTokens, err := r.discoverTools(ctx)
 	if err != nil {
 		if !permanentGatewayError(err) {
 			// The control plane is unreachable, not wrong. Exit without
@@ -142,6 +142,13 @@ func (r *Runtime) Run(ctx context.Context) error {
 		r.stopChildren()
 		return r.finalize(context.Background(), "failed", err)
 	}
+	// A sidecar needs the discovery token the gateway issued above, so it
+	// starts after the grant is known and before the model sees its tools.
+	if err := r.startSidecars(ctx, sidecarTokens); err != nil {
+		r.stopChildren()
+		return r.finalize(context.Background(), "failed", err)
+	}
+	r.reportHidden(ctx)
 	var artifacts ArtifactReader
 	if len(r.cfg.Artifacts) > 0 {
 		artifacts = r.platform
@@ -379,8 +386,7 @@ shutdown:
 
 // startPlugins launches the session's inline plugins. A required plugin that
 // did not start fails the session; an optional one is reported as a system
-// event and its tools are not offered. Tools a plugin reports but its manifest
-// does not declare are hidden and named once.
+// event and its tools are not offered.
 func (r *Runtime) startPlugins(ctx context.Context) error {
 	host, errs := pluginhost.Start(ctx, r.cfg.Plugins, pluginhost.Options{
 		SessionID:    r.cfg.SessionID,
@@ -393,10 +399,27 @@ func (r *Runtime) startPlugins(ctx context.Context) error {
 	for _, err := range errs {
 		r.events.Emit(ctx, model.EventSystem, "mayfly", "Plugin unavailable: "+err.Error(), nil)
 	}
-	if err := host.RequiredErr(); err != nil {
-		return err
+	return host.RequiredErr()
+}
+
+// startSidecars connects the session's sidecar plugins with the discovery
+// tokens the gateway issued. A required sidecar that did not connect fails the
+// session; an optional one is reported as a system event.
+func (r *Runtime) startSidecars(ctx context.Context, tokens map[string]gateway.SidecarToken) error {
+	discovery := make(map[string]string, len(tokens))
+	for name, token := range tokens {
+		discovery[name] = token.DiscoveryToken
 	}
-	hidden := host.Hidden()
+	for _, err := range r.plugins.StartSidecars(ctx, discovery) {
+		r.events.Emit(ctx, model.EventSystem, "mayfly", "Plugin unavailable: "+err.Error(), nil)
+	}
+	return r.plugins.RequiredErr()
+}
+
+// reportHidden names the tools a plugin exposes but its manifest does not
+// declare, once per plugin.
+func (r *Runtime) reportHidden(ctx context.Context) {
+	hidden := r.plugins.Hidden()
 	names := make([]string, 0, len(hidden))
 	for name := range hidden {
 		names = append(names, name)
@@ -407,20 +430,19 @@ func (r *Runtime) startPlugins(ctx context.Context) error {
 			"Plugin %s exposes tools that the manifest does not declare; they are hidden: %s",
 			name, strings.Join(hidden[name], ", ")), nil)
 	}
-	return nil
 }
 
-// discoverTools reads the session's tool grant from the gateway and returns it
-// keyed by model-visible name. The runtime routes exactly the granted tools
-// through the gateway; anything else, including the MCP servers it still
-// reaches directly, keeps its local path.
-func (r *Runtime) discoverTools(ctx context.Context) (map[string]gateway.DiscoveryTool, error) {
+// discoverTools reads the session's tool grant from the gateway. The runtime
+// routes exactly the granted tools through the gateway; anything else,
+// including the MCP servers it still reaches directly, keeps its local path.
+// The sidecar discovery tokens are returned with the grant.
+func (r *Runtime) discoverTools(ctx context.Context) (map[string]gateway.DiscoveryTool, map[string]gateway.SidecarToken, error) {
 	discovery, err := retryGateway(ctx, r.logger, "list tools",
 		func(ctx context.Context) (gateway.Discovery, error) {
 			return r.gateway.Tools(ctx)
 		})
 	if err != nil {
-		return nil, fmt.Errorf("read tool grant: %w", err)
+		return nil, nil, fmt.Errorf("read tool grant: %w", err)
 	}
 	var required []error
 	for _, failure := range discovery.Errors {
@@ -432,13 +454,13 @@ func (r *Runtime) discoverTools(ctx context.Context) (map[string]gateway.Discove
 		r.events.Emit(ctx, model.EventSystem, "mayfly", "Plugin unavailable: "+err.Error(), nil)
 	}
 	if len(required) > 0 {
-		return nil, errors.Join(required...)
+		return nil, nil, errors.Join(required...)
 	}
 	grant := make(map[string]gateway.DiscoveryTool, len(discovery.Tools))
 	for _, tool := range discovery.Tools {
 		grant[tool.Name] = tool
 	}
-	return grant, nil
+	return grant, discovery.Sidecars, nil
 }
 
 // turnCounter counts turns that are queued or running. The idle timer must not

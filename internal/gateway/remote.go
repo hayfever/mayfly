@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -29,8 +28,6 @@ const (
 	// authErrorMessage replaces an upstream's own text on 401 and 403, so a
 	// credential failure reads the same over every transport.
 	authErrorMessage = "upstream rejected credentials"
-	// localMCPPath is the path a local service shim serves.
-	localMCPPath = "/mcp"
 )
 
 // remoteKey identifies one upstream MCP server in one session. The gateway
@@ -207,17 +204,7 @@ func (g *Gateway) serviceClient(owner, url string, perRequest func(*http.Request
 	if socket == "" {
 		return nil, errors.New("service socket path is empty")
 	}
-	client := &http.Client{Timeout: 5 * time.Minute}
-	if g.opts.HTTPClient != nil {
-		*client = *g.opts.HTTPClient
-	}
-	dialer := &net.Dialer{}
-	client.Transport = &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return dialer.DialContext(ctx, "unix", socket)
-		},
-	}
-	return mcp.NewHTTPWithClient(owner, "http://plugin"+localMCPPath, nil, client, perRequest), nil
+	return mcp.NewUnixHTTP(owner, socket, perRequest), nil
 }
 
 // remoteTools lists one upstream's tools once per session. The result, error

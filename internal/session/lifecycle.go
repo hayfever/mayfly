@@ -597,15 +597,17 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 			continue
 		}
 		tokenName := base
-		token, err := m.kube.SessionToken(ctx, tokenName)
+		keys, err := m.kube.SessionKeys(ctx, tokenName)
 		if err != nil {
 			tokenName = pod.Name
-			token, err = m.kube.SessionToken(ctx, tokenName)
+			keys, err = m.kube.SessionKeys(ctx, tokenName)
 		}
 		if err != nil {
-			m.logger.Warn("adopt: read token", "pod", pod.Name, "error", err)
+			m.logger.Warn("adopt: read session credentials", "pod", pod.Name, "error", err)
 			continue
 		}
+		token := keys.Token
+		m.warnMissingGatewayKey(cfg, keys.GatewayKey, id)
 		image, command, args, env := podLaunch(pod)
 		persistent, pvcName := podWorkspace(pod)
 		inst := &instance{
@@ -627,8 +629,11 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 				ExpiresAt:    cfg.CreatedAt.Add(time.Duration(cfg.TTLSeconds) * time.Second),
 				LastActivity: now,
 			},
-			token:      token,
-			tokenHash:  hashToken(token),
+			token:     token,
+			tokenHash: hashToken(token),
+			// The key is read back from the Secret, so a replacement pod and
+			// this control plane sign the same call tokens.
+			sidecarKey: keys.GatewayKey,
 			runtimeCfg: cfg,
 			// The session may still read the inputs it was started with.
 			artifacts:      artifactMap(cfg.Artifacts),
@@ -722,11 +727,12 @@ func (m *Manager) adoptPodless(ctx context.Context, id string, objs k8s.OrphanOb
 		m.logger.Warn("adopt: parse config of session without a pod", "session", id, "error", err)
 		return nil, false
 	}
-	token, err := m.kube.SessionToken(ctx, objs.Secret)
+	keys, err := m.kube.SessionKeys(ctx, objs.Secret)
 	if err != nil {
-		m.logger.Warn("adopt: read token of session without a pod", "session", id, "error", err)
+		m.logger.Warn("adopt: read session credentials without a pod", "session", id, "error", err)
 		return nil, true
 	}
+	m.warnMissingGatewayKey(cfg, keys.GatewayKey, id)
 	agent, err := m.resolveAgent(cfg.Agent)
 	if err != nil {
 		// Without the manifest there is no image or command to start.
@@ -755,8 +761,11 @@ func (m *Manager) adoptPodless(ctx context.Context, id string, objs k8s.OrphanOb
 			ExpiresAt:    cfg.CreatedAt.Add(time.Duration(cfg.TTLSeconds) * time.Second),
 			LastActivity: now,
 		},
-		token:      token,
-		tokenHash:  hashToken(token),
+		token:     keys.Token,
+		tokenHash: hashToken(keys.Token),
+		// The key is read back from the Secret, so the replacement pod and
+		// this control plane sign the same call tokens.
+		sidecarKey: keys.GatewayKey,
 		runtimeCfg: cfg,
 		// The session may still read the inputs it was started with.
 		artifacts:      artifactMap(cfg.Artifacts),

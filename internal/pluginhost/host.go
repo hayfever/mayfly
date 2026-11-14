@@ -55,19 +55,30 @@ type Tool struct {
 	MaxOutput   int
 }
 
-// Host owns the inline plugin processes of one session.
+// Host owns the connected plugins of one session: the inline processes it
+// started, and the sidecar containers it reaches over the socket volume.
 type Host struct {
 	opts   Options
 	logger *slog.Logger
 
 	mu       sync.Mutex
-	plugins  []*inline
+	members  []member
 	byName   map[string]Tool
-	byPlugin map[string]*inline
+	byPlugin map[string]member
 	tools    []Tool
 	hidden   map[string][]string
 	required []error
+	// sidecars are the sidecar plugins Start skipped. StartSidecars connects
+	// them once the gateway has issued their discovery tokens.
+	sidecars []sessioncfg.Plugin
 	closed   bool
+}
+
+// member is one connected plugin: a process this host spawned, or a sidecar
+// container behind the shim. Call and Close reach both the same way.
+type member interface {
+	call(ctx context.Context, tool Tool, args json.RawMessage, key, token string) (string, bool, error)
+	close()
 }
 
 // inline is one plugin process and its restart budget.
@@ -81,9 +92,11 @@ type inline struct {
 	restarts int
 }
 
-// Start launches every plugin that has a local directory. A plugin without
-// one runs in another container (sidecar, service) and is skipped. Failures
-// are returned per plugin; Start keeps the plugins that did start.
+// Start launches every inline plugin and records the sidecar plugins for
+// StartSidecars. A plugin with no local directory runs in another container:
+// a sidecar is reached over the socket volume once the gateway issues its
+// discovery token, and a service plugin runs at the gateway. Failures are
+// returned per plugin; Start keeps the plugins that did start.
 func Start(ctx context.Context, plugins []sessioncfg.Plugin, opts Options) (*Host, []error) {
 	logger := opts.Logger
 	if logger == nil {
@@ -93,28 +106,77 @@ func Start(ctx context.Context, plugins []sessioncfg.Plugin, opts Options) (*Hos
 		opts:     opts,
 		logger:   logger,
 		byName:   make(map[string]Tool),
-		byPlugin: make(map[string]*inline),
+		byPlugin: make(map[string]member),
 		hidden:   make(map[string][]string),
 	}
 	var errs []error
 	for _, def := range plugins {
-		if def.Dir == "" {
-			logger.Debug("plugin has no local directory", "plugin", def.Name, "placement", def.Placement)
-			continue
-		}
-		if err := h.add(ctx, def); err != nil {
-			err = fmt.Errorf("plugin %q: %w", def.Name, err)
-			errs = append(errs, err)
-			if def.Required {
-				h.required = append(h.required, err)
+		switch {
+		case def.Dir != "":
+			if err := h.add(ctx, def); err != nil {
+				err = fmt.Errorf("plugin %q: %w", def.Name, err)
+				errs = append(errs, err)
+				if def.Required {
+					h.required = append(h.required, err)
+				}
 			}
+		case def.Placement == string(plugin.Sidecar):
+			h.sidecars = append(h.sidecars, def)
+		default:
+			logger.Debug("plugin does not run in this host", "plugin", def.Name, "placement", def.Placement)
 		}
 	}
 	sort.Slice(h.tools, func(i, j int) bool { return h.tools[i].Name < h.tools[j].Name })
 	return h, errs
 }
 
-// add starts one plugin and publishes its tools.
+// StartSidecars connects the session's sidecar plugins with the discovery
+// tokens the gateway issued. Call it once, before the runtime offers tools. A
+// sidecar that cannot be reached is reported per plugin; the host keeps the
+// ones that connected. Nothing here restarts a sidecar: Kubernetes owns that
+// container's lifecycle.
+func (h *Host) StartSidecars(ctx context.Context, tokens map[string]string) []error {
+	h.mu.Lock()
+	closed := h.closed
+	defs := append([]sessioncfg.Plugin(nil), h.sidecars...)
+	h.mu.Unlock()
+	if closed {
+		return []error{errors.New("plugin host is closed")}
+	}
+	var errs []error
+	for _, def := range defs {
+		if err := h.addSidecar(ctx, def, tokens[def.Name]); err != nil {
+			err = fmt.Errorf("plugin %q: %w", def.Name, err)
+			errs = append(errs, err)
+			if def.Required {
+				h.mu.Lock()
+				h.required = append(h.required, err)
+				h.mu.Unlock()
+			}
+		}
+	}
+	h.mu.Lock()
+	sort.Slice(h.tools, func(i, j int) bool { return h.tools[i].Name < h.tools[j].Name })
+	h.mu.Unlock()
+	return errs
+}
+
+// addSidecar connects one sidecar plugin and publishes its tools.
+func (h *Host) addSidecar(ctx context.Context, def sessioncfg.Plugin, token string) error {
+	rt := &sidecar{def: def, opts: h.opts}
+	reported, hidden, err := rt.start(ctx, token)
+	if err != nil {
+		rt.close()
+		return err
+	}
+	if err := h.publish(def, rt, reported, hidden); err != nil {
+		rt.close()
+		return err
+	}
+	return nil
+}
+
+// add starts one inline plugin and publishes its tools.
 func (h *Host) add(ctx context.Context, def sessioncfg.Plugin) error {
 	sink, err := newStderrSink(def.Name, h.opts.ArtifactsDir, def.StderrBytes, h.logger)
 	if err != nil {
@@ -126,15 +188,25 @@ func (h *Host) add(ctx context.Context, def sessioncfg.Plugin) error {
 		rt.close()
 		return err
 	}
+	if err := h.publish(def, rt, reported, hidden); err != nil {
+		rt.close()
+		return err
+	}
+	return nil
+}
+
+// publish adds one connected plugin's declared tools to the host's tables. A
+// tool name another plugin already publishes is a load error: the names are
+// declared, so a collision is a manifest mistake, not something to suffix.
+func (h *Host) publish(def sessioncfg.Plugin, m member, reported []mcp.Tool, hidden []string) error {
 	tools := buildTools(def, reported)
 	for _, tool := range tools {
 		if other, ok := h.byName[tool.Name]; ok {
-			rt.close()
 			return fmt.Errorf("tool %q collides with plugin %q", tool.Name, other.Plugin)
 		}
 	}
-	h.plugins = append(h.plugins, rt)
-	h.byPlugin[def.Name] = rt
+	h.members = append(h.members, m)
+	h.byPlugin[def.Name] = m
 	h.hidden[def.Name] = hidden
 	for _, tool := range tools {
 		h.byName[tool.Name] = tool
@@ -185,9 +257,8 @@ func (h *Host) Hidden() map[string][]string {
 //
 // An error result (isErr true) means the tool ran or may have run and failed.
 // A non-nil error means the host could not dispatch the call at all: the tool
-// is unknown, or the plugin is down and its restart budget is spent.
+// is unknown, or the plugin is not running.
 func (h *Host) Call(ctx context.Context, name string, args json.RawMessage, key, token string) (string, bool, error) {
-	_ = token
 	h.mu.Lock()
 	closed := h.closed
 	tool, ok := h.byName[name]
@@ -202,10 +273,11 @@ func (h *Host) Call(ctx context.Context, name string, args json.RawMessage, key,
 	if rt == nil {
 		return "", false, fmt.Errorf("plugin %q is not running", tool.Plugin)
 	}
-	return rt.call(ctx, tool, args, key)
+	return rt.call(ctx, tool, args, key, token)
 }
 
-// Close stops every plugin in parallel and waits for them.
+// Close stops every plugin in parallel and waits for them. A sidecar's process
+// belongs to its container, so closing it only drops the client.
 func (h *Host) Close() {
 	h.mu.Lock()
 	if h.closed {
@@ -213,12 +285,12 @@ func (h *Host) Close() {
 		return
 	}
 	h.closed = true
-	plugins := append([]*inline(nil), h.plugins...)
+	members := append([]member(nil), h.members...)
 	h.mu.Unlock()
 	var wg sync.WaitGroup
-	for _, rt := range plugins {
+	for _, rt := range members {
 		wg.Add(1)
-		go func(rt *inline) {
+		go func(rt member) {
 			defer wg.Done()
 			rt.close()
 		}(rt)
@@ -279,8 +351,10 @@ func (rt *inline) close() {
 	rt.sink.Close()
 }
 
-// call runs one tool under its timeout. The caller holds no lock.
-func (rt *inline) call(ctx context.Context, tool Tool, args json.RawMessage, key string) (string, bool, error) {
+// call runs one tool under its timeout. The caller holds no lock. An inline
+// plugin is addressed through its stdin, so the gateway's call token is unused.
+func (rt *inline) call(ctx context.Context, tool Tool, args json.RawMessage, key, token string) (string, bool, error) {
+	_ = token
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if err := rt.ensure(ctx); err != nil {

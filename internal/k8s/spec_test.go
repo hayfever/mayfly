@@ -1,6 +1,7 @@
 package k8s
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"reflect"
@@ -150,8 +151,16 @@ func TestNetworkPolicyRestrictsEgress(t *testing.T) {
 
 func TestSecretAndConfigMap(t *testing.T) {
 	spec := testSpec()
-	if spec.Secret().StringData["token"] != "secret-token" {
+	secret := spec.Secret()
+	if string(secret.Data["token"]) != "secret-token" {
 		t.Fatal("session token missing from secret")
+	}
+	if _, ok := secret.Data[GatewayKeySecretKey]; ok {
+		t.Fatal("a session without sidecars must not carry a gateway key")
+	}
+	spec.GatewayKey = []byte{0xff, 0x00, 0x01}
+	if got := spec.Secret().Data[GatewayKeySecretKey]; !bytes.Equal(got, []byte{0xff, 0x00, 0x01}) {
+		t.Fatalf("gateway key = %x", got)
 	}
 	if spec.ConfigMap().Data["session.json"] != `{"session_id":"abc123"}` {
 		t.Fatal("session config missing from configmap")
@@ -263,6 +272,27 @@ func TestSessionSpecValidatePlugins(t *testing.T) {
 		t.Fatalf("Validate: %v", err)
 	}
 
+	// A sidecar needs the shim and a key to sign its call tokens, but no
+	// plugin volume: nothing is copied into the pod.
+	sidecarOnly := testSpec()
+	sidecarOnly.Plugins = []sessioncfg.Plugin{sidecarPlugin("notify", "example.com/notify:1")}
+	if err := sidecarOnly.Validate(); err == nil {
+		t.Fatal("expected a missing tools image error")
+	}
+	sidecarOnly.ToolsImage = "mayfly-agent:tools"
+	if err := sidecarOnly.Validate(); err == nil {
+		t.Fatal("expected a missing gateway key error")
+	}
+	sidecarOnly.GatewayKey = make([]byte, 32)
+	if err := sidecarOnly.Validate(); err != nil {
+		t.Fatalf("Validate sidecar: %v", err)
+	}
+	for _, v := range sidecarOnly.Pod().Spec.Volumes {
+		if v.Name == "plugins" {
+			t.Fatal("a sidecar-only pod must not stage a plugin volume")
+		}
+	}
+
 	// A service plugin needs no pod objects, so it needs neither setting.
 	serviceOnly := testSpec()
 	serviceOnly.Plugins = []sessioncfg.Plugin{{Name: "crm", Placement: "service"}}
@@ -321,14 +351,48 @@ func inlinePlugin(name, image string) sessioncfg.Plugin {
 	}
 }
 
+// sidecarPlugin is one sidecar manifest as the runtime resolves it: a socket,
+// the shim's command, and the container's size and identity.
+func sidecarPlugin(name, image string) sessioncfg.Plugin {
+	return sessioncfg.Plugin{
+		Name:               name,
+		Placement:          "sidecar",
+		Image:              image,
+		Command:            "bin/" + name,
+		Args:               []string{"--log-level", "info"},
+		Socket:             PluginSocketsDir + "/" + name + ".sock",
+		Env:                map[string]string{"NOTIFY_CHANNEL": "#ops", "NOTIFY_LEVEL": "info"},
+		Secrets:            []sessioncfg.PluginSecret{{Env: "NOTIFY_WEBHOOK_URL", Secret: "mayfly-plugin-notify", Key: "webhook-url"}},
+		InitTimeoutSeconds: 30,
+		MaxOutputBytes:     4096,
+		Sidecar: &sessioncfg.PluginSidecar{
+			Requests:  map[string]string{"cpu": "10m", "memory": "32Mi"},
+			Limits:    map[string]string{"memory": "64Mi"},
+			RunAsUser: 65532,
+			Workspace: "read",
+		},
+		Tools: []sessioncfg.PluginTool{{Name: "post", TimeoutSeconds: 30}},
+	}
+}
+
+// sidecarSpec is a session with the shim available and a gateway key, which a
+// pod with sidecars needs.
+func sidecarSpec() *SessionSpec {
+	spec := testSpec()
+	spec.ToolsImage = "mayfly-agent:tools"
+	spec.GatewayKey = make([]byte, 32)
+	return spec
+}
+
 func TestPodPluginInitContainers(t *testing.T) {
 	spec := testSpec()
 	spec.ToolsImage = "mayfly-agent:tools"
 	spec.PluginVolumeLimit = "512Mi"
+	spec.GatewayKey = make([]byte, 32)
 	spec.Plugins = []sessioncfg.Plugin{
 		inlinePlugin("tickets", "example.com/tickets:1"),
 		inlinePlugin("word-count", "example.com/word-count:1"),
-		{Name: "notify", Placement: "sidecar"},
+		sidecarPlugin("notify", "example.com/notify:1"),
 	}
 	if err := spec.Validate(); err != nil {
 		t.Fatal(err)
@@ -336,10 +400,10 @@ func TestPodPluginInitContainers(t *testing.T) {
 	pod := spec.Pod()
 
 	init := pod.Spec.InitContainers
-	if len(init) != 3 {
-		t.Fatalf("init containers = %d, want tools and two inline plugins", len(init))
+	if len(init) != 4 {
+		t.Fatalf("init containers = %d, want tools, two inline copies, and one sidecar", len(init))
 	}
-	wantNames := []string{"mayfly-tools", "plugin-tickets", "plugin-word-count"}
+	wantNames := []string{"mayfly-tools", "plugin-tickets", "plugin-word-count", "plugin-notify"}
 	for i, name := range wantNames {
 		if init[i].Name != name {
 			t.Fatalf("init container %d = %q, want %q", i, init[i].Name, name)
@@ -498,5 +562,235 @@ func assertQuantity(t *testing.T, what string, list corev1.ResourceList, name co
 	}
 	if got.String() != want {
 		t.Fatalf("%s = %s, want %s", what, got.String(), want)
+	}
+}
+
+// TestPodSidecarContainers covers one sidecar plugin's container: a native
+// sidecar after mayfly-tools, its shim command, its identity, its resources,
+// its secret env, its mounts, and its startup probe.
+func TestPodSidecarContainers(t *testing.T) {
+	spec := sidecarSpec()
+	p := sidecarPlugin("notify", "example.com/notify:1")
+	spec.Plugins = []sessioncfg.Plugin{p}
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	pod := spec.Pod()
+
+	if len(pod.Spec.InitContainers) != 2 {
+		t.Fatalf("init containers = %+v, want tools and the sidecar", pod.Spec.InitContainers)
+	}
+	if pod.Spec.InitContainers[0].Name != "mayfly-tools" {
+		t.Fatalf("first init container = %q", pod.Spec.InitContainers[0].Name)
+	}
+	sidecar := pod.Spec.InitContainers[1]
+	if sidecar.Name != "plugin-notify" {
+		t.Fatalf("sidecar name = %q", sidecar.Name)
+	}
+	if sidecar.RestartPolicy == nil || *sidecar.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Fatalf("sidecar restart policy = %v", sidecar.RestartPolicy)
+	}
+	if sidecar.Image != p.Image || sidecar.WorkingDir != PluginImageDir {
+		t.Fatalf("sidecar image = %q workdir = %q", sidecar.Image, sidecar.WorkingDir)
+	}
+	wantCommand := []string{
+		ToolsDir + "/mayfly-plugin-shim", "serve",
+		"--listen", "unix:" + p.Socket,
+		"--key-file", GatewayKeyDir + "/" + GatewayKeySecretKey,
+		"--session", "abc123",
+		"--init-timeout", "30s",
+		"--", "bin/notify", "--log-level", "info",
+	}
+	if !reflect.DeepEqual(sidecar.Command, wantCommand) {
+		t.Fatalf("sidecar command = %v, want %v", sidecar.Command, wantCommand)
+	}
+
+	env := map[string]corev1.EnvVar{}
+	for _, item := range sidecar.Env {
+		if _, exists := env[item.Name]; exists {
+			t.Fatalf("duplicate env %s", item.Name)
+		}
+		env[item.Name] = item
+	}
+	if env["MAYFLY_PLUGIN_NAME"].Value != "notify" || env["MAYFLY_PLUGIN_DIR"].Value != PluginImageDir {
+		t.Fatalf("plugin identity env = %+v", sidecar.Env)
+	}
+	if env["MAYFLY_SESSION_ID"].Value != "abc123" {
+		t.Fatalf("session env = %+v", env["MAYFLY_SESSION_ID"])
+	}
+	if env["MAYFLY_WORKSPACE_DIR"].Value != WorkspaceDir {
+		t.Fatalf("workspace env = %+v", env["MAYFLY_WORKSPACE_DIR"])
+	}
+	if env["NOTIFY_CHANNEL"].Value != "#ops" {
+		t.Fatalf("manifest env = %+v", env["NOTIFY_CHANNEL"])
+	}
+	secret := env["NOTIFY_WEBHOOK_URL"]
+	if secret.ValueFrom == nil || secret.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("secret env = %+v", secret)
+	}
+	if got := secret.ValueFrom.SecretKeyRef; got.Name != "mayfly-plugin-notify" || got.Key != "webhook-url" {
+		t.Fatalf("secretKeyRef = %+v", got)
+	}
+
+	assertQuantity(t, "sidecar cpu request", sidecar.Resources.Requests, corev1.ResourceCPU, "10m")
+	assertQuantity(t, "sidecar memory request", sidecar.Resources.Requests, corev1.ResourceMemory, "32Mi")
+	assertQuantity(t, "sidecar memory limit", sidecar.Resources.Limits, corev1.ResourceMemory, "64Mi")
+
+	sc := sidecar.SecurityContext
+	agentContext := pod.Spec.Containers[0].SecurityContext
+	if sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != 65532 {
+		t.Fatalf("sidecar security context = %+v", sc)
+	}
+	if sc.ReadOnlyRootFilesystem == nil || !*sc.ReadOnlyRootFilesystem ||
+		sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation ||
+		sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Fatalf("sidecar security context is not hardened: %+v", sc)
+	}
+	if agentContext == nil || *agentContext.RunAsUser != 65532 {
+		t.Fatalf("agent security context = %+v", agentContext)
+	}
+
+	mounts := map[string]corev1.VolumeMount{}
+	for _, m := range sidecar.VolumeMounts {
+		mounts[m.Name] = m
+	}
+	if mount, ok := mounts["mayfly-tools"]; !ok || !mount.ReadOnly || mount.MountPath != ToolsDir {
+		t.Fatalf("sidecar tools mount = %+v", mount)
+	}
+	if mount, ok := mounts["plugin-sockets"]; !ok || mount.ReadOnly || mount.MountPath != PluginSocketsDir {
+		t.Fatalf("sidecar sockets mount = %+v", mount)
+	}
+	if mount, ok := mounts["gateway-key"]; !ok || !mount.ReadOnly || mount.MountPath != GatewayKeyDir {
+		t.Fatalf("sidecar gateway key mount = %+v", mount)
+	}
+	if mount, ok := mounts["plugin-tmp-notify"]; !ok || mount.MountPath != "/tmp" {
+		t.Fatalf("sidecar tmp mount = %+v", mount)
+	}
+	if mount, ok := mounts["workspace"]; !ok || !mount.ReadOnly || mount.MountPath != WorkspaceDir {
+		t.Fatalf("sidecar workspace mount = %+v", mount)
+	}
+
+	probe := sidecar.StartupProbe
+	if probe == nil || probe.Exec == nil {
+		t.Fatalf("sidecar startup probe = %+v", probe)
+	}
+	wantProbe := []string{ToolsDir + "/mayfly-plugin-shim", "probe", "--listen", "unix:" + p.Socket}
+	if !reflect.DeepEqual(probe.Exec.Command, wantProbe) {
+		t.Fatalf("probe command = %v, want %v", probe.Exec.Command, wantProbe)
+	}
+	// The probe must outlast the shim's init budget (30s here).
+	if probe.FailureThreshold < 15 || probe.PeriodSeconds != 2 {
+		t.Fatalf("probe limits = %+v", probe)
+	}
+
+	volumes := map[string]corev1.Volume{}
+	for _, v := range pod.Spec.Volumes {
+		volumes[v.Name] = v
+	}
+	sockets := volumes["plugin-sockets"].EmptyDir
+	if sockets == nil || sockets.Medium != corev1.StorageMediumMemory || sockets.SizeLimit == nil || sockets.SizeLimit.String() != "1Mi" {
+		t.Fatalf("sockets volume = %+v", volumes["plugin-sockets"])
+	}
+	keyVolume := volumes["gateway-key"].Secret
+	if keyVolume == nil || keyVolume.SecretName != "mayfly-abc123" {
+		t.Fatalf("gateway key volume = %+v", volumes["gateway-key"])
+	}
+	if len(keyVolume.Items) != 1 || keyVolume.Items[0].Key != GatewayKeySecretKey || keyVolume.Items[0].Path != GatewayKeySecretKey {
+		t.Fatalf("gateway key items = %+v", keyVolume.Items)
+	}
+	if keyVolume.DefaultMode == nil || *keyVolume.DefaultMode != 0o400 {
+		t.Fatalf("gateway key mode = %v", keyVolume.DefaultMode)
+	}
+
+	// The runtime dials the socket and needs no key of its own.
+	agentMounts := map[string]corev1.VolumeMount{}
+	for _, m := range pod.Spec.Containers[0].VolumeMounts {
+		agentMounts[m.Name] = m
+	}
+	if mount, ok := agentMounts["plugin-sockets"]; !ok || mount.ReadOnly {
+		t.Fatalf("agent sockets mount = %+v", mount)
+	}
+	for _, container := range append([]corev1.Container{pod.Spec.Containers[0]}, pod.Spec.InitContainers...) {
+		if container.Name == sidecar.Name {
+			continue
+		}
+		for _, m := range container.VolumeMounts {
+			if m.Name == "gateway-key" {
+				t.Fatalf("%s mounts the gateway key", container.Name)
+			}
+		}
+	}
+}
+
+// TestPodGatewayKeyOnlyInSidecars keeps the signing key and the sidecar's
+// secret out of the agent container and out of every copy container.
+func TestPodGatewayKeyOnlyInSidecars(t *testing.T) {
+	spec := sidecarSpec()
+	spec.PluginVolumeLimit = "512Mi"
+	spec.Plugins = []sessioncfg.Plugin{
+		inlinePlugin("tickets", "example.com/tickets:1"),
+		sidecarPlugin("notify", "example.com/notify:1"),
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	pod := spec.Pod()
+
+	var agent corev1.Container
+	for _, c := range pod.Spec.Containers {
+		if c.Name == "agent" {
+			agent = c
+		}
+	}
+	if agent.Name == "" {
+		t.Fatal("agent container missing")
+	}
+	for _, item := range agent.Env {
+		if item.Name == "NOTIFY_WEBHOOK_URL" || item.Name == GatewayKeySecretKey {
+			t.Fatalf("agent env carries %s", item.Name)
+		}
+		if item.ValueFrom != nil && item.ValueFrom.SecretKeyRef != nil && item.ValueFrom.SecretKeyRef.Key == GatewayKeySecretKey {
+			t.Fatalf("agent env reads the gateway key")
+		}
+	}
+	if agent.VolumeMounts == nil {
+		t.Fatal("agent mounts missing")
+	}
+	for _, m := range agent.VolumeMounts {
+		if m.Name == "gateway-key" || m.MountPath == GatewayKeyDir {
+			t.Fatalf("agent mounts the gateway key")
+		}
+	}
+
+	secret := spec.Secret().Data
+	if len(secret[GatewayKeySecretKey]) != 32 {
+		t.Fatalf("session secret gateway key = %x", secret[GatewayKeySecretKey])
+	}
+	if string(secret["token"]) != "secret-token" {
+		t.Fatal("session token missing from secret")
+	}
+
+	// Only the sidecar may reference the manifest's secret.
+	sawGatewayMount := false
+	for _, container := range append([]corev1.Container{agent}, pod.Spec.InitContainers...) {
+		for _, item := range container.Env {
+			if item.Name != "NOTIFY_WEBHOOK_URL" {
+				continue
+			}
+			if container.Name != "plugin-notify" {
+				t.Fatalf("%s reads the sidecar secret", container.Name)
+			}
+		}
+		for _, m := range container.VolumeMounts {
+			if m.Name == "gateway-key" {
+				if container.Name != "plugin-notify" {
+					t.Fatalf("%s mounts the gateway key", container.Name)
+				}
+				sawGatewayMount = true
+			}
+		}
+	}
+	if !sawGatewayMount {
+		t.Fatal("the sidecar does not mount the gateway key")
 	}
 }

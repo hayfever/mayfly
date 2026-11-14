@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -37,6 +38,28 @@ func newHTTPTransport(url string, headers map[string]string, client *http.Client
 		perRequest: perRequest,
 	}
 }
+
+// NewUnixHTTP returns an uninitialized Streamable HTTP client for a server
+// listening on a Unix socket. perRequest adds each request's credential: a
+// discovery token authorizes initialize and tools/list, a call token
+// authorizes one tools/call. The URL's host is a placeholder: the dialer
+// ignores it and connects to the socket.
+func NewUnixHTTP(name, socket string, perRequest func(*http.Request)) *Client {
+	dialer := &net.Dialer{}
+	client := &http.Client{
+		Timeout: 5 * time.Minute,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return dialer.DialContext(ctx, "unix", socket)
+			},
+		},
+	}
+	return NewHTTPWithClient(name, UnixHTTPPlaceholder, nil, client, perRequest)
+}
+
+// UnixHTTPPlaceholder is the URL a Unix-socket client dials through. The host
+// is a name no resolution ever sees; only the socket path reaches the server.
+const UnixHTTPPlaceholder = "http://plugin/mcp"
 
 func (t *httpTransport) Do(ctx context.Context, id int64, payload []byte) ([]byte, error) {
 	resp, err := t.post(ctx, payload)
