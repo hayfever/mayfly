@@ -24,6 +24,7 @@ import (
 	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/k8s"
 	"github.com/hayfever/mayfly/internal/plugin"
+	"github.com/hayfever/mayfly/internal/pluginsvc"
 	"github.com/hayfever/mayfly/internal/project"
 	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/runner"
@@ -158,6 +159,9 @@ func main() {
 		os.Exit(2)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	// The tool gateway is the only path to plugin and remote MCP tools. Its
 	// ledger lives in the journal store, so a call record and the journal that
 	// references it are deleted together at finalize.
@@ -169,6 +173,12 @@ func main() {
 	for _, server := range cfg.MCP.Servers {
 		mcpServers[server.Name] = server
 	}
+
+	// Service plugins run somewhere the control plane owns: a reconciled
+	// Deployment in the cluster, or a shim child on the local backend. The
+	// gateway asks this function where to send a call and which key signs it.
+	serviceURL, readyCheck := startServices(ctx, cfg, kube, mgr, manifests, logger)
+
 	audit, auditErr := gateway.NewAudit(cfg.Plugins.AuditPath, logger)
 	if auditErr != nil {
 		logger.Error("configure plugin audit log", "error", auditErr)
@@ -182,6 +192,7 @@ func main() {
 			server, ok := mcpServers[name]
 			return server, ok
 		},
+		ServiceURL:  serviceURL,
 		MaxInflight: cfg.Plugins.MaxInflightCalls,
 		Audit:       audit,
 		Logger:      logger,
@@ -190,8 +201,6 @@ func main() {
 	// manager needs the gateway before it starts.
 	mgr.SetGateway(toolGateway)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 	if err := mgr.Start(ctx); err != nil {
 		logger.Error("start manager", "error", err)
 		os.Exit(2)
@@ -232,8 +241,12 @@ func main() {
 	}()
 
 	server := &http.Server{
-		Addr:              cfg.Server.Addr,
-		Handler:           httpapi.New(cfg, mgr, queueStore, logger, httpapi.WithSchedules(scheduleAPI), httpapi.WithGateway(toolGateway)).Handler(),
+		Addr: cfg.Server.Addr,
+		Handler: httpapi.New(cfg, mgr, queueStore, logger,
+			httpapi.WithSchedules(scheduleAPI),
+			httpapi.WithGateway(toolGateway),
+			httpapi.WithReadyCheck(readyCheck),
+		).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -263,6 +276,72 @@ func main() {
 		logger.Warn("queue worker did not stop in time; in-flight jobs will be retried")
 	}
 	mgr.Shutdown(shutdownCtx)
+}
+
+// startServices starts the service plugin workloads and returns the gateway's
+// service lookup and the readiness check their required plugins need.
+func startServices(ctx context.Context, cfg *config.Config, kube *k8s.Client, mgr *session.Manager, manifests []plugin.Manifest, logger *slog.Logger) (func(string) (string, []byte, error), func() error) {
+	manifestsFn := func() []plugin.Manifest { return manifests }
+	switch cfg.Runtime.Backend {
+	case "kubernetes":
+		namespace := cfg.Plugins.Namespace
+		if namespace == "" {
+			namespace = cfg.Sessions.Namespace
+		}
+		selected := map[string]bool{}
+		for _, agent := range mgr.Agents() {
+			for _, name := range agent.Plugins {
+				selected[name] = true
+			}
+		}
+		reconciler, err := pluginsvc.New(pluginsvc.Options{
+			Client:    kube.WithNamespace(namespace),
+			Manifests: manifestsFn,
+			Render: pluginsvc.RenderConfig{
+				Namespace:         namespace,
+				ToolsImage:        cfg.Runtime.Image,
+				ImagePullPolicy:   cfg.Runtime.ImagePullPolicy,
+				ImagePullSecrets:  cfg.Runtime.ImagePullSecrets,
+				PlatformNamespace: cfg.Runtime.PlatformNamespace,
+				PlatformLabels:    cfg.Runtime.PlatformLabels,
+				DNSNamespace:      cfg.Runtime.DNSNamespace,
+			},
+			Interval: cfg.Plugins.ReconcileInterval.Std(),
+			Prune:    config.Bool(cfg.Plugins.Prune, true),
+			Selected: selected,
+			Logger:   logger,
+		})
+		if err != nil {
+			logger.Error("configure plugin reconciler", "error", err)
+			os.Exit(2)
+		}
+		if err := reconciler.Reconcile(ctx); err != nil {
+			logger.Error("reconcile plugin services", "error", err)
+		}
+		go reconciler.Run(ctx)
+		return reconciler.ServiceURL, reconciler.RequiredErr
+	case "local":
+		local, err := pluginsvc.NewLocal(pluginsvc.LocalConfig{
+			StateDir:  cfg.Runtime.StateDir,
+			Manifests: manifestsFn,
+			Logger:    logger,
+		})
+		if err != nil {
+			logger.Error("configure local plugin services", "error", err)
+			os.Exit(2)
+		}
+		if err := local.Start(ctx); err != nil {
+			logger.Error("start local plugin services", "error", err)
+			os.Exit(2)
+		}
+		go func() {
+			<-ctx.Done()
+			local.Close()
+		}()
+		return local.ServiceURL, nil
+	default:
+		return nil, nil
+	}
 }
 
 func newLogger() *slog.Logger {

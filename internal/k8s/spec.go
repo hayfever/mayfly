@@ -45,6 +45,16 @@ const (
 	PluginShim = "/usr/local/bin/mayfly-plugin-shim"
 	// PluginImageDir is the directory a plugin image must contain.
 	PluginImageDir = "/mayfly-plugin"
+	// GatewayKeyDir holds the gateway key file of a service plugin.
+	GatewayKeyDir = "/var/run/mayfly/gateway"
+	// LabelPlugin carries the plugin name on every service plugin object.
+	LabelPlugin = "mayfly.io/plugin"
+	// PluginAppName is the app label of service plugin objects. It differs
+	// from AppName so the session selectors never match a plugin object.
+	PluginAppName = "mayfly-plugin"
+	// AnnotationSpecHash records the manifest hash a plugin object was
+	// rendered from, so reconcile writes only what changed.
+	AnnotationSpecHash = "mayfly.io/spec-hash"
 
 	// WorkspaceSubPath and ArtifactsSubPath select directories inside the
 	// per-session workspace volume.

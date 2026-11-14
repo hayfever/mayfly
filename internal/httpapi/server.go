@@ -92,6 +92,7 @@ type Server struct {
 	web        fs.FS
 	upgrader   websocket.Upgrader
 	schedules  *ScheduleService
+	readyCheck func() error
 }
 
 // New builds the HTTP server. queue may be nil in tests that do not exercise
@@ -144,6 +145,14 @@ func New(cfg *config.Config, mgr *session.Manager, q queue.Store, logger *slog.L
 func WithGateway(g *gateway.Gateway) Option {
 	return func(s *Server) {
 		s.gateway = g
+	}
+}
+
+// WithReadyCheck adds a startup dependency to /readyz. An error keeps the
+// replica out of the Service until the dependency recovers.
+func WithReadyCheck(check func() error) Option {
+	return func(s *Server) {
+		s.readyCheck = check
 	}
 }
 
@@ -205,6 +214,12 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	if err := s.mgr.Ready(); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready", "error": err.Error()})
 		return
+	}
+	if s.readyCheck != nil {
+		if err := s.readyCheck(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready", "error": err.Error()})
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }

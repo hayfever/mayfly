@@ -2,7 +2,7 @@ schemaVersion: 1
 name: tickets
 version: 0.1.0
 description: Look up tickets through a cache shared by every session.
-placement: inline
+placement: service
 image: ghcr.io/example/mayfly-plugin-tickets:0.1.0
 command: server/server
 local:
