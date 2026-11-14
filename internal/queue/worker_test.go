@@ -285,3 +285,55 @@ func TestWorkerRecordsSessionForLookup(t *testing.T) {
 		return err == nil && ok && record.State == StateDone && record.SessionID == "sess-42"
 	})
 }
+
+func TestWorkerRenewsLeaseForSlowJob(t *testing.T) {
+	for name, store := range backends(t) {
+		t.Run(name, func(t *testing.T) {
+			var mu sync.Mutex
+			runs := 0
+			handler := func(context.Context, Job) (Result, error) {
+				mu.Lock()
+				runs++
+				mu.Unlock()
+				// Four visibility timeouts: without renewal a second claim
+				// would start the job again.
+				time.Sleep(200 * time.Millisecond)
+				return Result{SessionID: "slow"}, nil
+			}
+			job := testJob("slow-delivery")
+			if err := store.Accept(context.Background(), job); err != nil {
+				t.Fatal(err)
+			}
+			cancel, done := startWorker(t, NewWorker(store, handler, 2, nil, 5*time.Millisecond, workerLogger()))
+			defer func() {
+				cancel()
+				<-done
+			}()
+			waitFor(t, 2*time.Second, func() bool {
+				record, ok, err := store.Get(context.Background(), job.ID)
+				return err == nil && ok && record.SessionID == "slow"
+			})
+			mu.Lock()
+			defer mu.Unlock()
+			if runs != 1 {
+				t.Fatalf("handler ran %d times, want 1", runs)
+			}
+		})
+	}
+}
+
+func TestWorkerSourceTimeout(t *testing.T) {
+	store, err := New(context.Background(), testConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	worker := NewWorker(store, nil, 1, nil, time.Millisecond, workerLogger())
+	worker.SetTimeout(KindSource, time.Hour)
+	if got := worker.timeoutFor(Job{Kind: KindSource}); got != time.Hour {
+		t.Fatalf("source timeout = %v", got)
+	}
+	if got := worker.timeoutFor(Job{}); got != DefaultJobTimeout {
+		t.Fatalf("session timeout = %v", got)
+	}
+}

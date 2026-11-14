@@ -127,6 +127,11 @@ type Store interface {
 	Nack(ctx context.Context, lease Lease, cause error) error
 	// Release requeues a job without counting an attempt.
 	Release(ctx context.Context, lease Lease, after time.Duration) error
+	// Extend moves a held lease's deadline to now plus ttl and returns the
+	// renewed lease. Later Ack, Nack, Release, and Extend calls must use the
+	// returned lease. It returns ErrLeaseLost when the lease already expired
+	// and another claim took the job.
+	Extend(ctx context.Context, lease Lease, ttl time.Duration) (Lease, error)
 	// Get returns a job record, including recently completed jobs.
 	Get(ctx context.Context, id string) (Record, bool, error)
 	// Dead returns buried jobs, newest first.

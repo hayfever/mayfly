@@ -243,6 +243,17 @@ func (s *redisStore) Release(ctx context.Context, lease Lease, after time.Durati
 	return s.runSettle(ctx, lease, "release", time.Now().UTC().Add(after).UnixMilli(), nil)
 }
 
+func (s *redisStore) Extend(ctx context.Context, lease Lease, ttl time.Duration) (Lease, error) {
+	// Scores are milliseconds, so the renewed deadline is kept at that
+	// precision for the next settle comparison.
+	deadline := time.UnixMilli(time.Now().UTC().Add(ttl).UnixMilli()).UTC()
+	if err := s.runSettle(ctx, lease, "release", deadline.UnixMilli(), nil); err != nil {
+		return lease, err
+	}
+	lease.Deadline = deadline
+	return lease, nil
+}
+
 // runSettle reschedules or buries a job only while the caller still holds its
 // lease, and returns ErrLeaseLost otherwise.
 func (s *redisStore) runSettle(ctx context.Context, lease Lease, mode string, score int64, payload []byte) error {

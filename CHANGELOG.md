@@ -55,6 +55,7 @@ First public release.
 - One run artifact per scheduled run at `runs/<schedule>/<run id>.json`, readable by the session through the artifact tool, with every document and its stored diff (already cut to `maxLines` and `maxLineChars`). The prompt receives at most 8 KiB per diff and 32 KiB of changes, plus a fixed untrusted-content notice.
 - Cron slot dedupe through a delivery key, a bbolt watermark at `sources.state_path`, and a single-slot catch-up within seven days.
 - `sources` configuration block: `state_path`, `max_artifact_bytes`, `concurrency`, `timeout` (one source step, default 15m), and `job_timeout` (one schedule job, default 30m).
+- Queue lease renewal: a running job's lease is extended every third of `queue.visibility_timeout`, and each job kind has its own deadline.
 - A retried schedule job reuses its run artifact instead of fetching again, and `CreateOptions.IdempotencyKey` keeps a retry from starting a second session.
 - Template `env` allowlist: a template reads only variables declared in `requiredEnv` or `optionalEnv` on its connection, source, or schedule. `MAYFLY_*` and control-plane secrets are never readable.
 - `allowPrivate` on a connection. `allowHTTP` no longer turns off the private-address guard, and NAT64 prefixes are blocked.
