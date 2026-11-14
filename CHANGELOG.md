@@ -48,7 +48,10 @@ First public release.
 - Labelled session objects whose pod is gone are garbage-collected at adoption instead of leaking their Secret, ConfigMap, network policy, and claim. A session that still has all three resumable objects gets a replacement pod instead, which covers a control plane that stops between deleting a failed pod and starting its replacement.
 - `runtime.storage_class` selects the workspace claim's StorageClass. The claim is now sized as `workspace_limit + artifact_volume_limit`, because the bundle is staged on the same volume.
 - End-to-end tests for forced and graceful pod deletion and control-plane replacement mid-turn, and a local SIGKILL/resume integration test.
+- Declarative `http.json` sources: templated requests, pagination, fanout over a parent document's URL fields, JSON path projection with wildcards and aliases, field filters, provider change tracking with diff truncation, retries, and item limits. Provider knowledge is bundle configuration, not Go code.
+- `requiredEnv` on a connection or source: a missing credential stops startup and names the definition instead of reaching the provider as an empty header.
 - Template `env` allowlist: a template reads only variables declared in `requiredEnv` or `optionalEnv` on its connection, source, or schedule. `MAYFLY_*` and control-plane secrets are never readable.
+- `allowPrivate` on a connection. `allowHTTP` no longer turns off the private-address guard, and NAT64 prefixes are blocked.
 
 ### Changed
 
@@ -87,6 +90,7 @@ First public release.
 - `runtime.env` and agent `runtime.env` cannot set `MAYFLY_CONFIG` or `MAYFLY_SESSION_TOKEN`; startup fails and the pod builder drops them.
 - GitHub triggers no longer accept the static `X-Mayfly-Token` header, which could be replayed.
 - The `local` runtime starts the agent with a minimal environment instead of mayflyd's.
+- Fanout dedupes identical requests, fails fast on `401` and `403`, and drops filtered-out responses. `maxItems` counts items after `filter`. A `removed` page without a diff counts as changed. `sources.timeout` is enforced.
 
 ### Known limitations
 
