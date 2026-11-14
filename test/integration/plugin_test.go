@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -27,6 +29,7 @@ import (
 	"github.com/hayfever/mayfly/internal/model"
 	"github.com/hayfever/mayfly/internal/runner"
 	"github.com/hayfever/mayfly/internal/session"
+	"github.com/hayfever/mayfly/internal/stub"
 )
 
 // interruptedMessage is the gateway's stored result for a non-idempotent call
@@ -744,6 +747,108 @@ func waitForLedgerDone(t *testing.T, gs *gatewaySession, tool string) journal.Ca
 		return false, "no record yet"
 	})
 	return found
+}
+
+// TestHTTPMCPThroughGateway proves an HTTP mcp.servers entry without an
+// allowlist is discovered and called at the gateway under the model-visible
+// name the e2e suite waits for, with the ledger key in _meta.
+func TestHTTPMCPThroughGateway(t *testing.T) {
+	counts := stub.NewMCPCounts()
+	upstream := httptest.NewServer(stub.MCPHandlerWithCounts(counts))
+	t.Cleanup(upstream.Close)
+	offered := &toolRecorder{}
+	llmServer := offered.wrap(pluginLLM("mcp_echo_echo", `{"text":"hi"}`))
+	gs := startGatewaySession(t, sessionSetup{
+		llm: llmServer,
+		mcpServers: []config.MCPServerConfig{{
+			Name:      "echo",
+			Transport: "http",
+			URL:       upstream.URL + "/mcp",
+		}},
+		agent: "plain",
+	})
+
+	entries := waitForTurn(t, gs, func(entries []journal.Entry) bool {
+		return len(entries) > 2 && entries[2].Name == "tool:mcp_echo_echo"
+	})
+	step := decodeStep(t, entries[2])
+	if step.IsError || step.Replayed || step.Interrupted {
+		t.Fatalf("step = %+v", step)
+	}
+	if step.Message.Content != "echo: hi" {
+		t.Fatalf("result = %q", step.Message.Content)
+	}
+	records := waitForAudit(t, gs.audit, "mcp_echo_echo", "call.done")
+	if !hasAuditEvent(records, "call.begin") || !hasAuditEvent(records, "call.done") {
+		t.Fatalf("audit = %+v, want begin and done", records)
+	}
+	record := waitForLedgerDone(t, gs, "mcp_echo_echo")
+	if record.State != journal.CallDone || !strings.Contains(record.Content, "echo: hi") {
+		t.Fatalf("ledger record = %+v", record)
+	}
+	meta := counts.Meta()["echo"]
+	want := gs.id + "/" + strconv.FormatInt(record.Turn, 10) + "/" + strconv.Itoa(record.Step)
+	if got, _ := meta["mayfly.io/idempotency-key"].(string); got != want {
+		t.Fatalf("idempotency key = %q, want %q", got, want)
+	}
+	if got, _ := meta["mayfly.io/session"].(string); got != gs.id {
+		t.Fatalf("call session = %q, want %q", got, gs.id)
+	}
+	if !offered.has("mcp_echo_echo") {
+		t.Fatalf("the model was offered %v, want mcp_echo_echo", offered.list())
+	}
+	assertSessionStatus(t, gs, model.StatusRunning)
+}
+
+// toolRecorder records the tool names each model request offered, so a test
+// can prove a gateway tool reached the model's declaration list.
+type toolRecorder struct {
+	mu    sync.Mutex
+	names []string
+}
+
+// wrap records the request's tools and passes the body on unchanged.
+func (r *toolRecorder) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var payload struct {
+			Tools []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		if json.Unmarshal(body, &payload) == nil {
+			r.mu.Lock()
+			for _, tool := range payload.Tools {
+				r.names = append(r.names, tool.Function.Name)
+			}
+			r.mu.Unlock()
+		}
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		next.ServeHTTP(w, req)
+	})
+}
+
+func (r *toolRecorder) has(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, got := range r.names {
+		if got == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *toolRecorder) list() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.names...)
 }
 
 func repoRoot(t *testing.T) string {

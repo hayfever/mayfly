@@ -17,6 +17,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/hayfever/mayfly/internal/mcp"
 	"github.com/hayfever/mayfly/internal/plugin"
 )
 
@@ -359,9 +360,12 @@ func TestMCPServerIdempotencyKey(t *testing.T) {
 		"prompt": "check the mcp idempotency key " + randomHex(4),
 	})
 	env.waitStatus(t, s.ID, "running", 3*time.Minute)
+	// The mcpstub server "echo" exposes one tool, "echo"; its model-visible
+	// name comes from the same function the gateway and runtime use.
+	echoTool := mcp.ToolName("echo", "echo")
 	env.waitEvent(t, s.ID, "MCP tool result", func(ev event) bool {
 		tool, _ := ev.Data["tool"].(string)
-		return ev.Type == "tool_result" && tool == "mcp_echo"
+		return ev.Type == "tool_result" && tool == echoTool
 	})
 
 	meta := mcpCallMeta(t, base, "echo")
