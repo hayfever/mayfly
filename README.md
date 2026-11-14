@@ -82,18 +82,18 @@ helm install mayfly deploy/helm/mayfly \
   --set config.server.public_url=https://mayfly.example.com
 ```
 
-## Quickstart with kind
+## Quickstart with k3d
 
-Requirements: Docker, kind, kubectl, Go 1.26+, jq, openssl.
+Requirements: Docker, k3d, kubectl, Go 1.26+, jq, openssl.
 
 ```bash
 git clone https://github.com/hayfever/mayfly.git
 cd mayfly
 make build
-./hack/kind-up.sh
+./hack/k3d-up.sh
 ```
 
-The script builds images, creates a kind cluster, loads the images, applies manifests, and prints the admin token. The included deployment uses deterministic stub servers for the LLM and one HTTP MCP server, so no API key is needed.
+The script builds images, creates a k3d cluster (k3s in Docker), imports the images, applies manifests, and prints the admin token. k3s enforces the per-session NetworkPolicy the control plane creates. The included deployment uses deterministic stub servers for the LLM and one HTTP MCP server, so no API key is needed.
 
 ```bash
 export MAYFLY_URL=http://localhost:8080
@@ -113,7 +113,7 @@ Close and download:
 ./bin/mayfly artifact <id> -o session.tar.gz
 ```
 
-Run the end-to-end suite (its own kind cluster with Calico, no API keys; see [docs/testing.md](docs/testing.md)):
+Run the end-to-end suite (its own k3d cluster, no API keys; see [docs/testing.md](docs/testing.md)):
 
 ```bash
 make e2e
@@ -127,7 +127,7 @@ No Kubernetes and no isolation. Uses the same control plane and runtime code wit
 make run-local   # token: dev-token
 ```
 
-The local example uses port 8080, the same port the kind cluster maps. Stop the kind cluster (or change the local `addr` and URLs) when running both.
+The local example uses port 8080, the same port the k3d cluster publishes. Stop the quickstart cluster (or change the local `addr` and URLs) when running both.
 
 In another shell:
 
@@ -244,9 +244,9 @@ Keep the credential boundary: new tool backends should be reached through the co
 | `internal/mcp`, `internal/llm` | protocol clients |
 | `internal/broker` | LLM and MCP credential proxy |
 | `internal/artifact` | local and S3-compatible stores |
-| `deploy/k8s` | base manifests and kind overlay |
+| `deploy/k8s` | base manifests and local overlay |
 | `deploy/helm/mayfly` | Helm chart with optional LiteLLM |
-| `hack` | local run, kind deploy, e2e runner |
+| `hack` | local run, k3d cluster, e2e runner |
 | `e2e` | end-to-end suite against a deployed release |
 
 ## License

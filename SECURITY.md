@@ -15,7 +15,7 @@ https://github.com/hayfever/mayfly/security/advisories/new
 Do not open a public issue for an undisclosed vulnerability. Include:
 
 - affected version or commit,
-- deployment backend (kind, other Kubernetes, local),
+- deployment backend (k3d, other Kubernetes, local),
 - reproduction steps or proof of concept,
 - impact and any known mitigations.
 

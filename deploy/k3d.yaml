@@ -1,0 +1,21 @@
+# k3d (k3s in Docker) cluster for the quickstart. k3s enforces the
+# NetworkPolicy the control plane creates for every session; kind's default
+# CNI does not. The image is pinned so a k3s release cannot change the cluster
+# under the quickstart.
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: mayfly
+servers: 1
+agents: 0
+image: rancher/k3s:v1.35.5-k3s1
+kubeAPI:
+  host: "127.0.0.1"
+  hostIP: "127.0.0.1"
+ports:
+  # The base Service is a NodePort; publish it as http://localhost:8080,
+  # bound to loopback only: the local overlay enables shell and unsigned
+  # webhooks, so it must not be reachable from the LAN.
+  - port: 127.0.0.1:8080:30080
+    nodeFilters:
+      - server:0

@@ -8,7 +8,7 @@ What behavior changes, and why?
 - [ ] `go vet ./...`
 - [ ] `go test ./...`
 - [ ] `helm lint deploy/helm/mayfly --set existingSecret=mayfly-secrets`
-- [ ] kind e2e, if lifecycle, Kubernetes, networking, artifacts, or agent image changed
+- [ ] k3d e2e, if lifecycle, Kubernetes, networking, artifacts, or agent image changed
 
 Describe the exact commands or scenario you ran.
 

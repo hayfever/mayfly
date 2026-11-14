@@ -24,7 +24,7 @@ A turn is executed as ordered journaled steps. The journal lives in the control 
 - `cmd/mayfly-harness`: image entrypoint. It is a thin wrapper over `internal/harness`. A failure is written to `/dev/termination-log` so the control plane can report it.
 - `cmd/mayfly-agent`: the built-in session runtime, a thin wrapper over `internal/agent`.
 - `cmd/mayfly`: CLI (`run`, `ls`, `get`, `events`, `attach`, `send`, `close`, `delete`, `artifact`, `agents`). It only talks to the public API.
-- `cmd/llmstub`, `cmd/mcpstub`: deterministic stub servers for kind and local runs.
+- `cmd/llmstub`, `cmd/mcpstub`: deterministic stub servers for k3d and local runs.
 
 ### Control plane
 
@@ -78,13 +78,13 @@ A turn is executed as ordered journaled steps. The journal lives in the control 
 - `internal/platformclient`: the runtime's HTTP client for events, the SSE inbox, artifact upload, finalize, and the turn journal. Journal requests retry so a control-plane replacement delays a step rather than losing it.
 - `internal/llm`: the OpenAI-compatible chat completions client.
 - `internal/mcp`: MCP clients. `stdio.go` runs servers inside the container. `http.go` reaches servers through the broker. `manager.go` starts them all.
-- `internal/stub`: the LLM and MCP stubs used by tests and kind. They are not on the production path.
+- `internal/stub`: the LLM and MCP stubs used by tests and k3d. They are not on the production path.
 
 ### Everything else
 
-- `deploy/helm/mayfly`, `deploy/k8s`: Helm chart (optional LiteLLM) and kustomize base with a kind overlay.
+- `deploy/helm/mayfly`, `deploy/k8s`: Helm chart (optional LiteLLM) and kustomize base with a local overlay.
 - `deploy/terraform/civo`: Terraform for a one-node Civo cluster with Cilium, sized for Mayfly and the e2e suite.
-- `hack/`: `run-local.sh`, `kind-up.sh`, `e2e.sh`.
+- `hack/`: `run-local.sh`, `k3d-up.sh`, `e2e.sh`.
 - `e2e/`: the end-to-end suite (build tag `e2e`), its Helm values, and fixtures. See `docs/testing.md`.
 - `test/integration`: an in-process end-to-end test, `TestWebhookToArtifact`.
 - `docs/`: user-facing docs. `docs/architecture.md` has the sequence diagrams.
@@ -158,6 +158,6 @@ Process:
 - `internal/queue/store_test.go` runs every store test against memory, bbolt, and Redis. Redis uses in-process miniredis, or the server named by `MAYFLY_REDIS_TEST_URL`.
 - `worker_test.go` covers capacity, release, and shutdown.
 - `test/integration` drives a webhook through the queue, a real `mayfly-agent` process on the local runner, a WebSocket attach, close, and artifact inspection, all against the stubs. `TestLocalResumeAfterKill` kills the agent with SIGKILL after its first tool call, lets the manager start a replacement, and checks that the turn completes, the journal has one entry per step, and the completed tool ran once.
-- `e2e/` (`make e2e`) runs the chart and images on kind with Calico and checks webhooks, queue durability across a control plane restart, dead letters, network isolation, and the session lifecycle. `TestSessionResumesAfterPodDeletion` deletes a running pod mid-turn and `TestControlPlaneRestartContinuesTurn` replaces `mayflyd` mid-turn; both check the replacement, the single user message, and one completed tool call.
+- `e2e/` (`make e2e`) runs the chart and images on k3d, where k3s's built-in controller enforces NetworkPolicy, and checks webhooks, queue durability across a control plane restart, dead letters, network isolation, and the session lifecycle. `TestSessionResumesAfterPodDeletion` deletes a running pod mid-turn and `TestControlPlaneRestartContinuesTurn` replaces `mayflyd` mid-turn; both check the replacement, the single user message, and one completed tool call.
 
 **Observability.** JSON `slog` goes to stderr, with the level set by `MAYFLY_LOG_LEVEL`. `GET /api/v1/queue` reports queue depth, and `GET /readyz` checks only that the lifecycle engine is running, not the artifact store.
