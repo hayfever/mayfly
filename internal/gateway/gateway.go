@@ -128,9 +128,22 @@ type Gateway struct {
 	mu     sync.RWMutex
 	grants map[string]Grant
 
+	// flightMu guards flights, which collapses concurrent begins of one call
+	// key into one upstream dispatch.
+	flightMu sync.Mutex
+	flights  map[string]*flight
+
 	// remote holds the upstream MCP clients and their discovery results,
 	// one client and one listing per (session, server).
 	remote remoteState
+}
+
+// flight is one begin in progress. A second begin for the same key waits for
+// it instead of calling the upstream again.
+type flight struct {
+	done chan struct{}
+	resp BeginResponse
+	err  error
 }
 
 // New returns an empty gateway. A nil Logger uses the process logger; a nil
@@ -150,12 +163,13 @@ func New(opts Options) *Gateway {
 		audit = &Audit{logger: opts.Logger}
 	}
 	return &Gateway{
-		opts:   opts,
-		ledger: opts.Ledger,
-		now:    opts.Now,
-		audit:  audit,
-		limits: newLimits(opts.MaxInflight, opts.Logger),
-		grants: map[string]Grant{},
+		opts:    opts,
+		ledger:  opts.Ledger,
+		now:     opts.Now,
+		audit:   audit,
+		limits:  newLimits(opts.MaxInflight, opts.Logger),
+		grants:  map[string]Grant{},
+		flights: map[string]*flight{},
 		remote: remoteState{
 			clients:   map[remoteKey]*clientEntry{},
 			discovery: map[remoteKey]*discoveryEntry{},
@@ -260,6 +274,10 @@ func (g *Gateway) Discover(ctx context.Context, session string) (Discovery, erro
 		remoteOwners = append(remoteOwners, owner)
 	}
 	sort.Strings(remoteOwners)
+	// Discovery is the retry point for an owner that failed before: the
+	// runtime asks for its grant again, so cached handshake and listing
+	// failures are dropped here.
+	g.retryRemoteFailures(session)
 	for _, owner := range remoteOwners {
 		placement := owners[owner]
 		if placement == MCPStdio {
@@ -270,7 +288,7 @@ func (g *Gateway) Discover(ctx context.Context, session string) (Discovery, erro
 		if err != nil {
 			out.Errors = append(out.Errors, DiscoveryError{
 				Owner:    owner,
-				Required: g.requiredOwner(owner),
+				Required: g.requiredOwner(owner, placement),
 				Error:    err.Error(),
 			})
 			continue
@@ -324,8 +342,10 @@ func (g *Gateway) Discover(ctx context.Context, session string) (Discovery, erro
 
 // requiredOwner reports whether the bundle marks one plugin required, so a
 // discovery failure can fail the session only when the bundle asked for it.
-func (g *Gateway) requiredOwner(name string) bool {
-	if g.opts.Manifests == nil {
+// Only a service plugin is a bundle entry: an mcp.servers owner that happens
+// to share a plugin's name fails nothing.
+func (g *Gateway) requiredOwner(name string, placement Placement) bool {
+	if placement != Service || g.opts.Manifests == nil {
 		return false
 	}
 	for _, manifest := range g.opts.Manifests() {
@@ -359,7 +379,57 @@ func (g *Gateway) Begin(ctx context.Context, session string, req BeginRequest) (
 		return BeginResponse{}, errf(http.StatusBadRequest, "arguments are not valid JSON: %v", err)
 	}
 	key := callKey(session, req.Turn, req.Step)
+	// A begin can run upstream work or record a dispatch. A retry of the same
+	// key waits for the begin in flight and gets its answer, instead of
+	// starting the call a second time.
+	return g.beginFlight(ctx, key, func(ctx context.Context) (BeginResponse, error) {
+		return g.begin(ctx, grant, session, req, tool, key, hash)
+	})
+}
 
+// resumedByAnotherInstance reports whether a pending record belongs to a
+// different runtime instance, which is what a container restart leaves. A
+// record this same instance opened means the runtime never saw the answer, so
+// the tool never ran and the call is safe to issue again.
+func resumedByAnotherInstance(tool GrantTool, rec journal.Call, req BeginRequest) bool {
+	if tool.Idempotent {
+		return false
+	}
+	return rec.InstanceID == "" || rec.InstanceID != req.InstanceID
+}
+
+// beginFlight runs one begin per call key. A second begin for the same key
+// waits for the first and returns its answer, so a retry of a lost response
+// cannot dispatch the call twice. The work runs on a context detached from the
+// request: an upstream call is already under way and its result must reach the
+// ledger even when the runtime disconnects.
+func (g *Gateway) beginFlight(ctx context.Context, key string, fn func(context.Context) (BeginResponse, error)) (BeginResponse, error) {
+	g.flightMu.Lock()
+	if active, ok := g.flights[key]; ok {
+		g.flightMu.Unlock()
+		select {
+		case <-active.done:
+			return active.resp, active.err
+		case <-ctx.Done():
+			return BeginResponse{}, ctx.Err()
+		}
+	}
+	active := &flight{done: make(chan struct{})}
+	g.flights[key] = active
+	g.flightMu.Unlock()
+	defer func() {
+		g.flightMu.Lock()
+		delete(g.flights, key)
+		g.flightMu.Unlock()
+		close(active.done)
+	}()
+	active.resp, active.err = fn(context.WithoutCancel(ctx))
+	return active.resp, active.err
+}
+
+// begin answers one resolved call: a recorded result, the resume table, or a
+// fresh dispatch.
+func (g *Gateway) begin(ctx context.Context, grant Grant, session string, req BeginRequest, tool GrantTool, key, hash string) (BeginResponse, error) {
 	// A recorded call needs no rate token and no in-flight slot: the gateway
 	// answers from the ledger, and a resume must not be refused for a call it
 	// never makes.
@@ -374,7 +444,7 @@ func (g *Gateway) Begin(ctx context.Context, session string, req BeginRequest) (
 			g.auditBegin(ctx, grant, tool, rec)
 			g.auditDone(ctx, grant, tool, rec, true)
 			return BeginResponse{Result: resultOf(rec, true)}, nil
-		case !tool.Idempotent:
+		case resumedByAnotherInstance(tool, rec, req):
 			return g.interrupt(ctx, grant, tool, rec)
 		}
 	}
@@ -398,6 +468,7 @@ func (g *Gateway) Begin(ctx context.Context, session string, req BeginRequest) (
 		Step:       req.Step,
 		Tool:       tool.Name,
 		ArgsSHA256: hash,
+		InstanceID: req.InstanceID,
 	})
 	if err != nil {
 		g.limits.release(key)
@@ -415,7 +486,7 @@ func (g *Gateway) Begin(ctx context.Context, session string, req BeginRequest) (
 			g.auditDone(ctx, grant, tool, rec, true)
 			return BeginResponse{Result: resultOf(rec, true)}, nil
 		}
-		if !tool.Idempotent {
+		if resumedByAnotherInstance(tool, rec, req) {
 			g.limits.release(key)
 			return g.interrupt(ctx, grant, tool, rec)
 		}

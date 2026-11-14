@@ -33,6 +33,7 @@ func TestLedgerConformance(t *testing.T) {
 				Step:       3,
 				Tool:       "plugin_alpha_get",
 				ArgsSHA256: strings.Repeat("a", 64),
+				InstanceID: "run-1",
 			}
 
 			rec, created, err := ledger.Begin(ctx, call)
@@ -45,6 +46,9 @@ func TestLedgerConformance(t *testing.T) {
 			if rec.State != CallPending || rec.Attempts != 1 {
 				t.Fatalf("new record = %+v", rec)
 			}
+			if rec.InstanceID != "run-1" {
+				t.Fatalf("new record lost the runtime instance: %+v", rec)
+			}
 			if rec.StartedAt.IsZero() {
 				t.Fatal("new record has no start time")
 			}
@@ -56,6 +60,9 @@ func TestLedgerConformance(t *testing.T) {
 			}
 			if created || rec.Attempts != 2 || rec.State != CallPending {
 				t.Fatalf("retry record = %+v, created = %v", rec, created)
+			}
+			if rec.InstanceID != "run-1" {
+				t.Fatalf("retry record lost the runtime instance: %+v", rec)
 			}
 
 			done, err := ledger.Complete(ctx, "s1", call.Key, "hello", true, false)

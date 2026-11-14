@@ -28,14 +28,19 @@ type fakeGateway struct {
 
 	begins    []gateway.BeginRequest
 	completes []gateway.CompleteRequest
+	// beginAttempt is the request deadline of the last begin attempt.
+	beginAttempt time.Duration
 }
 
 func (f *fakeGateway) Tools(context.Context) (gateway.Discovery, error) {
 	return f.discovery, f.discoveryErr
 }
 
-func (f *fakeGateway) BeginCall(_ context.Context, req gateway.BeginRequest) (gateway.BeginResponse, error) {
+func (f *fakeGateway) BeginCall(ctx context.Context, req gateway.BeginRequest) (gateway.BeginResponse, error) {
 	f.begins = append(f.begins, req)
+	if deadline, ok := ctx.Deadline(); ok {
+		f.beginAttempt = time.Until(deadline)
+	}
 	return f.begin(req)
 }
 
@@ -395,4 +400,71 @@ func mustEmitter(t *testing.T, dir string, logger *slog.Logger) *emitter {
 	}
 	t.Cleanup(func() { _ = ev.Close() })
 	return ev
+}
+
+// TestBeginAttemptFollowsPlacement covers the attempt bound of one begin: a
+// remote tool answer arrives only after the upstream call, so its attempt
+// outlasts the tool's timeout.
+func TestBeginAttemptFollowsPlacement(t *testing.T) {
+	if got := beginAttempt(grantedTool); got != gatewayAttemptTimeout {
+		t.Fatalf("local attempt = %s, want %s", got, gatewayAttemptTimeout)
+	}
+	remote := grantedTool
+	remote.Placement = gateway.MCPHTTP
+	remote.TimeoutMS = 60_000
+	if got := beginAttempt(remote); got != time.Minute+gatewayRemoteMargin {
+		t.Fatalf("remote attempt = %s, want the tool timeout plus the margin", got)
+	}
+	remote.TimeoutMS = 0
+	if got := beginAttempt(remote); got != mcpCallTimeout+gatewayRemoteMargin {
+		t.Fatalf("unsized remote attempt = %s, want the default plus the margin", got)
+	}
+}
+
+// TestBeginAttemptOutlastsRemoteTool proves the runtime sizes the attempt of a
+// remote begin past the tool's own timeout, so a long call is not abandoned.
+func TestBeginAttemptOutlastsRemoteTool(t *testing.T) {
+	gw := &fakeGateway{begin: func(gateway.BeginRequest) (gateway.BeginResponse, error) {
+		return gateway.BeginResponse{Result: &gateway.Result{Content: "recorded"}}, nil
+	}}
+	r := &Runtime{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), gateway: gw}
+
+	remote := grantedTool
+	remote.Placement = gateway.Service
+	remote.TimeoutMS = 60_000
+	if _, err := r.beginCall(context.Background(), remote, gateway.BeginRequest{Tool: remote.Name}); err != nil {
+		t.Fatal(err)
+	}
+	if gw.beginAttempt < time.Minute {
+		t.Fatalf("remote begin attempt = %s, want at least the tool timeout", gw.beginAttempt)
+	}
+
+	if _, err := r.beginCall(context.Background(), grantedTool, gateway.BeginRequest{Tool: grantedTool.Name}); err != nil {
+		t.Fatal(err)
+	}
+	if gw.beginAttempt > 2*gatewayAttemptTimeout {
+		t.Fatalf("local begin attempt = %s, want the short attempt", gw.beginAttempt)
+	}
+}
+
+// TestBeginCarriesRuntimeInstance proves every begin names this runtime
+// process, so the gateway can tell a lost answer from a restart.
+func TestBeginCarriesRuntimeInstance(t *testing.T) {
+	if runtimeInstance == "" {
+		t.Fatal("the runtime instance is empty")
+	}
+	gw := &fakeGateway{begin: func(gateway.BeginRequest) (gateway.BeginResponse, error) {
+		return gateway.BeginResponse{Result: &gateway.Result{Content: "recorded", Replayed: true}}, nil
+	}}
+	r := &Runtime{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), gateway: gw}
+	res, err := r.callGranted(context.Background(), 3, 4, echoCall(), grantedTool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Content != "recorded" || !res.Replayed {
+		t.Fatalf("result = %+v", res)
+	}
+	if len(gw.begins) != 1 || gw.begins[0].InstanceID != runtimeInstance {
+		t.Fatalf("begin = %+v, want the runtime instance", gw.begins)
+	}
 }

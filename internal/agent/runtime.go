@@ -439,6 +439,7 @@ func (r *Runtime) reportHidden(ctx context.Context) {
 // tokens are returned with the grant.
 func (r *Runtime) discoverTools(ctx context.Context) (map[string]gateway.DiscoveryTool, map[string]gateway.Placement, map[string]gateway.SidecarToken, error) {
 	discovery, err := retryGateway(ctx, r.logger, "list tools",
+		gatewayDiscoveryAttempt, gatewayRetryBudget,
 		func(ctx context.Context) (gateway.Discovery, error) {
 			return r.gateway.Tools(ctx)
 		})

@@ -28,11 +28,22 @@ type fakeUpstream struct {
 	headers  []http.Header
 	deletes  int
 	failList bool
+	// failInit answers initialize with 503, as an unavailable server does.
+	failInit bool
+	// denyCalls is how many upcoming tools/call requests answer 401.
+	denyCalls int
+	// delay holds each tools/call response, so a test can overlap calls.
+	delay       time.Duration
+	inits       int
+	toolCalls   int
+	activeCalls int
+	maxCalls    int
 }
 
 type upstreamCall struct {
-	name string
-	meta map[string]any
+	name          string
+	meta          map[string]any
+	authorization string
 }
 
 func newFakeUpstream(tools ...string) *fakeUpstream {
@@ -66,6 +77,14 @@ func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch req.Method {
 	case "initialize":
+		f.mu.Lock()
+		f.inits++
+		fail := f.failInit
+		f.mu.Unlock()
+		if fail {
+			http.Error(w, "upstream is down", http.StatusServiceUnavailable)
+			return
+		}
 		w.Header().Set("Mcp-Session-Id", "fake-session")
 		writeMCPResult(w, req.ID, map[string]any{
 			"protocolVersion": "2025-06-18",
@@ -102,7 +121,33 @@ func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.mu.Lock()
-		f.calls = append(f.calls, upstreamCall{name: params.Name, meta: params.Meta})
+		f.toolCalls++
+		deny := f.denyCalls > 0
+		if deny {
+			f.denyCalls--
+		}
+		delay := f.delay
+		f.mu.Unlock()
+		if deny {
+			http.Error(w, "call token rejected", http.StatusUnauthorized)
+			return
+		}
+		f.mu.Lock()
+		f.activeCalls++
+		if f.activeCalls > f.maxCalls {
+			f.maxCalls = f.activeCalls
+		}
+		f.mu.Unlock()
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		f.mu.Lock()
+		f.activeCalls--
+		f.calls = append(f.calls, upstreamCall{
+			name:          params.Name,
+			meta:          params.Meta,
+			authorization: r.Header.Get("Authorization"),
+		})
 		f.mu.Unlock()
 		writeMCPResult(w, req.ID, map[string]any{
 			"content": []map[string]any{{"type": "text", "text": "ok:" + params.Name}},
@@ -691,4 +736,349 @@ func mustHash(t *testing.T, args string) string {
 		t.Fatal(err)
 	}
 	return hash
+}
+
+func (f *fakeUpstream) initCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inits
+}
+
+func (f *fakeUpstream) toolCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.toolCalls
+}
+
+func (f *fakeUpstream) maxConcurrentCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxCalls
+}
+
+func (f *fakeUpstream) setFailInit(fail bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failInit = fail
+}
+
+// beginWith asks the gateway to begin one call under a chosen context.
+func beginWith(ctx context.Context, g *Gateway, tool string, turn int64, step int, args string) (BeginResponse, error) {
+	return g.Begin(ctx, "s1", BeginRequest{
+		Turn:      turn,
+		Step:      step,
+		CallID:    "call_1",
+		Tool:      tool,
+		Arguments: json.RawMessage(args),
+	})
+}
+
+// TestRemoteBeginOutlivesClientDisconnect proves that a runtime that gives up
+// on a begin does not abort the upstream call, and that its result still
+// reaches the ledger.
+func TestRemoteBeginOutlivesClientDisconnect(t *testing.T) {
+	upstream := newFakeUpstream("slow")
+	upstream.delay = 300 * time.Millisecond
+	server := httptest.NewServer(upstream)
+	defer server.Close()
+
+	def := config.MCPServerConfig{Name: "chat", Transport: "http", URL: server.URL, Tools: []string{"slow"}}
+	g, mem := newTestGateway(t, httpServerOptions(t, def, server.Client()),
+		GrantTool{Name: "mcp_chat_slow", Owner: "chat", Remote: "slow", Placement: MCPHTTP,
+			Timeout: 5 * time.Second, MaxOutput: 4096},
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	resp, err := beginWith(ctx, g, "mcp_chat_slow", 3, 4, `{}`)
+	if err != nil {
+		t.Fatalf("begin under a cancelled request: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < upstream.delay {
+		t.Fatalf("begin returned after %s, want the upstream call to finish", elapsed)
+	}
+	if resp.Result == nil || resp.Result.IsError || resp.Result.Content != "ok:slow" {
+		t.Fatalf("result = %+v", resp.Result)
+	}
+	rec, found, err := mem.Get(context.Background(), "s1", "s1/3/4")
+	if err != nil || !found || rec.State != journal.CallDone || rec.Content != "ok:slow" || rec.IsError {
+		t.Fatalf("ledger record = %+v found=%v err=%v", rec, found, err)
+	}
+	if upstream.callCount() != 1 {
+		t.Fatalf("upstream calls = %d, want 1", upstream.callCount())
+	}
+}
+
+// TestRemoteBeginCollapsesRetries proves that two begins of one key wait for
+// the same upstream call instead of dispatching it twice.
+func TestRemoteBeginCollapsesRetries(t *testing.T) {
+	upstream := newFakeUpstream("slow")
+	upstream.delay = 200 * time.Millisecond
+	server := httptest.NewServer(upstream)
+	defer server.Close()
+
+	def := config.MCPServerConfig{Name: "chat", Transport: "http", URL: server.URL, Tools: []string{"slow"}}
+	g, _ := newTestGateway(t, httpServerOptions(t, def, server.Client()),
+		GrantTool{Name: "mcp_chat_slow", Owner: "chat", Remote: "slow", Placement: MCPHTTP,
+			Timeout: 5 * time.Second, MaxOutput: 4096},
+	)
+
+	var wg sync.WaitGroup
+	responses := make([]BeginResponse, 2)
+	errs := make([]error, 2)
+	start := make(chan struct{})
+	for i := range responses {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			responses[i], errs[i] = begin(g, "mcp_chat_slow", 3, 4, `{}`)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := range responses {
+		if errs[i] != nil {
+			t.Fatalf("begin %d: %v", i, errs[i])
+		}
+		if responses[i].Result == nil || responses[i].Result.Content != "ok:slow" {
+			t.Fatalf("begin %d result = %+v", i, responses[i].Result)
+		}
+	}
+	if upstream.callCount() != 1 {
+		t.Fatalf("upstream calls = %d, want the retry to join the first", upstream.callCount())
+	}
+}
+
+// TestRemoteDiscoverySurvivesCancelledRequest proves that a discovery whose
+// request is cancelled does not poison the session: the handshake and listing
+// finish detached, and later calls use them.
+func TestRemoteDiscoverySurvivesCancelledRequest(t *testing.T) {
+	upstream := newFakeUpstream("send")
+	server := httptest.NewServer(upstream)
+	defer server.Close()
+
+	def := config.MCPServerConfig{Name: "chat", Transport: "http", URL: server.URL, Tools: []string{"send"}}
+	mem := journal.NewMemory()
+	if err := mem.Reserve(context.Background(), "s1", 10); err != nil {
+		t.Fatal(err)
+	}
+	opts := httpServerOptions(t, def, server.Client())
+	opts.Ledger = mem
+	opts.Sequencer = mem
+	opts.Logger = quietLogger()
+	g := New(opts)
+	g.Register(GrantFor(sessioncfg.Config{SessionID: "s1", MaxSteps: 4}, "helper",
+		[]config.MCPServerConfig{def}))
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	discovery, err := g.Discover(cancelled, "s1")
+	if err != nil {
+		t.Fatalf("discover under a cancelled request: %v", err)
+	}
+	if len(discovery.Errors) != 0 || len(discovery.Tools) != 1 || discovery.Tools[0].Name != "mcp_chat_send" {
+		t.Fatalf("discovery = %+v", discovery)
+	}
+
+	resp, err := begin(g, "mcp_chat_send", 1, 1, `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Result == nil || resp.Result.IsError || resp.Result.Content != "ok:send" {
+		t.Fatalf("call after a cancelled discovery = %+v", resp.Result)
+	}
+}
+
+// TestRemoteFailuresAreNotCachedForever proves that a failed handshake answers
+// calls from its cache while it is fresh, and that the next discovery retries
+// it instead of failing the owner for the session.
+func TestRemoteFailuresAreNotCachedForever(t *testing.T) {
+	upstream := newFakeUpstream("send")
+	upstream.setFailInit(true)
+	server := httptest.NewServer(upstream)
+	defer server.Close()
+
+	def := config.MCPServerConfig{Name: "chat", Transport: "http", URL: server.URL, Tools: []string{"send"}}
+	mem := journal.NewMemory()
+	if err := mem.Reserve(context.Background(), "s1", 10); err != nil {
+		t.Fatal(err)
+	}
+	opts := httpServerOptions(t, def, server.Client())
+	opts.Ledger = mem
+	opts.Sequencer = mem
+	opts.Logger = quietLogger()
+	g := New(opts)
+	g.Register(GrantFor(sessioncfg.Config{SessionID: "s1", MaxSteps: 4}, "helper",
+		[]config.MCPServerConfig{def}))
+
+	discovery, err := g.Discover(context.Background(), "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Errors) != 1 || discovery.Errors[0].Owner != "chat" {
+		t.Fatalf("discovery errors = %+v", discovery.Errors)
+	}
+	attempts := upstream.initCount()
+
+	// A call while the failure is fresh reports it without another handshake.
+	resp, err := begin(g, "mcp_chat_send", 1, 1, `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Result == nil || !resp.Result.IsError {
+		t.Fatalf("call result = %+v, want the cached failure", resp.Result)
+	}
+	if got := upstream.initCount(); got != attempts {
+		t.Fatalf("handshake attempts = %d, want the cached failure reused", got)
+	}
+
+	// The next discovery retries and finds the server back.
+	upstream.setFailInit(false)
+	discovery, err = g.Discover(context.Background(), "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Errors) != 0 || len(discovery.Tools) != 1 {
+		t.Fatalf("discovery after recovery = %+v", discovery)
+	}
+	resp, err = begin(g, "mcp_chat_send", 1, 2, `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Result == nil || resp.Result.IsError || resp.Result.Content != "ok:send" {
+		t.Fatalf("call after recovery = %+v", resp.Result)
+	}
+}
+
+// TestServiceCallRefreshesRejectedKey proves that a service upstream that
+// rejects its call token makes the gateway ask the reconciler for the endpoint
+// again, and that the call is retried once.
+func TestServiceCallRefreshesRejectedKey(t *testing.T) {
+	upstream := newFakeUpstream("query")
+	upstream.denyCalls = 1
+	server := httptest.NewServer(upstream)
+	defer server.Close()
+
+	key := []byte("0123456789abcdef0123456789abcdef")
+	mem := journal.NewMemory()
+	if err := mem.Reserve(context.Background(), "s1", 10); err != nil {
+		t.Fatal(err)
+	}
+	endpoints := 0
+	g := New(Options{
+		Ledger:    mem,
+		Sequencer: mem,
+		Logger:    quietLogger(),
+		ServiceURL: func(name string) (string, []byte, error) {
+			endpoints++
+			return server.URL, key, nil
+		},
+	})
+	g.Register(GrantFor(sessioncfg.Config{
+		SessionID: "s1",
+		MaxSteps:  4,
+		Plugins: []sessioncfg.Plugin{{
+			Name:      "tickets",
+			Placement: "service",
+			Tools:     []sessioncfg.PluginTool{{Name: "query", Idempotent: true, TimeoutSeconds: 5}},
+		}},
+	}, "helper", nil))
+
+	resp, err := begin(g, "plugin_tickets_query", 2, 3, `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Result == nil || resp.Result.IsError || resp.Result.Content != "ok:query" {
+		t.Fatalf("retried call = %+v", resp.Result)
+	}
+	if endpoints != 2 {
+		t.Fatalf("ServiceURL calls = %d, want the endpoint re-read after a 401", endpoints)
+	}
+	if upstream.toolCallCount() != 2 {
+		t.Fatalf("upstream call attempts = %d, want one retry", upstream.toolCallCount())
+	}
+	rec, found, err := mem.Get(context.Background(), "s1", "s1/2/3")
+	if err != nil || !found || rec.State != journal.CallDone || rec.Content != "ok:query" {
+		t.Fatalf("ledger record = %+v found=%v err=%v", rec, found, err)
+	}
+}
+
+// TestServiceCallsRunConcurrently proves that two calls to one service plugin
+// run at the same time and carry their own tokens.
+func TestServiceCallsRunConcurrently(t *testing.T) {
+	upstream := newFakeUpstream("query")
+	upstream.delay = 150 * time.Millisecond
+	server := httptest.NewServer(upstream)
+	defer server.Close()
+
+	gatewayKey := []byte("0123456789abcdef0123456789abcdef")
+	mem := journal.NewMemory()
+	if err := mem.Reserve(context.Background(), "s1", 10); err != nil {
+		t.Fatal(err)
+	}
+	g := New(Options{
+		Ledger:    mem,
+		Sequencer: mem,
+		Logger:    quietLogger(),
+		ServiceURL: func(name string) (string, []byte, error) {
+			return server.URL, gatewayKey, nil
+		},
+	})
+	g.Register(GrantFor(sessioncfg.Config{
+		SessionID: "s1",
+		MaxSteps:  4,
+		Plugins: []sessioncfg.Plugin{{
+			Name:      "tickets",
+			Placement: "service",
+			Tools:     []sessioncfg.PluginTool{{Name: "query", Idempotent: true, TimeoutSeconds: 5}},
+		}},
+	}, "helper", nil))
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	start := make(chan struct{})
+	for i, step := range []int{3, 4} {
+		wg.Add(1)
+		go func(i, step int) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = begin(g, "plugin_tickets_query", 2, step, `{}`)
+		}(i, step)
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if got := upstream.maxConcurrentCalls(); got < 2 {
+		t.Fatalf("concurrent upstream calls = %d, want 2", got)
+	}
+
+	upstream.mu.Lock()
+	calls := append([]upstreamCall(nil), upstream.calls...)
+	upstream.mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("upstream calls = %d", len(calls))
+	}
+	for _, call := range calls {
+		ledgerKey, _ := call.meta["mayfly.io/idempotency-key"].(string)
+		raw := strings.TrimPrefix(call.authorization, "Bearer ")
+		claims, err := VerifyToken(gatewayKey, raw, TokenScope{
+			SessionID:  "s1",
+			Plugin:     "tickets",
+			Tool:       "query",
+			ArgsSHA256: mustHash(t, `{}`),
+		}, time.Now())
+		if err != nil {
+			t.Fatalf("call token for %q: %v", ledgerKey, err)
+		}
+		if claims.Key != ledgerKey {
+			t.Fatalf("token key = %q, want the call's own key %q", claims.Key, ledgerKey)
+		}
+	}
 }
