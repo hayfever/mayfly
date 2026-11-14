@@ -401,3 +401,42 @@ func TestSourcesTimeoutWithinJobTimeout(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestConfigPluginsDefaults(t *testing.T) {
+	cfg := Default()
+	cfg.Sessions.Namespace = "agents"
+	cfg.Runtime.Image = "example/agent:1"
+	cfg.LLM.BaseURL = "http://localhost:11434/v1"
+	cfg.LLM.Model = "test"
+	cfg.applyDefaults()
+	if cfg.Plugins.Namespace != "agents" {
+		t.Fatalf("plugins.namespace = %q, want the sessions namespace", cfg.Plugins.Namespace)
+	}
+	if cfg.Plugins.ReconcileInterval.Std() != time.Minute {
+		t.Fatalf("plugins.reconcile_interval = %s, want 1m", cfg.Plugins.ReconcileInterval.Std())
+	}
+	if !Bool(cfg.Plugins.Prune, false) {
+		t.Fatal("plugins.prune did not default to true")
+	}
+	if cfg.Plugins.MaxInflightCalls != 256 {
+		t.Fatalf("plugins.max_inflight_calls = %d, want 256", cfg.Plugins.MaxInflightCalls)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("defaults did not validate: %v", err)
+	}
+
+	cfg.Plugins.ReconcileInterval = Duration(5 * time.Second)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "plugins.reconcile_interval") {
+		t.Fatalf("short reconcile interval error = %v", err)
+	}
+
+	cfg = Default()
+	cfg.Runtime.Image = "example/agent:1"
+	cfg.LLM.BaseURL = "http://localhost:11434/v1"
+	cfg.LLM.Model = "test"
+	cfg.applyDefaults()
+	cfg.Plugins.MaxInflightCalls = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "plugins.max_inflight_calls") {
+		t.Fatalf("zero in-flight cap error = %v", err)
+	}
+}
