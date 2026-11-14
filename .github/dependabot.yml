@@ -11,7 +11,10 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
   - package-ecosystem: docker
-    directory: /
+    directories:
+      - /
+      - /e2e/plugins
+      - /examples/plugins/*
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
