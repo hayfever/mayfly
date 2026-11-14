@@ -5,7 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -202,6 +204,94 @@ func TestOrphanSessionsReportsObjects(t *testing.T) {
 // TestDeleteSessionRemovesConfigBeforePod keeps cleanup from passing through
 // a state adoption reads as resumable: a ConfigMap, Secret, and claim with no
 // pod. A control plane that stops there would bring a finalized session back.
+// TestGCIgnoresPluginObjects proves that the session selector never matches a
+// service plugin object, so garbage collection leaves it alone.
+func TestGCIgnoresPluginObjects(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	client := NewForClient(cs, "mayfly")
+	ctx := context.Background()
+
+	labels := map[string]string{
+		LabelManaged:       "true",
+		LabelApp:           PluginAppName,
+		LabelPlugin:        "tickets",
+		AnnotationSpecHash: "hash",
+	}
+	removeHash := func(m map[string]string) map[string]string {
+		out := map[string]string{}
+		for key, value := range m {
+			if key != AnnotationSpecHash {
+				out[key] = value
+			}
+		}
+		return out
+	}
+	object := "mayfly-plugin-tickets"
+	if _, err := client.EnsurePluginObjects(ctx, PluginObjects{
+		Deployment: &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: object, Namespace: "mayfly", Labels: removeHash(labels), Annotations: map[string]string{AnnotationSpecHash: "hash"}},
+		},
+		Service: &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: object, Namespace: "mayfly", Labels: removeHash(labels), Annotations: map[string]string{AnnotationSpecHash: "hash"}},
+		},
+		NetworkPolicy: &networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: object, Namespace: "mayfly", Labels: removeHash(labels), Annotations: map[string]string{AnnotationSpecHash: "hash"}},
+		},
+		Secret: &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: object, Namespace: "mayfly", Labels: removeHash(labels)},
+			Data:       map[string][]byte{"key": []byte("0123456789abcdef0123456789abcdef")},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	gone := testSpec()
+	gone.SessionID = "gone"
+	gone.PodName = "mayfly-gone"
+	gone.SecretName = "mayfly-gone"
+	gone.ConfigMapName = "mayfly-gone"
+	gone.PersistentWorkspace = true
+	gone.PVCName = ""
+	gone.NetworkPolicyName = ""
+	if err := gone.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CreateSession(ctx, gone); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.DeletePod(ctx, gone.PodName, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := client.GarbageCollect(ctx, map[string]struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || removed[0] != "gone" {
+		t.Fatalf("removed sessions = %v", removed)
+	}
+	if _, err := cs.AppsV1().Deployments("mayfly").Get(ctx, object, metav1.GetOptions{}); err != nil {
+		t.Fatalf("plugin deployment was collected: %v", err)
+	}
+	if _, err := cs.CoreV1().Services("mayfly").Get(ctx, object, metav1.GetOptions{}); err != nil {
+		t.Fatalf("plugin service was collected: %v", err)
+	}
+	if _, err := cs.NetworkingV1().NetworkPolicies("mayfly").Get(ctx, object, metav1.GetOptions{}); err != nil {
+		t.Fatalf("plugin network policy was collected: %v", err)
+	}
+	if _, err := cs.CoreV1().Secrets("mayfly").Get(ctx, object, metav1.GetOptions{}); err != nil {
+		t.Fatalf("plugin secret was collected: %v", err)
+	}
+
+	orphans, err := client.OrphanSessions(ctx, map[string]struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := orphans[""]; ok {
+		t.Fatalf("orphans report a plugin object: %v", orphans)
+	}
+}
+
 func TestDeleteSessionRemovesConfigBeforePod(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	client := NewForClient(cs, "mayfly")
