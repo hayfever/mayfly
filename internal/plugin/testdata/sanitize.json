@@ -1,0 +1,16 @@
+[
+  {"in": "notify", "out": "notify"},
+  {"in": "post", "out": "post"},
+  {"in": "web-search", "out": "web_search"},
+  {"in": "a.b", "out": "a_b"},
+  {"in": "a_b", "out": "a_b"},
+  {"in": "a/b:c", "out": "a_b_c"},
+  {"in": "  spaced  ", "out": "spaced"},
+  {"in": "trailing-", "out": "trailing"},
+  {"in": "-leading", "out": "leading"},
+  {"in": "digits123", "out": "digits123"},
+  {"in": "ünïcode", "out": "ünïcode"},
+  {"in": "日本語", "out": "日本語"},
+  {"in": "__", "out": "unnamed"},
+  {"in": "", "out": "unnamed"}
+]
