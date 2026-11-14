@@ -115,7 +115,6 @@ func New(cfg *config.Config, mgr *session.Manager, q queue.Store, logger *slog.L
 		cfg:        cfg,
 		mgr:        mgr,
 		queue:      q,
-		broker:     broker.New(cfg.LLM, logger),
 		logger:     logger,
 		triggers:   triggersByName,
 		limiters:   limiters,
@@ -137,7 +136,20 @@ func New(cfg *config.Config, mgr *session.Manager, q queue.Store, logger *slog.L
 	for _, opt := range opts {
 		opt(server)
 	}
+	if server.broker == nil {
+		server.broker = broker.New(cfg.LLM, logger)
+	}
 	return server
+}
+
+// WithBroker reuses one broker, so the HTTP API and the tool gateway reach
+// upstream servers through the same transport policy and the same credentials.
+func WithBroker(b *broker.Broker) Option {
+	return func(s *Server) {
+		if b != nil {
+			s.broker = b
+		}
+	}
 }
 
 // WithGateway gives the API the tool gateway that the internal tool routes

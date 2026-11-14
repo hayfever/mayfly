@@ -493,8 +493,12 @@ func TestDiscoverLocalTools(t *testing.T) {
 		t.Fatalf("discovery tool = %+v", disc.Tools[0])
 	}
 	token := disc.Sidecars["alpha"].DiscoveryToken
-	if _, err := VerifyToken(grant.SidecarKey, token, TokenScope{SessionID: "s1", Plugin: "alpha", Tool: "status"}, time.Now()); err != nil {
+	alphaKey := plugin.SidecarKey(grant.SidecarKey, "alpha")
+	if _, err := VerifyToken(alphaKey, token, TokenScope{SessionID: "s1", Plugin: "alpha", Tool: "status"}, time.Now()); err != nil {
 		t.Fatalf("sidecar discovery token: %v", err)
+	}
+	if _, err := VerifyToken(alphaKey, token, TokenScope{SessionID: "s1", Plugin: "beta", Tool: "status"}, time.Now()); err == nil {
+		t.Fatal("alpha's token verified as beta")
 	}
 	if _, err := g.Discover(context.Background(), "missing"); statusOf(err) != 404 {
 		t.Fatalf("unknown session error = %v, want 404", err)
@@ -625,5 +629,59 @@ func TestDiscoverRequiredOwnerFollowsPlacement(t *testing.T) {
 	}
 	if !required["tickets"] {
 		t.Fatalf("discovery errors = %+v, want the required plugin reported", discovery.Errors)
+	}
+}
+
+// TestSidecarTokensUsePerPluginKeys keeps one sidecar's key from verifying a
+// token the gateway minted for another, and never signs with the session key.
+func TestSidecarTokensUsePerPluginKeys(t *testing.T) {
+	ctx := context.Background()
+	alpha := inlineTool("plugin_alpha_status", "alpha", "status", true)
+	alpha.Placement = Sidecar
+	beta := inlineTool("plugin_beta_status", "beta", "status", true)
+	beta.Placement = Sidecar
+	g, _ := newTestGateway(t, Options{}, alpha, beta)
+	grant, _ := g.grantFor("s1")
+	grant.SidecarKey = bytes.Repeat([]byte{0x5a}, 32)
+	g.Register(grant)
+
+	alphaKey := plugin.SidecarKey(grant.SidecarKey, "alpha")
+	betaKey := plugin.SidecarKey(grant.SidecarKey, "beta")
+	if bytes.Equal(alphaKey, grant.SidecarKey) {
+		t.Fatal("a sidecar key equals the session key")
+	}
+
+	disc, err := g.Discover(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	discoveryToken := disc.Sidecars["alpha"].DiscoveryToken
+	discoveryScope := TokenScope{SessionID: "s1", Plugin: "alpha", Tool: "*"}
+	if _, err := VerifyToken(alphaKey, discoveryToken, discoveryScope, time.Now()); err != nil {
+		t.Fatalf("alpha discovery token: %v", err)
+	}
+	if _, err := VerifyToken(betaKey, discoveryToken, TokenScope{SessionID: "s1", Plugin: "beta", Tool: "*"}, time.Now()); err == nil {
+		t.Fatal("alpha's discovery token verified with beta's key")
+	}
+
+	resp, err := g.Begin(ctx, "s1", BeginRequest{
+		Turn:       1,
+		Step:       1,
+		Tool:       alpha.Name,
+		Arguments:  json.RawMessage(`{}`),
+		InstanceID: "run-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Dispatch == nil {
+		t.Fatalf("begin = %+v, want a sidecar dispatch", resp)
+	}
+	callScope := TokenScope{SessionID: "s1", Plugin: "alpha", Tool: "status"}
+	if _, err := VerifyToken(alphaKey, resp.Dispatch.Token, callScope, time.Now()); err != nil {
+		t.Fatalf("alpha call token: %v", err)
+	}
+	if _, err := VerifyToken(betaKey, resp.Dispatch.Token, TokenScope{SessionID: "s1", Plugin: "beta", Tool: "status"}, time.Now()); err == nil {
+		t.Fatal("alpha's call token verified with beta's key")
 	}
 }

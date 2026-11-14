@@ -48,8 +48,9 @@ const (
 	PluginImageDir = "/mayfly-plugin"
 	// GatewayKeyDir holds the gateway key file of a sidecar plugin.
 	GatewayKeyDir = "/var/run/mayfly/gateway"
-	// GatewayKeySecretKey is the session Secret key that signs sidecar call
-	// tokens. Only a sidecar mounts it.
+	// GatewayKeySecretKey is the session Secret key that holds the session's
+	// random signing key. Each sidecar plugin's own key is derived from it and
+	// stored as GatewayKeySecretKeyFor(<plugin>).
 	GatewayKeySecretKey = "gateway-key"
 	// LabelPlugin carries the plugin name on every service plugin object.
 	LabelPlugin = "mayfly.io/plugin"
@@ -113,9 +114,13 @@ type SessionSpec struct {
 	ToolsImage string
 	// PluginVolumeLimit bounds the copied files of all inline plugins.
 	PluginVolumeLimit string
-	// GatewayKey signs the call tokens of this session's sidecars. It is the
-	// session Secret's gateway-key entry and reaches only a sidecar container.
+	// GatewayKey is the session's random signing key. It is stored as the
+	// session Secret's gateway-key entry, which no sidecar mounts.
 	GatewayKey []byte
+	// SidecarKeys holds one derived key per sidecar plugin, as
+	// plugin.SidecarKey(GatewayKey, name). Each is stored as session Secret
+	// item gateway-key-<name> and mounted only into that plugin's sidecar.
+	SidecarKeys map[string][]byte
 	// NetworkPolicyName is the policy's own name. It must not follow the pod
 	// name: a replacement pod changes the name, while the policy stays.
 	NetworkPolicyName string
@@ -196,6 +201,9 @@ func (s *SessionSpec) Validate() error {
 			return fmt.Errorf("gateway key is required with sidecar plugins")
 		}
 		for _, p := range s.sidecarPlugins() {
+			if len(s.SidecarKeys[p.Name]) == 0 {
+				return fmt.Errorf("plugin %q: sidecar signing key is required", p.Name)
+			}
 			if err := validateSidecarPlugin(p); err != nil {
 				return fmt.Errorf("plugin %q: %w", p.Name, err)
 			}
@@ -256,6 +264,34 @@ func pluginSecretVolumeName(name string) string {
 	return dnsName("plugin-secrets-", name)
 }
 
+// GatewayKeySecretKeyFor is the session Secret key that holds one sidecar
+// plugin's derived signing key.
+func GatewayKeySecretKeyFor(name string) string {
+	return GatewayKeySecretKey + "-" + name
+}
+
+// gatewayKeyVolumeName is the volume that projects one sidecar's own key.
+func gatewayKeyVolumeName(name string) string {
+	return dnsName("gateway-key-", name)
+}
+
+// PluginSocketDir is one sidecar's own socket directory. Each plugin mounts
+// only its own volume here, so no plugin can unlink another's socket.
+func PluginSocketDir(name string) string {
+	return PluginSocketsDir + "/" + name
+}
+
+// PluginSocketPath is the Unix socket one sidecar serves and the runtime
+// dials.
+func PluginSocketPath(name string) string {
+	return PluginSocketDir(name) + "/" + name + ".sock"
+}
+
+// sidecarSocketVolumeName is the volume that holds one sidecar's socket.
+func sidecarSocketVolumeName(name string) string {
+	return dnsName("plugin-sockets-", name)
+}
+
 // dnsName maps a name onto a DNS label. A name that does not fit keeps a hash
 // suffix, so two long names cannot truncate to the same label.
 func dnsName(prefix, name string) string {
@@ -287,12 +323,19 @@ func (s *SessionSpec) policyName() string {
 }
 
 // Secret returns the per-session credentials: the bearer token every internal
-// route authenticates with, and the key that signs sidecar call tokens. The
-// key is raw bytes, so both entries go in Data rather than StringData.
+// route authenticates with, the session's signing key, and one derived key per
+// sidecar plugin. A sidecar mounts only its own derived item, so a key read by
+// one plugin cannot sign a token another plugin accepts. The keys are raw
+// bytes, so every entry goes in Data rather than StringData.
 func (s *SessionSpec) Secret() *corev1.Secret {
 	data := map[string][]byte{"token": []byte(s.Token)}
 	if len(s.GatewayKey) > 0 {
 		data[GatewayKeySecretKey] = append([]byte(nil), s.GatewayKey...)
+	}
+	for _, p := range s.sidecarPlugins() {
+		if key := s.SidecarKeys[p.Name]; len(key) > 0 {
+			data[GatewayKeySecretKeyFor(p.Name)] = append([]byte(nil), key...)
+		}
 	}
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -488,8 +531,8 @@ func (s *SessionSpec) sidecarContainer(p sessioncfg.Plugin) corev1.Container {
 	}
 	mounts := []corev1.VolumeMount{
 		{Name: "mayfly-tools", MountPath: ToolsDir, ReadOnly: true},
-		{Name: "plugin-sockets", MountPath: PluginSocketsDir},
-		{Name: "gateway-key", MountPath: GatewayKeyDir, ReadOnly: true},
+		{Name: sidecarSocketVolumeName(p.Name), MountPath: PluginSocketDir(p.Name)},
+		{Name: gatewayKeyVolumeName(p.Name), MountPath: GatewayKeyDir, ReadOnly: true},
 		{Name: sidecarTmpVolumeName(p.Name), MountPath: "/tmp"},
 	}
 	workspace := ""
@@ -632,10 +675,15 @@ func (s *SessionSpec) volumeMounts() []corev1.VolumeMount {
 		)
 	}
 	mounts = append(mounts, corev1.VolumeMount{Name: "tmp", MountPath: "/tmp"})
-	if sidecars := s.sidecarPlugins(); len(sidecars) > 0 {
-		// The runtime dials each socket. The volume carries no secret: a call
-		// needs a token the gateway signs, which this container never holds.
-		mounts = append(mounts, corev1.VolumeMount{Name: "plugin-sockets", MountPath: PluginSocketsDir})
+	// The runtime dials each socket. A per-plugin volume is mounted at its own
+	// directory, so one sidecar cannot reach another's socket. The volumes
+	// carry no secret: a call needs a token the gateway signs, which this
+	// container never holds.
+	for _, p := range s.sidecarPlugins() {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      sidecarSocketVolumeName(p.Name),
+			MountPath: PluginSocketDir(p.Name),
+		})
 	}
 	if inline := s.inlinePlugins(); len(inline) > 0 {
 		mounts = append(mounts, corev1.VolumeMount{Name: "plugins", MountPath: PluginsDir, ReadOnly: true})
@@ -718,10 +766,10 @@ func (s *SessionSpec) volumes() []corev1.Volume {
 			volumes = append(volumes, s.pluginSecretVolume(p))
 		}
 	}
-	if len(sidecars) > 0 {
+	for _, p := range sidecars {
 		volumes = append(volumes,
 			corev1.Volume{
-				Name: "plugin-sockets",
+				Name: sidecarSocketVolumeName(p.Name),
 				VolumeSource: corev1.VolumeSource{
 					EmptyDir: &corev1.EmptyDirVolumeSource{
 						Medium:    corev1.StorageMediumMemory,
@@ -729,10 +777,8 @@ func (s *SessionSpec) volumes() []corev1.Volume {
 					},
 				},
 			},
-			s.gatewayKeyVolume(),
-		)
-		for _, p := range sidecars {
-			volumes = append(volumes, corev1.Volume{
+			s.gatewayKeyVolume(p),
+			corev1.Volume{
 				Name: sidecarTmpVolumeName(p.Name),
 				VolumeSource: corev1.VolumeSource{
 					EmptyDir: &corev1.EmptyDirVolumeSource{
@@ -740,24 +786,25 @@ func (s *SessionSpec) volumes() []corev1.Volume {
 						SizeLimit: quantityPtr("64Mi"),
 					},
 				},
-			})
-		}
+			},
+		)
 	}
 	return volumes
 }
 
-// gatewayKeyVolume projects only the session secret's gateway-key entry, so a
-// sidecar cannot read the session token that sits in the same Secret.
-func (s *SessionSpec) gatewayKeyVolume() corev1.Volume {
+// gatewayKeyVolume projects one sidecar plugin's derived key, under the fixed
+// file name the shim reads. The volume holds no other entry, so the plugin
+// cannot read the session token or a sibling's key from the same Secret.
+func (s *SessionSpec) gatewayKeyVolume(p sessioncfg.Plugin) corev1.Volume {
 	mode := int32(0o400)
 	return corev1.Volume{
-		Name: "gateway-key",
+		Name: gatewayKeyVolumeName(p.Name),
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName:  s.SecretName,
 				DefaultMode: &mode,
 				Items: []corev1.KeyToPath{{
-					Key:  GatewayKeySecretKey,
+					Key:  GatewayKeySecretKeyFor(p.Name),
 					Path: GatewayKeySecretKey,
 					Mode: &mode,
 				}},

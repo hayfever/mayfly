@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"path"
@@ -85,6 +86,15 @@ func ObjectName(name string) string {
 // cannot delete an operator's credential.
 func GatewayKeyName(name string) string {
 	return dnsName(gatewayKeyPrefix, name)
+}
+
+// SidecarKey derives the call-token key of one sidecar plugin from the
+// session's random key. One key per plugin keeps a sidecar's own key file from
+// minting a token that a sibling accepts.
+func SidecarKey(sessionKey []byte, name string) []byte {
+	mac := hmac.New(sha256.New, sessionKey)
+	mac.Write([]byte("mayfly/sidecar/" + name))
+	return mac.Sum(nil)
 }
 
 // dnsName maps a plugin name onto a DNS label. A name that does not fit keeps

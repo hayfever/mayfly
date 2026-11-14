@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/hayfever/mayfly/internal/plugin"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
@@ -284,6 +286,10 @@ func TestSessionSpecValidatePlugins(t *testing.T) {
 		t.Fatal("expected a missing gateway key error")
 	}
 	sidecarOnly.GatewayKey = make([]byte, 32)
+	if err := sidecarOnly.Validate(); err == nil {
+		t.Fatal("expected a missing sidecar signing key error")
+	}
+	withSidecarKeys(sidecarOnly)
 	if err := sidecarOnly.Validate(); err != nil {
 		t.Fatalf("Validate sidecar: %v", err)
 	}
@@ -360,7 +366,7 @@ func sidecarPlugin(name, image string) sessioncfg.Plugin {
 		Image:              image,
 		Command:            "bin/" + name,
 		Args:               []string{"--log-level", "info"},
-		Socket:             PluginSocketsDir + "/" + name + ".sock",
+		Socket:             PluginSocketPath(name),
 		Env:                map[string]string{"NOTIFY_CHANNEL": "#ops", "NOTIFY_LEVEL": "info"},
 		Secrets:            []sessioncfg.PluginSecret{{Env: "NOTIFY_WEBHOOK_URL", Secret: "mayfly-plugin-notify", Key: "webhook-url"}},
 		InitTimeoutSeconds: 30,
@@ -384,6 +390,18 @@ func sidecarSpec() *SessionSpec {
 	return spec
 }
 
+// withSidecarKeys derives the per-plugin key of every sidecar in the spec, as
+// the session manager does before it renders the pod.
+func withSidecarKeys(spec *SessionSpec) *SessionSpec {
+	spec.SidecarKeys = map[string][]byte{}
+	for _, p := range spec.Plugins {
+		if p.Placement == "sidecar" {
+			spec.SidecarKeys[p.Name] = plugin.SidecarKey(spec.GatewayKey, p.Name)
+		}
+	}
+	return spec
+}
+
 func TestPodPluginInitContainers(t *testing.T) {
 	spec := testSpec()
 	spec.ToolsImage = "mayfly-agent:tools"
@@ -394,6 +412,7 @@ func TestPodPluginInitContainers(t *testing.T) {
 		inlinePlugin("word-count", "example.com/word-count:1"),
 		sidecarPlugin("notify", "example.com/notify:1"),
 	}
+	withSidecarKeys(spec)
 	if err := spec.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -572,6 +591,7 @@ func TestPodSidecarContainers(t *testing.T) {
 	spec := sidecarSpec()
 	p := sidecarPlugin("notify", "example.com/notify:1")
 	spec.Plugins = []sessioncfg.Plugin{p}
+	withSidecarKeys(spec)
 	if err := spec.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -657,10 +677,10 @@ func TestPodSidecarContainers(t *testing.T) {
 	if mount, ok := mounts["mayfly-tools"]; !ok || !mount.ReadOnly || mount.MountPath != ToolsDir {
 		t.Fatalf("sidecar tools mount = %+v", mount)
 	}
-	if mount, ok := mounts["plugin-sockets"]; !ok || mount.ReadOnly || mount.MountPath != PluginSocketsDir {
+	if mount, ok := mounts[sidecarSocketVolumeName("notify")]; !ok || mount.ReadOnly || mount.MountPath != PluginSocketDir("notify") {
 		t.Fatalf("sidecar sockets mount = %+v", mount)
 	}
-	if mount, ok := mounts["gateway-key"]; !ok || !mount.ReadOnly || mount.MountPath != GatewayKeyDir {
+	if mount, ok := mounts[gatewayKeyVolumeName("notify")]; !ok || !mount.ReadOnly || mount.MountPath != GatewayKeyDir {
 		t.Fatalf("sidecar gateway key mount = %+v", mount)
 	}
 	if mount, ok := mounts["plugin-tmp-notify"]; !ok || mount.MountPath != "/tmp" {
@@ -687,15 +707,16 @@ func TestPodSidecarContainers(t *testing.T) {
 	for _, v := range pod.Spec.Volumes {
 		volumes[v.Name] = v
 	}
-	sockets := volumes["plugin-sockets"].EmptyDir
+	sockets := volumes[sidecarSocketVolumeName("notify")].EmptyDir
 	if sockets == nil || sockets.Medium != corev1.StorageMediumMemory || sockets.SizeLimit == nil || sockets.SizeLimit.String() != "1Mi" {
-		t.Fatalf("sockets volume = %+v", volumes["plugin-sockets"])
+		t.Fatalf("sockets volume = %+v", volumes[sidecarSocketVolumeName("notify")])
 	}
-	keyVolume := volumes["gateway-key"].Secret
+	keyVolume := volumes[gatewayKeyVolumeName("notify")].Secret
 	if keyVolume == nil || keyVolume.SecretName != "mayfly-abc123" {
-		t.Fatalf("gateway key volume = %+v", volumes["gateway-key"])
+		t.Fatalf("gateway key volume = %+v", volumes[gatewayKeyVolumeName("notify")])
 	}
-	if len(keyVolume.Items) != 1 || keyVolume.Items[0].Key != GatewayKeySecretKey || keyVolume.Items[0].Path != GatewayKeySecretKey {
+	wantKey := GatewayKeySecretKeyFor("notify")
+	if len(keyVolume.Items) != 1 || keyVolume.Items[0].Key != wantKey || keyVolume.Items[0].Path != GatewayKeySecretKey {
 		t.Fatalf("gateway key items = %+v", keyVolume.Items)
 	}
 	if keyVolume.DefaultMode == nil || *keyVolume.DefaultMode != 0o400 {
@@ -707,7 +728,7 @@ func TestPodSidecarContainers(t *testing.T) {
 	for _, m := range pod.Spec.Containers[0].VolumeMounts {
 		agentMounts[m.Name] = m
 	}
-	if mount, ok := agentMounts["plugin-sockets"]; !ok || mount.ReadOnly {
+	if mount, ok := agentMounts[sidecarSocketVolumeName("notify")]; !ok || mount.ReadOnly || mount.MountPath != PluginSocketDir("notify") {
 		t.Fatalf("agent sockets mount = %+v", mount)
 	}
 	for _, container := range append([]corev1.Container{pod.Spec.Containers[0]}, pod.Spec.InitContainers...) {
@@ -715,8 +736,8 @@ func TestPodSidecarContainers(t *testing.T) {
 			continue
 		}
 		for _, m := range container.VolumeMounts {
-			if m.Name == "gateway-key" {
-				t.Fatalf("%s mounts the gateway key", container.Name)
+			if strings.HasPrefix(m.Name, "gateway-key-") || m.MountPath == GatewayKeyDir {
+				t.Fatalf("%s mounts a gateway key", container.Name)
 			}
 		}
 	}
@@ -731,6 +752,7 @@ func TestPodGatewayKeyOnlyInSidecars(t *testing.T) {
 		inlinePlugin("tickets", "example.com/tickets:1"),
 		sidecarPlugin("notify", "example.com/notify:1"),
 	}
+	withSidecarKeys(spec)
 	if err := spec.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -757,14 +779,17 @@ func TestPodGatewayKeyOnlyInSidecars(t *testing.T) {
 		t.Fatal("agent mounts missing")
 	}
 	for _, m := range agent.VolumeMounts {
-		if m.Name == "gateway-key" || m.MountPath == GatewayKeyDir {
-			t.Fatalf("agent mounts the gateway key")
+		if strings.HasPrefix(m.Name, "gateway-key-") || m.MountPath == GatewayKeyDir {
+			t.Fatalf("agent mounts a sidecar key")
 		}
 	}
 
 	secret := spec.Secret().Data
 	if len(secret[GatewayKeySecretKey]) != 32 {
 		t.Fatalf("session secret gateway key = %x", secret[GatewayKeySecretKey])
+	}
+	if len(secret[GatewayKeySecretKeyFor("notify")]) != 32 {
+		t.Fatalf("sidecar secret key = %x", secret[GatewayKeySecretKeyFor("notify")])
 	}
 	if string(secret["token"]) != "secret-token" {
 		t.Fatal("session token missing from secret")
@@ -782,9 +807,9 @@ func TestPodGatewayKeyOnlyInSidecars(t *testing.T) {
 			}
 		}
 		for _, m := range container.VolumeMounts {
-			if m.Name == "gateway-key" {
+			if strings.HasPrefix(m.Name, "gateway-key-") {
 				if container.Name != "plugin-notify" {
-					t.Fatalf("%s mounts the gateway key", container.Name)
+					t.Fatalf("%s mounts a sidecar key", container.Name)
 				}
 				sawGatewayMount = true
 			}
@@ -792,5 +817,101 @@ func TestPodGatewayKeyOnlyInSidecars(t *testing.T) {
 	}
 	if !sawGatewayMount {
 		t.Fatal("the sidecar does not mount the gateway key")
+	}
+}
+
+// TestSidecarsDoNotShareKeyOrSocket gives each sidecar its own signing key and
+// its own socket volume, so one plugin cannot sign a token its sibling accepts
+// or replace its sibling's socket.
+func TestSidecarsDoNotShareKeyOrSocket(t *testing.T) {
+	spec := sidecarSpec()
+	spec.Plugins = []sessioncfg.Plugin{
+		sidecarPlugin("alpha", "example.com/alpha:1"),
+		sidecarPlugin("beta", "example.com/beta:1"),
+	}
+	withSidecarKeys(spec)
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	pod := spec.Pod()
+
+	secret := spec.Secret().Data
+	alphaKey := secret[GatewayKeySecretKeyFor("alpha")]
+	betaKey := secret[GatewayKeySecretKeyFor("beta")]
+	if len(alphaKey) != 32 || len(betaKey) != 32 {
+		t.Fatalf("sidecar keys = %x / %x", alphaKey, betaKey)
+	}
+	if bytes.Equal(alphaKey, betaKey) {
+		t.Fatal("two sidecars share a signing key")
+	}
+	if !bytes.Equal(alphaKey, plugin.SidecarKey(spec.GatewayKey, "alpha")) {
+		t.Fatal("the secret does not hold the derived key")
+	}
+
+	volumes := map[string]corev1.Volume{}
+	for _, v := range pod.Spec.Volumes {
+		volumes[v.Name] = v
+	}
+	if _, shared := volumes["gateway-key"]; shared {
+		t.Fatal("a shared gateway key volume remains")
+	}
+	if _, shared := volumes["plugin-sockets"]; shared {
+		t.Fatal("a shared socket volume remains")
+	}
+	for name, item := range map[string]string{"alpha": GatewayKeySecretKeyFor("alpha"), "beta": GatewayKeySecretKeyFor("beta")} {
+		vol := volumes[gatewayKeyVolumeName(name)].Secret
+		if vol == nil || len(vol.Items) != 1 || vol.Items[0].Key != item || vol.Items[0].Path != GatewayKeySecretKey {
+			t.Fatalf("%s key volume = %+v", name, vol)
+		}
+	}
+
+	sidecars := map[string]corev1.Container{}
+	for _, c := range pod.Spec.InitContainers {
+		sidecars[c.Name] = c
+	}
+	seen := map[string]string{}
+	for _, name := range []string{"alpha", "beta"} {
+		c, ok := sidecars[plugin.ContainerName(name)]
+		if !ok {
+			t.Fatalf("sidecar %s missing", name)
+		}
+		var socket, key *corev1.VolumeMount
+		for i := range c.VolumeMounts {
+			switch c.VolumeMounts[i].Name {
+			case sidecarSocketVolumeName(name):
+				socket = &c.VolumeMounts[i]
+			case gatewayKeyVolumeName(name):
+				key = &c.VolumeMounts[i]
+			}
+		}
+		if socket == nil || socket.MountPath != PluginSocketDir(name) || socket.ReadOnly {
+			t.Fatalf("%s socket mount = %+v", name, socket)
+		}
+		if other, ok := seen[socket.Name]; ok {
+			t.Fatalf("%s and %s share socket volume %q", other, name, socket.Name)
+		}
+		seen[socket.Name] = name
+		if key == nil || key.MountPath != GatewayKeyDir || !key.ReadOnly {
+			t.Fatalf("%s key mount = %+v", name, key)
+		}
+	}
+
+	var agent corev1.Container
+	for _, c := range pod.Spec.Containers {
+		if c.Name == "agent" {
+			agent = c
+		}
+	}
+	agentMounts := map[string]corev1.VolumeMount{}
+	for _, m := range agent.VolumeMounts {
+		agentMounts[m.Name] = m
+	}
+	for name := range map[string]bool{"alpha": true, "beta": true} {
+		if mount, ok := agentMounts[sidecarSocketVolumeName(name)]; !ok || mount.MountPath != PluginSocketDir(name) {
+			t.Fatalf("agent %s socket mount = %+v", name, mount)
+		}
+		if _, ok := agentMounts[gatewayKeyVolumeName(name)]; ok {
+			t.Fatalf("agent mounts the %s key", name)
+		}
 	}
 }

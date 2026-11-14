@@ -61,7 +61,6 @@ func TestValidateRejectsBrokenConfig(t *testing.T) {
 		{"max steps", func(c *Config) { c.MaxSteps = 0 }, "max_steps"},
 		{"skill name", func(c *Config) { c.Skills = []Skill{{Body: "x"}} }, "empty name"},
 		{"stdio command", func(c *Config) { c.MCPServers = []MCPServer{{Name: "s", Transport: "stdio"}} }, "command"},
-		{"http url", func(c *Config) { c.MCPServers = []MCPServer{{Name: "s", Transport: "http"}} }, "url"},
 		{"transport", func(c *Config) { c.MCPServers = []MCPServer{{Name: "s", Transport: "grpc"}} }, "unsupported transport"},
 	}
 	for _, tc := range cases {
@@ -73,6 +72,16 @@ func TestValidateRejectsBrokenConfig(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestValidateAcceptsGatewayHTTPServer keeps an HTTP entry valid with no
+// endpoint: the gateway holds the endpoint and the call.
+func TestValidateAcceptsGatewayHTTPServer(t *testing.T) {
+	cfg := validConfig()
+	cfg.MCPServers = []MCPServer{{Name: "crm", Transport: "http"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("http entry: %v", err)
 	}
 }
 

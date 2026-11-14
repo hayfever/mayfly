@@ -14,7 +14,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -710,6 +709,7 @@ func (m *Manager) prepare(_ context.Context, inst *instance, podName, token stri
 		ToolsImage:          m.cfg.Runtime.Image,
 		PluginVolumeLimit:   m.cfg.Runtime.PluginVolumeLimit,
 		GatewayKey:          inst.sidecarKey,
+		SidecarKeys:         sidecarKeys(inst.sidecarKey, cfg.Plugins),
 	}
 	for _, e := range m.cfg.Runtime.Egress {
 		spec.Egress = append(spec.Egress, k8s.Egress{CIDR: e.CIDR, Ports: e.Ports})
@@ -879,7 +879,6 @@ func (m *Manager) resolveMCP(agent agents.Agent, requested []string) ([]sessionc
 	if len(names) == 0 && agent.MCPServers == nil {
 		names = m.defaultMCP
 	}
-	internal := strings.TrimRight(m.cfg.Server.InternalURL, "/")
 	out := make([]sessioncfg.MCPServer, 0, len(names))
 	seen := map[string]bool{}
 	for _, name := range names {
@@ -894,7 +893,10 @@ func (m *Manager) resolveMCP(agent agents.Agent, requested []string) ([]sessionc
 			return nil, nil, fmt.Errorf("mcp server %q is not available to agent %q", name, agent.Name)
 		}
 		seen[name] = true
-		server := sessioncfg.MCPServer{
+		// An HTTP entry carries its name and allowlist only: the gateway owns
+		// the endpoint and the call, and the runtime never starts a client for
+		// it. Keeping the name lets an adopted session rebuild the grant.
+		out = append(out, sessioncfg.MCPServer{
 			Name:               def.Name,
 			Transport:          def.Transport,
 			Command:            def.Command,
@@ -903,14 +905,7 @@ func (m *Manager) resolveMCP(agent agents.Agent, requested []string) ([]sessionc
 			InitTimeoutSeconds: int(def.InitTimeout.Std().Seconds()),
 			Tools:              append([]string(nil), def.Tools...),
 			IdempotentTools:    append([]string(nil), def.IdempotentTools...),
-		}
-		if def.Transport == "http" {
-			server.URL = internal + "/internal/v1/mcp/" + url.PathEscape(def.Name)
-			server.Command = ""
-			server.Args = nil
-			server.Env = nil
-		}
-		out = append(out, server)
+		})
 	}
 	return out, names, nil
 }
@@ -1001,7 +996,7 @@ func (m *Manager) resolvePlugin(manifest plugin.Manifest, local bool) (sessioncf
 		resolved.Image = manifest.Image
 		resolved.Command = manifest.Command
 		resolved.Args = append([]string(nil), manifest.Args...)
-		resolved.Socket = k8s.PluginSocketsDir + "/" + manifest.Name + ".sock"
+		resolved.Socket = k8s.PluginSocketPath(manifest.Name)
 		resolved.Secrets = pluginSecretList(manifest, true)
 		resolved.Sidecar = &sessioncfg.PluginSidecar{
 			Requests:  manifest.Sidecar.Resources.Requests,
@@ -1142,6 +1137,23 @@ func newSidecarKey(plugins []sessioncfg.Plugin) []byte {
 		return key
 	}
 	return nil
+}
+
+// sidecarKeys derives one signing key per sidecar plugin. The session key stays
+// in the Secret's gateway-key entry; each sidecar mounts only its own derived
+// item, so no plugin can sign a token its sibling accepts.
+func sidecarKeys(sessionKey []byte, plugins []sessioncfg.Plugin) map[string][]byte {
+	var out map[string][]byte
+	for _, p := range plugins {
+		if p.Placement != string(plugin.Sidecar) {
+			continue
+		}
+		if out == nil {
+			out = map[string][]byte{}
+		}
+		out[p.Name] = plugin.SidecarKey(sessionKey, p.Name)
+	}
+	return out
 }
 
 // registerGrant installs the session's tool grant. Create and adoption both

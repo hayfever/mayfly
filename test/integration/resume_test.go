@@ -82,8 +82,20 @@ func resumeAfterSignal(t *testing.T, sig syscall.Signal) {
 		t.Fatal(err)
 	}
 	// The runtime sends every granted tool through the gateway, so a session
-	// without one cannot call its tools.
-	toolGateway := gateway.New(gateway.Options{Ledger: journalStore, Logger: logger})
+	// without one cannot call its tools. The gateway discovers and calls an
+	// HTTP mcp.servers entry itself, so it needs the server's definition.
+	toolGateway := gateway.New(gateway.Options{
+		Ledger: journalStore,
+		Logger: logger,
+		MCPServer: func(name string) (config.MCPServerConfig, bool) {
+			for _, server := range cfg.MCP.Servers {
+				if server.Name == name {
+					return server, true
+				}
+			}
+			return config.MCPServerConfig{}, false
+		},
+	})
 	mgr.SetGateway(toolGateway)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

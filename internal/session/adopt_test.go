@@ -15,6 +15,7 @@ import (
 	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/k8s"
 	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/plugin"
 	"github.com/hayfever/mayfly/internal/runner"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
@@ -518,6 +519,7 @@ func TestAdoptKeepsGatewayKey(t *testing.T) {
 		Token:               "token",
 		ToolsImage:          "example/agent:1",
 		GatewayKey:          key,
+		SidecarKeys:         map[string][]byte{"notify": plugin.SidecarKey(key, "notify")},
 		TTL:                 time.Hour,
 	}
 	if err := spec.Validate(); err != nil {
@@ -583,7 +585,7 @@ func TestAdoptKeepsGatewayKey(t *testing.T) {
 		}
 		sidecar = true
 		for _, mount := range container.VolumeMounts {
-			if mount.Name == "gateway-key" && mount.ReadOnly && mount.MountPath == k8s.GatewayKeyDir {
+			if mount.Name == "gateway-key-notify" && mount.ReadOnly && mount.MountPath == k8s.GatewayKeyDir {
 				keyMounted = true
 			}
 		}
