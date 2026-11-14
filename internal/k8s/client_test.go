@@ -227,7 +227,17 @@ func TestGCIgnoresPluginObjects(t *testing.T) {
 		return out
 	}
 	object := "mayfly-plugin-tickets"
-	if _, err := client.EnsurePluginObjects(ctx, PluginObjects{
+	key, err := client.EnsurePluginSecret(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: object, Namespace: "mayfly", Labels: removeHash(labels)},
+		Data:       map[string][]byte{"key": []byte("0123456789abcdef0123456789abcdef")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(key) != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("gateway key = %q", key)
+	}
+	if err := client.ApplyPluginObjects(ctx, PluginObjects{
 		Deployment: &appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{Name: object, Namespace: "mayfly", Labels: removeHash(labels), Annotations: map[string]string{AnnotationSpecHash: "hash"}},
 		},
@@ -236,10 +246,6 @@ func TestGCIgnoresPluginObjects(t *testing.T) {
 		},
 		NetworkPolicy: &networkingv1.NetworkPolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: object, Namespace: "mayfly", Labels: removeHash(labels), Annotations: map[string]string{AnnotationSpecHash: "hash"}},
-		},
-		Secret: &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: object, Namespace: "mayfly", Labels: removeHash(labels)},
-			Data:       map[string][]byte{"key": []byte("0123456789abcdef0123456789abcdef")},
 		},
 	}); err != nil {
 		t.Fatal(err)
