@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"strings"
 	"sync"
@@ -60,6 +61,11 @@ type cluster struct {
 	slackSecret   string
 	agentImage    string
 
+	// pluginImage and missingImage are the fixture plugin images of the
+	// plugin tests; see resolvePluginImages.
+	pluginImage  string
+	missingImage string
+
 	http *http.Client
 
 	mu   sync.Mutex
@@ -72,6 +78,68 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// resolvePluginImages finds the fixture plugin images. hack/e2e.sh builds them,
+// loads them into the cluster, and passes their names, which works on any
+// cluster. Without those variables the suite builds and imports them into the
+// k3d cluster itself, so running the package directly still works.
+func (c *cluster) resolvePluginImages() error {
+	c.pluginImage = getenv("MAYFLY_E2E_PLUGIN_IMAGE", "")
+	c.missingImage = getenv("MAYFLY_E2E_PLUGIN_MISSING_IMAGE", "")
+	if c.pluginImage != "" {
+		if c.missingImage == "" {
+			return errors.New("MAYFLY_E2E_PLUGIN_MISSING_IMAGE is required with MAYFLY_E2E_PLUGIN_IMAGE")
+		}
+		return nil
+	}
+	context := c.contextName()
+	clusterName := strings.TrimPrefix(context, "k3d-")
+	if clusterName == context {
+		return fmt.Errorf("MAYFLY_E2E_PLUGIN_IMAGE is required against context %q; hack/e2e.sh sets it", context)
+	}
+	c.pluginImage = "mayfly-e2e-plugin:e2e"
+	c.missingImage = "mayfly-e2e-plugin-missing:e2e"
+	for _, image := range []struct{ stage, name string }{
+		{"plugin", c.pluginImage},
+		{"missing", c.missingImage},
+	} {
+		cmd := exec.Command("docker", "build", "--target", image.stage, "-t", image.name, "plugins")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("build plugin image %s: %w: %s", image.name, err, strings.TrimSpace(string(out)))
+		}
+	}
+	args := append([]string{"image", "import", "--cluster", clusterName}, c.pluginImage, c.missingImage)
+	if out, err := exec.Command("k3d", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("import plugin images into k3d: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// contextName is the kubectl context the suite drives.
+func (c *cluster) contextName() string {
+	if c.kubeContext != "" {
+		return c.kubeContext
+	}
+	out, err := exec.Command("kubectl", "config", "current-context").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// imageAllowed applies agents.allowed_images as the control plane does: an
+// empty list allows every image, otherwise one path.Match pattern must match.
+func imageAllowed(image string, patterns []string) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+	for _, pattern := range patterns {
+		if ok, err := path.Match(pattern, image); err == nil && ok {
+			return true
+		}
+	}
+	return false
 }
 
 func connect() (*cluster, error) {
@@ -104,6 +172,9 @@ func connect() (*cluster, error) {
 		Runtime struct {
 			Image string `yaml:"image"`
 		} `yaml:"runtime"`
+		Agents struct {
+			AllowedImages []string `yaml:"allowed_images"`
+		} `yaml:"agents"`
 	}
 	if err := yaml.Unmarshal([]byte(raw), &cfg); err != nil {
 		return nil, fmt.Errorf("parse release config: %w", err)
@@ -111,6 +182,14 @@ func connect() (*cluster, error) {
 	c.agentImage = cfg.Runtime.Image
 	if c.agentImage == "" {
 		return nil, errors.New("release config has no runtime.image")
+	}
+	if err := c.resolvePluginImages(); err != nil {
+		return nil, err
+	}
+	for _, image := range []string{c.pluginImage, c.missingImage} {
+		if !imageAllowed(image, cfg.Agents.AllowedImages) {
+			return nil, fmt.Errorf("plugin image %q is not in agents.allowed_images %v", image, cfg.Agents.AllowedImages)
+		}
 	}
 
 	if c.fixedURL != "" {
@@ -372,9 +451,11 @@ func (c *cluster) restartDeployment(t *testing.T, force bool) {
 }
 
 // sessionObjects lists the Kubernetes objects Mayfly created for a session,
-// or for every session when id is empty.
+// or for every session when id is empty. Service plugin objects carry
+// mayfly.io/managed=true too, so the session app label keeps them out of the
+// leak check: they outlive every session by design.
 func (c *cluster) sessionObjects(id string) ([]string, error) {
-	selector := "mayfly.io/managed=true"
+	selector := "mayfly.io/managed=true,app.kubernetes.io/name=mayfly-agent"
 	if id != "" {
 		selector = "mayfly.io/session=" + id
 	}

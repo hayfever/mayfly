@@ -1,0 +1,2 @@
+This image deliberately has no /mayfly-plugin directory. The e2e suite uses
+it to prove that an inline plugin image without one fails the session at start.

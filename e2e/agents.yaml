@@ -21,3 +21,23 @@ agents:
     systemPrompt: This agent never runs.
     runtime:
       image: mayfly-e2e.invalid/missing:never
+  - name: plugins-inline
+    description: Runs the inline plugin fixture (e2e/plugins/inline.plugin.yaml).
+    systemPrompt: Call the plugin tool named in the task.
+    plugins: [inline]
+    maxSteps: 8
+  - name: plugins-sidecar
+    description: Runs the sidecar plugin fixture (e2e/plugins/sidecar.plugin.yaml).
+    systemPrompt: Call the plugin tools named in the task.
+    plugins: [sidecar]
+    maxSteps: 8
+  - name: plugins-service
+    description: Runs the service plugin fixture (e2e/plugins/counter.plugin.yaml).
+    systemPrompt: Call the plugin tool named in the task.
+    plugins: [counter]
+    maxSteps: 8
+  - name: plugins-missing
+    description: Runs the plugin image without /mayfly-plugin, so the session fails.
+    systemPrompt: This session never starts.
+    plugins: [missing]
+    maxSteps: 8

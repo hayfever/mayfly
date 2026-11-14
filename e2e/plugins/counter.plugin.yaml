@@ -1,0 +1,30 @@
+schemaVersion: 1
+name: counter
+version: 0.1.0
+description: Deterministic service plugin with per-session state shared by every session.
+placement: service
+image: PLUGIN_IMAGE
+command: node
+args: [server.js]
+env:
+  E2E_MODE: service
+  E2E_TOOLS: state,env
+tools:
+  - name: state
+    idempotent: true
+  - name: env
+    idempotent: true
+service:
+  replicas: 1
+  concurrency: 4
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {memory: 128Mi}
+  # The first rule is the egress control: the fixture dials llmstub on 9099.
+  # The second allows 9100 from a CIDR no cluster pod uses, so a probe to
+  # mcpstub on that port must fail on the CIDR match and not on the port.
+  egress:
+    - cidr: 0.0.0.0/0
+      ports: [9099]
+    - cidr: 203.0.113.0/24
+      ports: [9100]
