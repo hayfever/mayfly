@@ -1,0 +1,14 @@
+# k3d (k3s in Docker) cluster for the e2e suite. k3s ships a kube-router
+# NetworkPolicy controller on top of flannel, so NetworkPolicy is enforced
+# without installing a second CNI. The image is pinned so a k3s release cannot
+# change the cluster under the suite; k3d v5.9.0 defaults to this tag.
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: mayfly-e2e
+servers: 1
+agents: 0
+image: rancher/k3s:v1.35.5-k3s1
+kubeAPI:
+  host: "127.0.0.1"
+  hostIP: "127.0.0.1"

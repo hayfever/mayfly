@@ -3,9 +3,9 @@
 #
 #   hack/e2e.sh [all|up|test|down]     (default: all = up, test, down)
 #
-# By default it creates a kind cluster with Calico, builds and loads local
-# images, and installs the local Helm chart. Set E2E_KUBECONTEXT to run against
-# an existing cluster instead; images are then pushed to E2E_REGISTRY.
+# By default it creates a k3d cluster, builds and imports local images, and
+# installs the local Helm chart. Set E2E_KUBECONTEXT to run against an existing
+# cluster instead; images are then pushed to E2E_REGISTRY.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -14,11 +14,10 @@ CLUSTER="${E2E_CLUSTER:-mayfly-e2e}"
 NAMESPACE="${E2E_NAMESPACE:-mayfly-e2e}"
 RELEASE="${E2E_RELEASE:-mayfly}"
 QUEUE="${E2E_QUEUE:-bbolt}"                 # bbolt or redis
-CALICO_VERSION="${E2E_CALICO_VERSION:-v3.33.0}"
 KEEP="${E2E_KEEP:-0}"                       # 1 keeps the cluster after "all"
 ARTIFACTS="${E2E_ARTIFACTS:-$ROOT/.e2e}"    # logs and diagnostics
 GO_TEST_FLAGS="${E2E_GO_TEST_FLAGS:-}"      # e.g. -run TestNetworkIsolation
-SKIP_BUILD="${E2E_SKIP_BUILD:-0}"           # 1: images are already built (kind) or pushed (E2E_REGISTRY)
+SKIP_BUILD="${E2E_SKIP_BUILD:-0}"           # 1: images are already built (k3d) or pushed (E2E_REGISTRY)
 VERSION="${VERSION:-0.1.0}"
 COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo none)"
 
@@ -29,8 +28,8 @@ if [[ -n "${E2E_KUBECONTEXT:-}" ]]; then
   TAG="${E2E_TAG:-e2e-$COMMIT}"
   PREFIX="$REGISTRY/"
 else
-  MODE=kind
-  CONTEXT="kind-$CLUSTER"
+  MODE=k3d
+  CONTEXT="k3d-$CLUSTER"
   TAG="${E2E_TAG:-e2e}"
   PREFIX=""
 fi
@@ -59,22 +58,23 @@ build_images() {
   docker build "${args[@]}" --target mcpstub -t "$IMG_MCPSTUB" .
 }
 
-create_kind() {
-  if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
-    log "reusing kind cluster $CLUSTER"
+create_cluster() {
+  if k3d cluster list 2>/dev/null | awk 'NR > 1 { print $1 }' | grep -qx "$CLUSTER"; then
+    log "reusing k3d cluster $CLUSTER"
+    # A reused cluster can be missing from this kubeconfig (another
+    # KUBECONFIG, a deleted context); merge it back without touching the
+    # user's current context.
+    if ! kubectl config get-contexts -o name 2>/dev/null | grep -qx "$CONTEXT"; then
+      k3d kubeconfig merge "$CLUSTER" -d --kubeconfig-switch-context=false
+    fi
   else
-    log "creating kind cluster $CLUSTER"
-    kind create cluster --name "$CLUSTER" --config e2e/kind.yaml --wait 0s
+    log "creating k3d cluster $CLUSTER"
+    k3d cluster create "$CLUSTER" --config e2e/k3d.yaml --wait --kubeconfig-switch-context=false
   fi
-  log "installing Calico $CALICO_VERSION (enforces NetworkPolicy)"
-  k apply --server-side --force-conflicts \
-    -f "https://raw.githubusercontent.com/projectcalico/calico/$CALICO_VERSION/manifests/calico.yaml" >/dev/null
-  k -n kube-system rollout status daemonset/calico-node --timeout=300s
-  k -n kube-system rollout status deployment/calico-kube-controllers --timeout=300s
-  k -n kube-system rollout status deployment/coredns --timeout=300s
+  log "waiting for nodes"
   k wait --for=condition=Ready nodes --all --timeout=300s
-  log "loading images into kind"
-  kind load docker-image --name "$CLUSTER" "$IMG_MAYFLYD" "$IMG_AGENT" "$IMG_LLMSTUB" "$IMG_MCPSTUB"
+  log "importing images into k3d"
+  k3d image import --cluster "$CLUSTER" "$IMG_MAYFLYD" "$IMG_AGENT" "$IMG_LLMSTUB" "$IMG_MCPSTUB"
 }
 
 push_images() {
@@ -126,9 +126,9 @@ up() {
     need docker
     build_images
   fi
-  if [[ "$MODE" == kind ]]; then
-    need kind docker
-    create_kind
+  if [[ "$MODE" == k3d ]]; then
+    need k3d docker
+    create_cluster
   elif [[ "$SKIP_BUILD" != 1 ]]; then
     push_images
   fi
@@ -160,9 +160,9 @@ run_tests() {
 }
 
 down() {
-  if [[ "$MODE" == kind ]]; then
-    log "deleting kind cluster $CLUSTER"
-    kind delete cluster --name "$CLUSTER"
+  if [[ "$MODE" == k3d ]]; then
+    log "deleting k3d cluster $CLUSTER"
+    k3d cluster delete "$CLUSTER"
   else
     log "removing $RELEASE and $NAMESPACE from $CONTEXT"
     helm --kube-context "$CONTEXT" uninstall "$RELEASE" -n "$NAMESPACE" --wait || true

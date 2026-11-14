@@ -2,7 +2,7 @@
 
 ## Development
 
-Requirements: Go 1.26+, Docker, kind, kubectl, Helm, jq, and openssl for the full test path.
+Requirements: Go 1.26+, Docker, k3d, kubectl, Helm, jq, and openssl. The quickstart cluster and the end-to-end suite both run on k3d.
 
 ```bash
 make build
@@ -10,7 +10,7 @@ make test
 make run-local
 ```
 
-`make run-local` starts the control plane and deterministic LLM and MCP stubs. The token is `dev-token` unless `MAYFLY_API_TOKEN` is set. Port 8080 conflicts with the kind port mapping; stop kind or change the local config.
+`make run-local` starts the control plane and deterministic LLM and MCP stubs. The token is `dev-token` unless `MAYFLY_API_TOKEN` is set. Port 8080 conflicts with the quickstart cluster's port mapping; stop the cluster or change the local config.
 
 Full cluster test:
 

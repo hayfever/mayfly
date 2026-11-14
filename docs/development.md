@@ -3,8 +3,8 @@
 ## Requirements
 
 - Go 1.26+
-- Docker for images and kind
-- kind, kubectl, Helm, openssl for the end-to-end suite
+- Docker for images
+- k3d, kubectl, Helm, openssl for the quickstart cluster and the end-to-end suite
 - Node is not required on the host; stdio MCP servers run inside the agent image
 
 ## Commands
@@ -15,9 +15,9 @@ make test      # unit and integration tests
 make vet
 make image     # four Docker targets
 make run-local # control plane + stubs, token dev-token
-make kind-up   # kind cluster, images, manifests
-make e2e       # end-to-end suite on kind with Calico (docs/testing.md)
-make kind-down
+make cluster-up   # k3d cluster, images, manifests
+make e2e       # end-to-end suite on k3d (docs/testing.md)
+make cluster-down
 ```
 
 ## Test layers

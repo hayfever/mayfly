@@ -22,8 +22,8 @@ First public release.
 - LiteLLM gateway configuration and deployment examples for OpenAI, Anthropic, Bedrock, OpenRouter, and internal backends.
 - Helm chart with optional LiteLLM, ingress, inline skills and agent manifests, image digests, and LiteLLM IRSA support.
 - Versioned CLI, control-plane, and agent builds with commit and date metadata.
-- End-to-end suite on kind with Calico (`make e2e`, bbolt and Redis in CI): signed webhooks for every trigger type, dedupe, rate limits, queue durability across a control plane restart, dead letters, enforced network isolation, MCP, WebSocket attach, close, artifacts, TTL expiry, and cleanup. It also runs against an existing cluster.
-- CI and release workflows: tests, Helm lint, kind e2e, multi-arch GHCR images, SBOMs, provenance, CLI archives, and OCI chart publishing.
+- End-to-end suite on k3d (`make e2e`, bbolt and Redis in CI). k3s ships a kube-router controller that enforces NetworkPolicy on flannel, so no second CNI is installed: signed webhooks for every trigger type, dedupe, rate limits, queue durability across a control plane restart, dead letters, enforced network isolation, MCP, WebSocket attach, close, artifacts, TTL expiry, and cleanup. It also runs against an existing cluster.
+- CI and release workflows: tests, Helm lint, k3d e2e, multi-arch GHCR images, SBOMs, provenance, CLI archives, and OCI chart publishing.
 - Session cap (`sessions.max_concurrent`) and per-trigger webhook rate limits; both answer `429` with `Retry-After`.
 - `sessions.retention` expires finished sessions from memory and releases their thread state.
 - `/readyz` reports lifecycle state instead of always returning ready.
@@ -108,4 +108,4 @@ First public release.
 
 - Sessions receive one scoped token that expires with the session.
 - LLM and MCP credentials are injected by the control plane.
-- The default NetworkPolicy requires a CNI that enforces it. The kind e2e test verifies enforcement.
+- The default NetworkPolicy requires a CNI that enforces it. The e2e suite verifies enforcement.

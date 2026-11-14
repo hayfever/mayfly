@@ -1,20 +1,20 @@
 # Deployment
 
-## kind (included)
+## k3d (included)
 
-Requirements: Docker, kind, kubectl, jq, openssl, Go 1.26+.
+Requirements: Docker, k3d, kubectl, jq, openssl, Go 1.26+.
 
 ```bash
-./hack/kind-up.sh
+./hack/k3d-up.sh
 ```
 
 The script:
 
 1. Builds `mayflyd:dev`, `mayfly-agent:dev`, `mayfly-llmstub:dev`, `mayfly-mcpstub:dev`.
-2. Creates the `mayfly` kind cluster from [deploy/kind.yaml](../deploy/kind.yaml) if absent. The cluster maps host port 8080 to NodePort 30080.
-3. Loads the images into the node.
+2. Creates the `mayfly` k3d cluster from [deploy/k3d.yaml](../deploy/k3d.yaml) if absent. k3s enforces NetworkPolicy; the cluster publishes NodePort 30080 as host port 8080.
+3. Imports the images into the k3d node.
 4. Creates the `mayfly` namespace and the `mayfly-secrets` Secret with an admin token and webhook secret.
-5. Applies the kind overlay and waits for rollouts.
+5. Applies the local overlay and waits for rollouts.
 
 The overlay includes deterministic LLM and MCP stubs and an example agent manifest. Remove the stubs and point `llm.base_url` at a real provider for normal use.
 
@@ -22,12 +22,14 @@ Agent manifests are mounted from the `mayfly-agents` ConfigMap at `/etc/mayfly-a
 
 To add a harness, build it into the agent image at `/opt/mayfly/harnesses/<name>` and declare `harness: <name>` in the manifest. The image entrypoint is `/usr/local/bin/mayfly-harness`; it falls back to `/usr/local/bin/mayfly-agent` when no harness is selected. No per-agent image is required.
 
-The base overlay does not enable agent directories by default. Add them when you mount manifests. The kind overlay enables `/etc/mayfly-agents` and includes one example agent.
+The base overlay does not enable agent directories by default. Add them when you mount manifests. The local overlay enables `/etc/mayfly-agents` and includes one example agent.
+
+The k3d config publishes the API on `127.0.0.1:8080` only. The local overlay turns on `allow_shell` and unsigned webhooks, so do not bind it to other interfaces.
 
 Delete the cluster:
 
 ```bash
-make kind-down
+make cluster-down
 ```
 
 To check a cluster before relying on it, run the end-to-end suite against it. It installs into its own namespace and removes itself afterwards. See [testing.md](testing.md#against-a-real-cluster).
@@ -82,7 +84,7 @@ docker push registry.example.com/mayfly-agent:v0.1.0
 Kustomize builds must allow skill files outside the overlay directory:
 
 ```bash
-kubectl kustomize --load-restrictor=LoadRestrictionsNone deploy/k8s/overlays/kind | kubectl apply -f -
+kubectl kustomize --load-restrictor=LoadRestrictionsNone deploy/k8s/overlays/local | kubectl apply -f -
 ```
 
 For a real cluster, create your own overlay with your images, config, and skills. Keep `--load-restrictor=LoadRestrictionsNone` if skills live outside the overlay.

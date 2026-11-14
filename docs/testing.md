@@ -13,7 +13,7 @@ Mayfly has three test layers. The first two run in seconds without a cluster; th
 `make e2e` runs [hack/e2e.sh](../hack/e2e.sh), which:
 
 1. builds the four images from the working tree,
-2. creates a kind cluster (`mayfly-e2e`) with Calico instead of kind's default CNI, so NetworkPolicy is enforced,
+2. creates a k3d cluster (`mayfly-e2e`) on k3s, whose built-in kube-router controller enforces NetworkPolicy,
 3. loads the images, deploys the deterministic LLM and MCP stubs, and installs the local chart with [e2e/values.yaml](../e2e/values.yaml),
 4. runs the Go tests in [e2e/](../e2e) (build tag `e2e`) against the release over a port-forward,
 5. deletes the cluster.
@@ -62,17 +62,17 @@ make e2e-down
 
 `make e2e-up` rebuilds the images and restarts the control plane, so code changes are picked up. Logs and, on failure, cluster diagnostics go to `.e2e/` (`E2E_ARTIFACTS` to change).
 
-Requirements: Docker, kind, kubectl, Helm 3, Go, and openssl. The kind cluster uses about 3 GB of memory.
+Requirements: Docker, k3d, kubectl, Helm 3, Go, and openssl. The k3d cluster uses about 3 GB of memory.
 
 ### Against a real cluster
 
-Set `E2E_KUBECONTEXT` to skip kind. The script pushes the images to `E2E_REGISTRY`, deploys the stubs and the chart into the `mayfly-e2e` namespace, runs the same suite, then removes the release, the namespace, and the cluster-scoped admission policy it added.
+Set `E2E_KUBECONTEXT` to skip k3d. The script pushes the images to `E2E_REGISTRY`, deploys the stubs and the chart into the `mayfly-e2e` namespace, runs the same suite, then removes the release, the namespace, and the cluster-scoped admission policy it added.
 
 ```bash
 E2E_KUBECONTEXT=my-cluster E2E_REGISTRY=ghcr.io/hayfever/e2e make e2e
 ```
 
-The cluster needs Kubernetes 1.30+ (for `ValidatingAdmissionPolicy`), a CNI that enforces NetworkPolicy (Calico or Cilium), and a default StorageClass. The registry must be pullable by the cluster. The suite reaches the control plane through `kubectl port-forward`; set `MAYFLY_E2E_URL` to use an ingress instead. To build and push the images on another machine, set the same `E2E_REGISTRY` and `E2E_TAG` there and run `E2E_SKIP_BUILD=1` where the tests run.
+The cluster needs Kubernetes 1.30+ (for `ValidatingAdmissionPolicy`), a CNI that enforces NetworkPolicy, and a default StorageClass. The isolation test fails on a CNI that accepts the policy but ignores it. The registry must be pullable by the cluster. The suite reaches the control plane through `kubectl port-forward`; set `MAYFLY_E2E_URL` to use an ingress instead. To build and push the images on another machine, set the same `E2E_REGISTRY` and `E2E_TAG` there and run `E2E_SKIP_BUILD=1` where the tests run.
 
 #### Civo
 
@@ -92,4 +92,4 @@ E2E_KUBECONTEXT=mayfly E2E_REGISTRY=ttl.sh/mayfly-e2e-$(openssl rand -hex 8) E2E
 
 ### CI
 
-[.github/workflows/e2e.yml](../.github/workflows/e2e.yml) runs `make e2e` on kind for pushes to `main`, pull requests, and manual dispatch, once per queue backend (bbolt and Redis). Diagnostics are uploaded when it fails.
+[.github/workflows/e2e.yml](../.github/workflows/e2e.yml) runs `make e2e` on k3d for pushes to `main`, pull requests, and manual dispatch, once per queue backend (bbolt and Redis). Diagnostics are uploaded when it fails.

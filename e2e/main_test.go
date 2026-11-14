@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -65,7 +64,7 @@ type cluster struct {
 
 	mu   sync.Mutex
 	base string
-	pf   *exec.Cmd
+	pf   func()
 }
 
 func getenv(key, fallback string) string {
@@ -168,6 +167,19 @@ func (c *cluster) kubectl(args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
+// kubectlStdin runs kubectl against the release namespace with input on stdin.
+func (c *cluster) kubectlStdin(input string, args ...string) (string, error) {
+	cmd := exec.Command("kubectl", c.kubectlArgs(args...)...)
+	cmd.Stdin = strings.NewReader(input)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.String(), fmt.Errorf("kubectl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
+}
+
 // execIn runs a command in a pod and returns its exit code and combined output.
 // A failure to reach the pod at all fails the test; a non-zero exit does not.
 func (c *cluster) execIn(t *testing.T, pod string, command ...string) (int, string) {
@@ -193,37 +205,84 @@ var forwardingRE = regexp.MustCompile(`Forwarding from 127\.0\.0\.1:(\d+)`)
 // startPortForward forwards a random local port to the control plane Service.
 // It must be restarted whenever the control plane pod is replaced.
 func (c *cluster) startPortForward() error {
-	cmd := exec.Command("kubectl", c.kubectlArgs("port-forward", "svc/"+c.service, ":8080")...)
-	stdout, err := cmd.StdoutPipe()
+	base, stop, err := c.forward("svc/"+c.service, 8080, 60*time.Second)
 	if err != nil {
 		return err
 	}
-	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start port-forward: %w", err)
+	c.mu.Lock()
+	c.base = base
+	c.pf = stop
+	c.mu.Unlock()
+	return nil
+}
+
+// forward retries kubectl until it reports a local port or the deadline
+// passes. kubectl resolves the Service to a ready pod once, at startup, and
+// exits when it finds none, so a replacement control plane whose endpoint is
+// not published yet is retried instead of failing the test.
+func (c *cluster) forward(target string, remotePort int, deadline time.Duration) (string, func(), error) {
+	var last error
+	for end := time.Now().Add(deadline); ; {
+		base, stop, err := c.forwardOnce(target, remotePort)
+		if err == nil {
+			return base, stop, nil
+		}
+		last = err
+		if time.Now().After(end) {
+			return "", nil, last
+		}
+		time.Sleep(2 * time.Second)
 	}
+}
+
+// forwardOnce starts one kubectl port-forward and waits for the local port it
+// reports, or for kubectl to exit.
+func (c *cluster) forwardOnce(target string, remotePort int) (string, func(), error) {
+	cmd := exec.Command("kubectl", c.kubectlArgs("port-forward", target, fmt.Sprintf(":%d", remotePort))...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", nil, err
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return "", nil, fmt.Errorf("start port-forward to %s: %w", target, err)
+	}
+	stop := func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}
+	// Keep reading after the port is reported: kubectl blocks once its stdout
+	// pipe fills, so abandoning the stream could stall the forward later.
 	found := make(chan string, 1)
 	go func() {
 		scanner := bufio.NewScanner(stdout)
-		sent := false
+		reported := false
 		for scanner.Scan() {
-			if m := forwardingRE.FindStringSubmatch(scanner.Text()); m != nil && !sent {
-				found <- m[1]
-				sent = true
+			if reported {
+				continue
 			}
+			if m := forwardingRE.FindStringSubmatch(scanner.Text()); m != nil {
+				reported = true
+				found <- m[1]
+			}
+		}
+		if !reported {
+			close(found)
 		}
 	}()
 	select {
-	case port := <-found:
-		c.mu.Lock()
-		c.base = "http://127.0.0.1:" + port
-		c.pf = cmd
-		c.mu.Unlock()
-		return nil
-	case <-time.After(30 * time.Second):
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return errors.New("port-forward to the control plane did not start within 30s")
+	case port, ok := <-found:
+		if !ok {
+			stop()
+			return "", nil, fmt.Errorf("port-forward to %s exited: %s", target, strings.TrimSpace(stderr.String()))
+		}
+		return "http://127.0.0.1:" + port, stop, nil
+	case <-time.After(15 * time.Second):
+		stop()
+		return "", nil, fmt.Errorf("port-forward to %s did not start within 15s", target)
 	}
 }
 
@@ -232,9 +291,8 @@ func (c *cluster) stopPortForward() {
 	pf := c.pf
 	c.pf = nil
 	c.mu.Unlock()
-	if pf != nil && pf.Process != nil {
-		_ = pf.Process.Kill()
-		_ = pf.Wait()
+	if pf != nil {
+		pf()
 	}
 }
 
@@ -349,40 +407,11 @@ func (c *cluster) waitNoSessionObjects(timeout time.Duration) error {
 // stubs, which are not exposed through the control plane.
 func (c *cluster) forwardService(t *testing.T, service string, remotePort int) (string, func()) {
 	t.Helper()
-	cmd := exec.Command("kubectl", c.kubectlArgs("port-forward", "svc/"+service, fmt.Sprintf(":%d", remotePort))...)
-	stdout, err := cmd.StdoutPipe()
+	base, stop, err := c.forward("svc/"+service, remotePort, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start port-forward to %s: %v", service, err)
-	}
-	found := make(chan string, 1)
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		sent := false
-		for scanner.Scan() {
-			if m := forwardingRE.FindStringSubmatch(scanner.Text()); m != nil && !sent {
-				found <- m[1]
-				sent = true
-			}
-		}
-	}()
-	select {
-	case port := <-found:
-		return "http://127.0.0.1:" + port, func() {
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-				_ = cmd.Wait()
-			}
-		}
-	case <-time.After(30 * time.Second):
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		t.Fatalf("port-forward to %s did not start within 30s", service)
-		return "", nil
-	}
+	return base, stop
 }
 
 // podNames lists the pods currently labeled for a session.
