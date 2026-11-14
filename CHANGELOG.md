@@ -51,9 +51,15 @@ First public release.
 - Declarative `http.json` sources: templated requests, pagination, fanout over a parent document's URL fields, JSON path projection with wildcards and aliases, field filters, provider change tracking with diff truncation, retries, and item limits. Provider knowledge is bundle configuration, not Go code.
 - `requiredEnv` on a connection or source: a missing credential stops startup and names the definition instead of reaching the provider as an empty header.
 - Project bundles: one file can hold agents, schedules, connections, and sources. `shared` and `agent:<name>` scopes, and an RFC 7386 `extends` merge with no silent duplicate names.
+- Schedules: a five-field UTC cron expression on an agent manifest, `triggerOn` for `changed` and `new`, a per-schedule TTL, and a prompt template over the run totals, changed documents, and errors.
+- One run artifact per scheduled run at `runs/<schedule>/<run id>.json`, readable by the session through the artifact tool, with every document and its stored diff (already cut to `maxLines` and `maxLineChars`). The prompt receives at most 8 KiB per diff and 32 KiB of changes, plus a fixed untrusted-content notice.
+- Cron slot dedupe through a delivery key, a bbolt watermark at `sources.state_path`, and a single-slot catch-up within seven days.
+- `sources` configuration block: `state_path`, `max_artifact_bytes`, `concurrency`, `timeout` (one source step, default 15m), and `job_timeout` (one schedule job, default 30m).
+- A retried schedule job reuses its run artifact instead of fetching again, and `CreateOptions.IdempotencyKey` keeps a retry from starting a second session.
 - Template `env` allowlist: a template reads only variables declared in `requiredEnv` or `optionalEnv` on its connection, source, or schedule. `MAYFLY_*` and control-plane secrets are never readable.
 - `allowPrivate` on a connection. `allowHTTP` no longer turns off the private-address guard, and NAT64 prefixes are blocked.
 - An optional `mayfly-bundles` ConfigMap mounted at `/etc/mayfly-bundles` for operator-owned bundles that a redeploy does not replace.
+- `GET /api/v1/schedules` and `POST /api/v1/schedules/{name}/run`. A queued run is polled with `GET /api/v1/queue/jobs/{id}`.
 - `mayflyd -check` loads the config and project bundle, prints the resolved agents, schedules, and source plans, and exits without starting servers.
 - Kubernetes and Helm options for the project bundle and the `mayfly-sources` provider secret.
 
@@ -94,9 +100,11 @@ First public release.
 - `runtime.env` and agent `runtime.env` cannot set `MAYFLY_CONFIG` or `MAYFLY_SESSION_TOKEN`; startup fails and the pod builder drops them.
 - GitHub triggers no longer accept the static `X-Mayfly-Token` header, which could be replayed.
 - `mayflyd -check` now builds the session manager as startup does, so a missing model, a model outside `llm.allow_models`, or an unknown MCP server fails the check instead of the first run.
+- Adopted sessions keep their agent, artifacts, and idempotency key after a control-plane restart.
 - `read_artifact` checks the declared SHA-256 and never splits a UTF-8 character at a window edge.
 - The `local` runtime starts the agent with a minimal environment instead of mayflyd's.
 - Fanout dedupes identical requests, fails fast on `401` and `403`, and drops filtered-out responses. `maxItems` counts items after `filter`. A `removed` page without a diff counts as changed. `sources.timeout` is enforced.
+- A scheduled slot comes from the cron time, not the wake time, so a late tick keeps the same delivery key.
 - A private definition can no longer extend another agent's private definition.
 
 ### Known limitations

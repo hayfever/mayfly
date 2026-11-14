@@ -342,3 +342,37 @@ func TestCreateMarksResumable(t *testing.T) {
 		t.Fatalf("max_restarts 0 Resumable = true, want false")
 	}
 }
+
+// TestCreateIsIdempotentPerKey checks a repeated Create with the same key
+// returns the first session, even when the session cap is full, and that a
+// different key or no key starts a new one.
+func TestCreateIsIdempotentPerKey(t *testing.T) {
+	ctx := context.Background()
+	m := testManager(t)
+	m.runner = nopRunner{}
+	if err := m.loadAgents(); err != nil {
+		t.Fatal(err)
+	}
+	m.cfg.Sessions.MaxConcurrent = 1
+
+	first, err := m.Create(ctx, CreateOptions{Prompt: "hello", IdempotencyKey: "job-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := m.Create(ctx, CreateOptions{Prompt: "hello again", IdempotencyKey: "job-1"})
+	if err != nil {
+		t.Fatalf("repeated create: %v", err)
+	}
+	if again.ID != first.ID {
+		t.Fatalf("repeated create started %q, want %q", again.ID, first.ID)
+	}
+	if n := len(m.List()); n != 1 {
+		t.Fatalf("sessions = %d, want 1", n)
+	}
+	if inst, _ := m.instance(first.ID); inst.runtimeCfg.IdempotencyKey != "job-1" {
+		t.Fatalf("runtime config key = %q", inst.runtimeCfg.IdempotencyKey)
+	}
+	if _, err := m.Create(ctx, CreateOptions{Prompt: "other", IdempotencyKey: "job-2"}); !errors.Is(err, ErrCapacity) {
+		t.Fatalf("new key at capacity err = %v, want ErrCapacity", err)
+	}
+}

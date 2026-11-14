@@ -212,3 +212,100 @@ func TestShutdownWaitsForCleanup(t *testing.T) {
 		t.Fatalf("journal after cleanup: last turn %d, %v; want deleted", last, err)
 	}
 }
+
+// TestAdoptKeepsArtifactsAgentAndIdempotencyKey covers a control-plane
+// restart under a running scheduled session: the adopted session must still
+// read its run artifact, report its agent, and answer a repeated Create for
+// the job that started it.
+func TestAdoptKeepsArtifactsAgentAndIdempotencyKey(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := fake.NewSimpleClientset()
+	m := testManager(t)
+	if err := m.loadAgents(); err != nil {
+		t.Fatal(err)
+	}
+	m.cfg.Runtime.Backend = "kubernetes"
+	m.journal = journal.NewMemory()
+	m.kube = k8s.NewForClient(cs, "mayfly")
+	m.stateDir = t.TempDir()
+	m.runner = &fakeRunner{}
+
+	const key = "runs/nightly/job-1.json"
+	const content = `{"run_id":"job-1"}`
+	putArtifact(t, m, key, content)
+	cfg := sessioncfg.Config{
+		Version:    sessioncfg.Version,
+		SessionID:  "a1",
+		Agent:      "default",
+		Model:      "stub",
+		Title:      "scheduled",
+		TTLSeconds: 600,
+		CreatedAt:  time.Now().UTC(),
+		Artifacts: []sessioncfg.Artifact{{
+			Key:         key,
+			SHA256:      digestOf(content),
+			Bytes:       int64(len(content)),
+			ContentType: "application/json",
+		}},
+		IdempotencyKey: "job-1",
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := &k8s.SessionSpec{
+		Namespace:     "mayfly",
+		SessionID:     "a1",
+		PodName:       "mayfly-a1",
+		SecretName:    "mayfly-a1",
+		ConfigMapName: "mayfly-a1",
+		Image:         "example/agent:1",
+		PlatformNs:    "mayfly",
+		SessionJSON:   raw,
+		Token:         "token",
+		TTL:           time.Hour,
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.kube.CreateSession(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	// The API server turns stringData into data; the fake client does not.
+	secret, err := cs.CoreV1().Secrets("mayfly").Get(ctx, "mayfly-a1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret.Data = map[string][]byte{"token": []byte("token")}
+	if _, err := cs.CoreV1().Secrets("mayfly").Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown(context.Background())
+
+	sess, ok := m.Get("a1")
+	if !ok {
+		t.Fatal("session was not adopted")
+	}
+	if sess.Agent != "default" {
+		t.Fatalf("adopted agent = %q, want default", sess.Agent)
+	}
+	window, err := m.ReadArtifact(ctx, "a1", "token", key, 0, 1<<10)
+	if err != nil {
+		t.Fatalf("read artifact after adopt: %v", err)
+	}
+	if string(window.Content) != content {
+		t.Fatalf("artifact content = %q", window.Content)
+	}
+	again, err := m.Create(ctx, CreateOptions{Prompt: "again", IdempotencyKey: "job-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != "a1" {
+		t.Fatalf("repeated create started %q, want adopted a1", again.ID)
+	}
+}

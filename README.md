@@ -26,6 +26,7 @@ Sessions are the unit of work. There is no always-on agent.
 - Artifact export on teardown: conversation, events, traces, generated workspace files, and a manifest. Local filesystem or S3-compatible storage.
 - Isolation defaults: non-root, read-only root filesystem, all capabilities dropped, no service account token, default-deny ingress, egress only to the control plane and DNS.
 - LLM and HTTP MCP credentials stay in the control plane. Sessions receive one scoped token.
+- Scheduled source runs: a declarative `http.json` source chain reads providers (Notion, Firecrawl, anything JSON), writes a run artifact, and starts one session on a material change.
 
 ## Architecture
 
@@ -158,7 +159,7 @@ curl -sS http://localhost:8080/hooks/generic \
   -d '{"prompt":"Check the latest deploy"}'
 ```
 
-Full endpoint list: [docs/api.md](docs/api.md). Provider auth: [docs/providers.md](docs/providers.md). Release process: [docs/release.md](docs/release.md). Testing: [docs/testing.md](docs/testing.md).
+Full endpoint list: [docs/api.md](docs/api.md). Provider auth: [docs/providers.md](docs/providers.md). Scheduled sources: [docs/sources.md](docs/sources.md). Release process: [docs/release.md](docs/release.md). Testing: [docs/testing.md](docs/testing.md).
 
 ## Configuration
 

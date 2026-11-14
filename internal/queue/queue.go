@@ -29,14 +29,43 @@ var (
 	ErrNotFound = errors.New("job not found")
 )
 
-// Job is one accepted session request.
+// Kind tells a worker which handler owns a job.
+type Kind string
+
+const (
+	// KindSession creates a session from the request in Options.
+	KindSession Kind = "session"
+	// KindSource runs a scheduled data source and creates a session only when
+	// the run has changes the schedule triggers on.
+	KindSource Kind = "source"
+)
+
+// Job is one accepted unit of work.
 type Job struct {
 	ID         string                `json:"id"`
+	Kind       Kind                  `json:"kind,omitempty"`
 	Delivery   string                `json:"delivery,omitempty"`
 	Trigger    string                `json:"trigger"`
 	Options    session.CreateOptions `json:"options"`
+	Source     *SourceJob            `json:"source,omitempty"`
 	AcceptedAt time.Time             `json:"accepted_at"`
 	Attempts   int                   `json:"attempts"`
+}
+
+// SourceJob identifies one scheduled run of one data source.
+type SourceJob struct {
+	RunID    string    `json:"run_id"`
+	Schedule string    `json:"schedule"`
+	Source   string    `json:"source"`
+	Slot     time.Time `json:"slot"`
+}
+
+// JobKind returns KindSession for jobs written before kinds existed.
+func (j Job) JobKind() Kind {
+	if j.Kind == "" {
+		return KindSession
+	}
+	return j.Kind
 }
 
 // Result records what a completed job produced. The session ID is kept in the
@@ -136,9 +165,28 @@ func NewJob(trigger, delivery string, options session.CreateOptions, now time.Ti
 	options.Trigger.JobID = id
 	return Job{
 		ID:         id,
+		Kind:       KindSession,
 		Delivery:   delivery,
 		Trigger:    trigger,
 		Options:    options,
+		AcceptedAt: now.UTC(),
+	}
+}
+
+// NewSourceJob builds a scheduled source run. The delivery key makes a slot
+// idempotent: the same slot accepted twice returns ErrDuplicate.
+func NewSourceJob(delivery string, src SourceJob, now time.Time) Job {
+	id := randomID()
+	if delivery != "" {
+		sum := sha256.Sum256([]byte("schedule\x00" + delivery))
+		id = "s-" + hex.EncodeToString(sum[:16])
+	}
+	return Job{
+		ID:         id,
+		Kind:       KindSource,
+		Delivery:   delivery,
+		Trigger:    "schedule",
+		Source:     &src,
 		AcceptedAt: now.UTC(),
 	}
 }

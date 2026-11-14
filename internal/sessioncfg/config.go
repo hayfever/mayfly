@@ -88,6 +88,9 @@ type Config struct {
 	Artifacts    []Artifact `json:"artifacts,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 	AgentVersion string     `json:"agent_version,omitempty"`
+	// IdempotencyKey is the caller's CreateOptions.IdempotencyKey. It is kept
+	// with the session so an adopted session still answers a repeated Create.
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 	// Resumable reports that a replacement container will resume this session
 	// from the journal and the same workspace. A runtime that is not resumable
 	// finalizes on SIGTERM instead of leaving the turn to a replacement.

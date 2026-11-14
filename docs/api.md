@@ -183,6 +183,18 @@ Puts a buried job back on the queue with its attempt count reset. `202 {"retried
 
 Drops a buried job without running it. `204`. Unknown job: `404`.
 
+### `GET /api/v1/schedules`
+
+The schedules compiled from agent files at startup.
+
+```json
+{"schedules":[{"name":"competitor-watch","agent":"competitor-watch","cron":"0 7 * * *","source":"competitor-pages"}]}
+```
+
+### `POST /api/v1/schedules/{name}/run`
+
+Enqueues one manual run of the named schedule and returns `202 {"job_id":"s-..."}`. The run writes its artifact and creates a session when the change totals match the schedule trigger, the same as a cron slot. Manual runs use a random delivery key, so they do not consume or block a cron slot. Unknown schedule: `404`. Scheduler not started: `503`.
+
 ### `GET /api/v1/config`
 
 UI metadata: default and allowed models, agents with effective harness/model/image/skills/MCP/limits, skills, MCP server names, trigger names, TTL limits.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/hayfever/mayfly/internal/model"
 	"github.com/hayfever/mayfly/internal/session"
@@ -65,5 +66,60 @@ func TestSessionHandler(t *testing.T) {
 				t.Fatalf("session id = %q, want %q", result.SessionID, sess.ID)
 			}
 		})
+	}
+}
+
+func TestCompositeRoutesByKind(t *testing.T) {
+	ctx := context.Background()
+	var calls []Kind
+	record := func(kind Kind) Handler {
+		return func(context.Context, Job) (Result, error) {
+			calls = append(calls, kind)
+			return Result{SessionID: string(kind)}, nil
+		}
+	}
+	handler := Composite(record(KindSession), record(KindSource))
+
+	for _, job := range []Job{
+		{ID: "legacy"},
+		{ID: "session", Kind: KindSession},
+		{ID: "source", Kind: KindSource},
+	} {
+		result, err := handler(ctx, job)
+		if err != nil {
+			t.Fatalf("%s: %v", job.ID, err)
+		}
+		if result.SessionID != string(job.JobKind()) {
+			t.Fatalf("%s routed to %q", job.ID, result.SessionID)
+		}
+	}
+	if len(calls) != 3 || calls[0] != KindSession || calls[2] != KindSource {
+		t.Fatalf("calls = %v", calls)
+	}
+
+	onlySessions := Composite(record(KindSession), nil)
+	if _, err := onlySessions(ctx, Job{Kind: KindSource}); err == nil {
+		t.Fatal("nil source handler accepted a source job")
+	}
+}
+
+func TestSourceJobDeliveryIsStable(t *testing.T) {
+	now := time.Date(2026, 1, 1, 7, 0, 0, 0, time.UTC)
+	src := SourceJob{Schedule: "nightly", Source: "pages", Slot: now}
+	first := NewSourceJob("schedule:nightly:2026-01-01T07:00:00Z", src, now)
+	again := NewSourceJob("schedule:nightly:2026-01-01T07:00:00Z", src, now)
+	other := NewSourceJob("schedule:nightly:2026-01-02T07:00:00Z", src, now)
+
+	if first.ID != again.ID {
+		t.Fatalf("same delivery produced %q and %q", first.ID, again.ID)
+	}
+	if first.ID == other.ID {
+		t.Fatalf("different deliveries produced the same id %q", first.ID)
+	}
+	if first.Kind != KindSource || first.Source == nil || first.Source.Schedule != "nightly" {
+		t.Fatalf("job = %+v", first)
+	}
+	if first.JobKind() != KindSource {
+		t.Fatalf("JobKind = %q", first.JobKind())
 	}
 }

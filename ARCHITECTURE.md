@@ -6,11 +6,12 @@ This document describes the high-level architecture of mayfly. If you want to fi
 
 Mayfly turns events into short-lived agent sessions. A session has one prompt, one container (or local process), a shared chat thread that people can attach to, a time limit, and an artifact bundle when it ends. Nothing runs between sessions.
 
-The system has three layers, all in one control-plane process, `mayflyd`:
+The system has four layers, all in one control-plane process, `mayflyd`:
 
 1. **Trigger.** `POST /hooks/{name}` verifies a GitHub, Slack, Datadog, or generic webhook, spends one rate-limit token, and stores a job. The sender gets `202` (or Slack's in-channel reply) as soon as the job is committed. No pod exists yet. `POST /api/v1/sessions` (API, CLI, web UI) skips this layer and creates a session synchronously.
-2. **Queue.** `queue.Store` holds jobs durably (`memory`, `bbolt`, or any Redis-protocol server). `queue.Worker` leases jobs only when the session cap has room, and calls `session.Manager.Create` for each one.
-3. **Session.** `session.Manager` resolves the agent, model, skills, and MCP servers, then starts the runtime through a `runner.Runner` (one Kubernetes pod with its own Secret, ConfigMap, and NetworkPolicy, or a child process). It tracks the session until a terminal state, stores the artifact bundle, and deletes the resources.
+2. **Queue.** `queue.Store` holds jobs durably (`memory`, `bbolt`, or any Redis-protocol server). `queue.Worker` leases jobs only when the session cap has room, and dispatches each job to its handler: `session.Manager.Create` for a webhook, or the workflow runner for a scheduled source run.
+3. **Schedule.** `internal/workflow` compiles each scheduled source plan at startup. A timer enqueues one `source` job per cron slot, and the worker runs the plan, writes a run artifact, and creates a session only when the change totals match `triggerOn`.
+4. **Session.** `session.Manager` resolves the agent, model, skills, and MCP servers, then starts the runtime through a `runner.Runner` (one Kubernetes pod with its own Secret, ConfigMap, and NetworkPolicy, or a child process). It tracks the session until a terminal state, stores the artifact bundle, and deletes the resources.
 
 Inside the container, `mayfly-harness` reads `session.json` and execs either a named harness from `/opt/mayfly/harnesses` or the built-in `mayfly-agent`. The runtime only makes outbound calls to `/internal/v1/...` with a per-session token. It streams events, reads its inbox, calls the LLM and HTTP MCP servers through the control plane's credential broker, then uploads a bundle and reports finalize.
 
@@ -20,7 +21,7 @@ A turn is executed as ordered journaled steps. The journal lives in the control 
 
 ### `cmd/`
 
-- `cmd/mayflyd`: wires everything together. It loads config, builds the artifact store, queue store, runner, `hub.Hub`, and `session.Manager`, starts `queue.Worker` and the HTTP server, and on SIGTERM drains the worker before shutting down the manager.
+- `cmd/mayflyd`: wires everything together. It loads config and the project bundle, builds the artifact store, queue store, runner, `hub.Hub`, `session.Manager`, and workflow runner, starts the scheduler, `queue.Worker`, and the HTTP server, and on SIGTERM drains the worker before shutting down the manager. `-check` prints the resolved bundle and exits.
 - `cmd/mayfly-harness`: image entrypoint. It is a thin wrapper over `internal/harness`. A failure is written to `/dev/termination-log` so the control plane can report it.
 - `cmd/mayfly-agent`: the built-in session runtime, a thin wrapper over `internal/agent`.
 - `cmd/mayfly`: CLI (`run`, `ls`, `get`, `events`, `attach`, `send`, `close`, `delete`, `artifact`, `agents`). It only talks to the public API.
@@ -42,7 +43,11 @@ A turn is executed as ordered journaled steps. The journal lives in the control 
   - `queue.go`: `Job`, `Lease`, `Record`, `State`, the `Store` interface, `NewJob`, and `Backoff`.
   - Backends: `memory.go`, `bbolt.go` (buckets `jobs`, `ready`, `seen`, `dead`, `done`, plus expiry indexes) and `redis.go` (Lua scripts for accept, claim, and settle, with keys hash-tagged by `key_prefix`).
   - `worker.go`: `Worker`, the claim loop.
-  - `handler.go`: `SessionHandler`, which maps `session.ErrCapacity` to `ErrRetryLater`.
+  - `handler.go`: `SessionHandler`, which maps `session.ErrCapacity` to `ErrRetryLater`, and `Composite`, which routes a job by `Kind`.
+- `internal/project`: bundle loader. It reads `.yaml`, `.yml`, and `.json` files from `agents.dirs`, applies scopes and the RFC 7386 `extends` merge, rejects duplicate names, and compiles every schedule into a `sources.Plan`. A bad bundle stops startup.
+- `internal/sources`: the declarative source engine. `Build` constructs one `http.json` source; `Plan.Run` executes the dependency order. `jsonpath.go` projects documents, `filter.go` keeps matching items, and `httpjson.go` owns requests, pagination, fanout, retry, change tracking, and diff truncation. There is no provider-specific code.
+- `internal/state`: the schedule watermark store. `LastSlot` and `SetLastSlot` are backed by bbolt at `sources.state_path`, or by memory in tests.
+- `internal/workflow`: the scheduler and the source job handler. `workflow.go` runs a plan, writes `runs/<schedule>/<run>.json`, gates on `triggerOn`, builds the prompt with the untrusted notice, and creates the session. `scheduler.go` accepts each UTC cron slot once and catches up the most recent missed slot, up to seven days.
 - `internal/session`: `Manager` is the session registry and lifecycle engine.
   - `manager.go`: `Create`, `Validate`, the capacity check (`reserveLocked`, `FreeSlots`), and token handling.
   - `lifecycle.go`: thread access, artifact upload, `Close`, `Complete`, `finalize`, `cleanup`, the fallback export, adoption of running pods after a restart, and the maintenance loop (`reap` every 5 s, `pollPods` on `runtime.poll_interval`).
@@ -122,6 +127,15 @@ Queue:
 - `Ack` keeps a done record (job plus session ID) for `tombstone_ttl` (default 1h). The session also stores the job ID in `trigger.job_id`, so either side can be found from the other. bbolt purges expired records lazily on `Accept`, at most 256 per call.
 - On shutdown the worker releases leases it claimed but never started. Handlers already running finish on a context detached from shutdown.
 
+Schedule:
+
+- A bundle with an unknown connection, an invisible source, a duplicate name, a dependency cycle, or a bad cron fails startup and names the item. There is no runtime fallback for a bad bundle.
+- Every slot is a UTC minute. The delivery key is `schedule:<name>:<RFC3339 slot>`, so the same slot cannot be accepted twice, and the watermark is written only after `Accept` succeeds.
+- The first start records the current slot and starts nothing. A later start catches up only the most recent missed slot, and only within seven days.
+- Every accepted run writes `runs/<schedule>/<run>.json` before any session exists. An artifact over `sources.max_artifact_bytes` fails the job, which is retried by the queue. A retried job reads its stored artifact instead of calling the providers again, because change tracking reports a change only once. The session is created with the job ID as its idempotency key, so a retry never starts a second session for one run.
+- A session starts only when the totals match `triggerOn`. `new` is a baseline and does not trigger unless listed.
+- The prompt is built from the run: 8 KiB per diff, 32 KiB for the whole change section, and a fixed untrusted-content notice that a schedule cannot remove. The artifact keeps every document, with each diff already cut to the source's `maxLines` and `maxLineChars`; the provider's full diff is not stored.
+
 Session:
 
 - `reserveLocked` is the only place the `sessions.max_concurrent` cap is enforced. `FreeSlots` is advisory.
@@ -148,7 +162,8 @@ Process:
 
 - The queue store (`queue.backend`). `memory` loses jobs on restart. `bbolt` and `redis` survive it.
 - The journal store (`journal.backend`). `memory` is for tests; `bbolt` survives a control-plane restart. It holds the completed steps of every turn of an active session so a replacement runtime can resume, and deletes them when the session finalizes. It also holds each session's reserved sequence floor.
-- The artifact store (`artifacts.store`), either local or S3-compatible. This is the durable history of a completed session.
+- The schedule state store (`sources.state_path`), a bbolt file with one watermark per schedule. It must sit on the same PersistentVolume as the queue and journal. Without it a restart forgets the watermark and the catch-up window restarts.
+- The artifact store (`artifacts.store`), either local or S3-compatible. This is the durable history of a completed session and of every schedule run (`runs/`).
 - In-memory session state in `session.Manager` and `hub.Hub`. Finalized sessions are dropped after `sessions.retention`, but the artifact index outlives them so downloads keep working.
 
 **Errors.** Packages return sentinel errors and wrap with `%w`: `queue.ErrDuplicate`, `ErrFull`, `ErrRetryLater`, `ErrLeaseLost`, and `ErrNotFound`; `session.ErrCapacity`, `ErrNotFound`, `ErrClosed`, and `ErrUnauthorized`; `triggers.ErrUnauthorized` and `ErrBadRequest`. `internal/httpapi` maps them to status codes with `errors.Is`. Background loops log with `slog` and keep going rather than returning errors.

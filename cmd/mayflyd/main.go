@@ -26,7 +26,9 @@ import (
 	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/runner"
 	"github.com/hayfever/mayfly/internal/session"
+	"github.com/hayfever/mayfly/internal/state"
 	"github.com/hayfever/mayfly/internal/version"
+	"github.com/hayfever/mayfly/internal/workflow"
 )
 
 func main() {
@@ -133,6 +135,17 @@ func main() {
 		}
 	}
 
+	stateStore, err := state.New(cfg.Sources.StatePath)
+	if err != nil {
+		logger.Error("open schedule state", "error", err)
+		os.Exit(2)
+	}
+	defer func() {
+		if err := stateStore.Close(); err != nil {
+			logger.Warn("close schedule state", "error", err)
+		}
+	}()
+
 	h := hub.New(cfg.Sessions.EventBuffer)
 	mgr, err := session.New(cfg, bundle, store, h, journalStore, sessionRunner, kube, logger)
 	if err != nil {
@@ -147,12 +160,33 @@ func main() {
 		os.Exit(2)
 	}
 
+	workflowRunner, err := workflow.New(bundle, workflow.Options{
+		Store:    store,
+		Queue:    queueStore,
+		State:    stateStore,
+		Sessions: mgr,
+		MaxBytes: int64(cfg.Sources.MaxArtifactBytes),
+		Logger:   logger,
+	})
+	if err != nil {
+		logger.Error("create workflow runner", "error", err)
+		os.Exit(2)
+	}
+	if err := workflowRunner.Start(ctx); err != nil {
+		logger.Error("start scheduler", "error", err)
+		os.Exit(2)
+	}
+	defer workflowRunner.Stop()
+
+	scheduleAPI := httpapi.ScheduleService{Run: workflowRunner.Run, List: workflowRunner.Schedules()}
+
 	// Accepted webhook work runs here, not in the request that accepted it.
 	concurrency := cfg.Sessions.MaxConcurrent
 	if concurrency <= 0 {
 		concurrency = 8
 	}
-	worker := queue.NewWorker(queueStore, queue.SessionHandler(mgr.Create), concurrency, mgr.FreeSlots, cfg.Queue.PollInterval.Std(), logger)
+	handler := queue.Composite(queue.SessionHandler(mgr.Create), workflowRunner.Handle)
+	worker := queue.NewWorker(queueStore, handler, concurrency, mgr.FreeSlots, cfg.Queue.PollInterval.Std(), logger)
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
@@ -161,7 +195,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              cfg.Server.Addr,
-		Handler:           httpapi.New(cfg, mgr, queueStore, logger).Handler(),
+		Handler:           httpapi.New(cfg, mgr, queueStore, logger, httpapi.WithSchedules(scheduleAPI)).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
