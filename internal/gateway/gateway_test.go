@@ -352,8 +352,8 @@ func TestGrantFor(t *testing.T) {
 	if query.Placement != Service || query.Timeout != time.Minute {
 		t.Fatalf("service tool = %+v", query)
 	}
-	if len(grant.Wildcards) != 1 || grant.Wildcards["search"] != MCPHTTP {
-		t.Fatalf("wildcards = %v, want only the HTTP server", grant.Wildcards)
+	if len(grant.Wildcards) != 2 || grant.Wildcards["search"] != MCPHTTP || grant.Wildcards["local"] != MCPStdio {
+		t.Fatalf("wildcards = %v, want the HTTP and stdio servers", grant.Wildcards)
 	}
 }
 

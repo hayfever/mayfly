@@ -441,6 +441,81 @@ func TestConfigPluginsDefaults(t *testing.T) {
 	}
 }
 
+func TestConfigMCPToolLists(t *testing.T) {
+	base := func() *Config {
+		cfg := validBase()
+		cfg.MCP.Servers = []MCPServerConfig{{
+			Name:            "search",
+			Transport:       "http",
+			URL:             "https://example.com/mcp",
+			Tools:           []string{"query", "fetch"},
+			IdempotentTools: []string{"query"},
+		}}
+		return cfg
+	}
+
+	cfg := base()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("tool lists did not validate: %v", err)
+	}
+	if got := cfg.MCP.Servers[0].IdempotentTools; len(got) != 1 || got[0] != "query" {
+		t.Fatalf("idempotent tools = %v", got)
+	}
+
+	cases := []struct {
+		name   string
+		server MCPServerConfig
+		want   string
+	}{
+		{
+			name:   "idempotent tool outside the allowlist",
+			server: MCPServerConfig{Tools: []string{"query"}, IdempotentTools: []string{"send"}},
+			want:   "not in tools",
+		},
+		{
+			name:   "duplicate tool",
+			server: MCPServerConfig{Tools: []string{"query", "query"}},
+			want:   "duplicate tool",
+		},
+		{
+			name:   "duplicate idempotent tool",
+			server: MCPServerConfig{IdempotentTools: []string{"query", "query"}},
+			want:   "duplicate idempotent tool",
+		},
+		{
+			name:   "empty tool name",
+			server: MCPServerConfig{Tools: []string{""}},
+			want:   "empty name",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validBase()
+			server := tc.server
+			server.Name = "search"
+			server.Transport = "http"
+			server.URL = "https://example.com/mcp"
+			cfg.MCP.Servers = []MCPServerConfig{server}
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+
+	// Without an allowlist, idempotent_tools may name any tool.
+	cfg = validBase()
+	cfg.MCP.Servers = []MCPServerConfig{{
+		Name:            "search",
+		Transport:       "stdio",
+		Command:         "mcp-search",
+		IdempotentTools: []string{"query"},
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("idempotent tools without an allowlist did not validate: %v", err)
+	}
+}
+
 func TestConfigPluginVolumeLimit(t *testing.T) {
 	cfg := validBase()
 	if cfg.Runtime.PluginVolumeLimit != "512Mi" {

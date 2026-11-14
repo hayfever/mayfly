@@ -50,6 +50,12 @@ func New(cfg config.LLMConfig, logger *slog.Logger) *Broker {
 	return &Broker{cfg: cfg, logger: logger, client: &http.Client{Transport: transport}}
 }
 
+// HTTPClient returns the client that reaches upstream providers. It carries
+// the broker's dial, TLS, and response-header timeouts, so a caller that
+// speaks a protocol the broker proxies (such as the tool gateway's MCP
+// clients) applies the same transport policy.
+func (b *Broker) HTTPClient() *http.Client { return b.client }
+
 // ServeLLM handles POST /internal/v1/llm/chat/completions. The session token is
 // validated by the caller, which also passes the model assigned to the session.
 // A session cannot select a different model, even an allowlisted one.
