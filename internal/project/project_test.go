@@ -418,7 +418,7 @@ sources:
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `agents: 1 schedules: 1 sources: 1 connections: 1
+	want := `agents: 1 schedules: 1 sources: 1 connections: 1 plugins: 0
 agent watcher default
 schedule nightly agent=watcher cron="0 7 * * *" source=one ttl=30m0s trigger=changed
 plan nightly steps 1 terminal one: one
@@ -657,5 +657,198 @@ connections:
 		if err == nil || !(strings.Contains(err.Error(), "control-plane secret") || strings.Contains(err.Error(), "reserved")) {
 			t.Fatalf("%q: err = %v", conn, err)
 		}
+	}
+}
+
+const pluginManifest = `schemaVersion: 1
+name: notify
+version: 0.1.0
+placement: sidecar
+image: ghcr.io/acme/notify:0.1.0
+command: bin/notify
+secrets:
+  - env: NOTIFY_WEBHOOK_URL
+    secret: mayfly-plugin-notify
+    key: webhook-url
+tools:
+  - name: post
+  - name: recent
+    idempotent: true
+`
+
+func TestLoadPluginManifests(t *testing.T) {
+	dir := writeBundle(t, map[string]string{
+		"bundle.yaml": `schemaVersion: 1
+name: bundle
+agents:
+  - name: writer
+    systemPrompt: write
+    plugins: [notify]
+`,
+		"plugins/notify/plugin.yaml": pluginManifest,
+	})
+	bundle, err := load(t, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, ok := bundle.Plugins["notify"]
+	if !ok {
+		t.Fatalf("plugins = %v", bundle.Plugins)
+	}
+	if manifest.Placement != "sidecar" || manifest.Scope != "shared" || len(manifest.Tools) != 2 {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+	if manifest.Dir != filepath.Join(dir, "plugins", "notify") {
+		t.Fatalf("dir = %q", manifest.Dir)
+	}
+	if effects := manifest.Effects(); len(effects) != 1 || effects[0] != "post" {
+		t.Fatalf("effects = %v", effects)
+	}
+
+	if _, err := Load([]string{dir}, Options{Concurrency: 1, Timeout: time.Second, RequirePluginImage: true}); err != nil {
+		t.Fatalf("image is present: %v", err)
+	}
+	noImage := writeBundle(t, map[string]string{
+		"plugins/notify/plugin.yaml": strings.Replace(pluginManifest, "image: ghcr.io/acme/notify:0.1.0\n", "", 1),
+	})
+	if _, err := Load([]string{noImage}, Options{Concurrency: 1, Timeout: time.Second, RequirePluginImage: true}); err == nil || !strings.Contains(err.Error(), "image") {
+		t.Fatalf("err = %v, want a missing image error", err)
+	}
+}
+
+func TestLoadSkipsPluginSource(t *testing.T) {
+	dir := writeBundle(t, map[string]string{
+		"plugins/notify/plugin.yaml":  pluginManifest,
+		"plugins/notify/package.json": `{not json at all`,
+		"plugins/notify/tsconfig.json": `{
+  "compilerOptions": {"strict": true}
+}`,
+		"plugins/notify/extra.yaml": "notABundleKey: true\n",
+	})
+	bundle, err := load(t, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := bundle.Plugins["notify"]; !ok {
+		t.Fatalf("plugins = %v", bundle.Plugins)
+	}
+}
+
+func TestFlatPluginManifest(t *testing.T) {
+	dir := writeBundle(t, map[string]string{
+		"notify.plugin.yaml": pluginManifest,
+		"nested/other.plugin.yaml": `schemaVersion: 1
+name: other
+command: bin/other
+tools:
+  - name: run
+`,
+	})
+	bundle, err := load(t, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := bundle.Plugins["notify"]; !ok {
+		t.Fatalf("plugins = %v", bundle.Plugins)
+	}
+	if bundle.Plugins["other"].Dir != filepath.Join(dir, "nested") {
+		t.Fatalf("dir = %q", bundle.Plugins["other"].Dir)
+	}
+
+	mismatch := writeBundle(t, map[string]string{
+		"plugins/x/plugin.yaml": strings.Replace(pluginManifest, "name: notify", "name: y", 1),
+	})
+	if _, err := load(t, mismatch); err == nil || !strings.Contains(err.Error(), `"y"`) || !strings.Contains(err.Error(), `"x"`) {
+		t.Fatalf("err = %v, want a name mismatch naming both names", err)
+	}
+}
+
+func TestDuplicatePlugin(t *testing.T) {
+	dir := writeBundle(t, map[string]string{
+		"plugins/notify/plugin.yaml": pluginManifest,
+		"flat/notify.plugin.yaml":    pluginManifest,
+	})
+	_, err := load(t, dir)
+	if err == nil || !strings.Contains(err.Error(), `duplicate plugin "notify"`) {
+		t.Fatalf("err = %v", err)
+	}
+	for _, path := range []string{
+		filepath.Join(dir, "plugins", "notify", "plugin.yaml"),
+		filepath.Join(dir, "flat", "notify.plugin.yaml"),
+	} {
+		if !strings.Contains(err.Error(), path) {
+			t.Fatalf("err = %v, want %s", err, path)
+		}
+	}
+}
+
+func TestPrivatePluginScope(t *testing.T) {
+	private := strings.Replace(pluginManifest, "placement: sidecar", "placement: sidecar\nscope: agent:ghost", 1)
+	dir := writeBundle(t, map[string]string{"plugins/notify/plugin.yaml": private})
+	if _, err := load(t, dir); err == nil || !strings.Contains(err.Error(), `private to unknown agent "ghost"`) {
+		t.Fatalf("err = %v", err)
+	}
+
+	dir = writeBundle(t, map[string]string{
+		"bundle.yaml": `schemaVersion: 1
+name: bundle
+agents:
+  - name: ghost
+    systemPrompt: boo
+`,
+		"plugins/notify/plugin.yaml": private,
+	})
+	bundle, err := load(t, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.Plugins["notify"].Scope != "agent:ghost" {
+		t.Fatalf("scope = %q", bundle.Plugins["notify"].Scope)
+	}
+}
+
+func TestDescribePlugins(t *testing.T) {
+	dir := writeBundle(t, map[string]string{
+		"bundle.yaml": `schemaVersion: 1
+name: bundle
+agents:
+  - name: ghost
+    systemPrompt: boo
+  - name: writer
+    systemPrompt: write
+    default: true
+    plugins: [notify, crm]
+`,
+		"plugins/notify/plugin.yaml": pluginManifest,
+		"plugins/word-stats/plugin.yaml": `schemaVersion: 1
+name: word-stats
+command: server/server
+tools:
+  - name: count_words
+    idempotent: true
+`,
+		"plugins/crm/plugin.yaml": `schemaVersion: 1
+name: crm
+placement: service
+service:
+  mcpServer: crm
+tools:
+  - name: find_account
+    idempotent: true
+`,
+	})
+	bundle, err := load(t, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `agents: 2 schedules: 0 sources: 0 connections: 0 plugins: 3
+agent ghost
+agent writer default plugins=notify,crm
+plugin crm placement=service scope=shared tools=1 effects=- image=- mcpServer=crm
+plugin notify placement=sidecar scope=shared tools=2 effects=post image=ghcr.io/acme/notify:0.1.0
+plugin word-stats placement=inline scope=shared tools=1 effects=- image=-
+`
+	if got := bundle.Describe(); got != want {
+		t.Fatalf("Describe() =\n%s\nwant\n%s", got, want)
 	}
 }

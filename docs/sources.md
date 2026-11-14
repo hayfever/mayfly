@@ -51,7 +51,7 @@ mayflyd -check -config /etc/mayfly-config/config.yaml
 ```
 
 ```
-agents: 1 schedules: 1 sources: 2 connections: 2
+agents: 1 schedules: 1 sources: 2 connections: 2 plugins: 0
 agent competitor-watch
 schedule competitor-watch agent=competitor-watch cron="0 7 * * *" source=competitor-pages ttl=30m0s trigger=changed
 plan competitor-watch steps 2 terminal competitor-pages: competitors -> competitor-pages

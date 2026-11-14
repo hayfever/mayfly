@@ -14,6 +14,7 @@ import (
 	"github.com/hayfever/mayfly/internal/hub"
 	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/plugin"
 	"github.com/hayfever/mayfly/internal/project"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
@@ -28,6 +29,7 @@ type AgentInfo struct {
 	Image              string   `json:"image"`
 	Skills             []string `json:"skills"`
 	MCPServers         []string `json:"mcp_servers"`
+	Plugins            []string `json:"plugins"`
 	AllowShell         bool     `json:"allow_shell"`
 	MaxSteps           int      `json:"max_steps"`
 	MaxHistoryMessages int      `json:"max_history_messages"`
@@ -88,6 +90,9 @@ func (m *Manager) loadAgents() error {
 		if agent.Runtime.Image != "" && !imageAllowed(agent.Runtime.Image, m.cfg.Agents.AllowedImages) {
 			return fmt.Errorf("%s: agent %q image %q is not in agents.allowed_images", agent.Source, agent.Name, agent.Runtime.Image)
 		}
+		if err := m.checkAgentPlugins(agent); err != nil {
+			return err
+		}
 		for name := range agent.Runtime.Env {
 			if sessioncfg.IsReservedEnv(name) {
 				return fmt.Errorf("%s: agent %q runtime.env must not set %s; the control plane injects it into every session", agent.Source, agent.Name, name)
@@ -111,6 +116,74 @@ func (m *Manager) loadAgents() error {
 		skill := m.skillByName[name]
 		if strings.HasPrefix(skill.Scope, "agent:") {
 			return fmt.Errorf("skills.default names private skill %q", name)
+		}
+	}
+	return nil
+}
+
+// checkAgentPlugins applies the startup rules for one agent's plugin
+// selection: every name resolves and is visible, the harness can run plugins,
+// the shell rule holds, images are allowed, endpoint plugins name a usable MCP
+// server, and no two plugins expose the same model-visible tool name.
+func (m *Manager) checkAgentPlugins(agent agents.Agent) error {
+	names := agent.PluginNames()
+	if len(names) == 0 {
+		return nil
+	}
+	manifests := make([]plugin.Manifest, 0, len(names))
+	for _, name := range names {
+		manifest, ok := m.bundle.Plugins[name]
+		if !ok {
+			return fmt.Errorf("%s: agent %q references unknown plugin %q", agent.Source, agent.Name, name)
+		}
+		if !scopeVisible(manifest.Scope, agent.Name) {
+			return fmt.Errorf("%s: agent %q references plugin %q from another scope", agent.Source, agent.Name, name)
+		}
+		manifests = append(manifests, manifest)
+	}
+	if harness := harnessName(agent); harness != "mayfly" {
+		return fmt.Errorf("%s: agent %q uses harness %q; plugins need the built-in harness", agent.Source, agent.Name, harness)
+	}
+	local := m.cfg.Runtime.Backend == "local"
+	shell := agentAllowShell(agent, m.cfg)
+	for _, manifest := range manifests {
+		placement := manifest.Placement
+		if placement == "" {
+			placement = plugin.Inline
+		}
+		if shell && len(manifest.Secrets) > 0 {
+			switch {
+			case placement == plugin.Inline:
+				return fmt.Errorf("%s: agent %q has allowShell and plugin %q stores its secrets in the agent container; use placement: sidecar", agent.Source, agent.Name, manifest.Name)
+			case placement == plugin.Sidecar && local:
+				return fmt.Errorf("%s: agent %q has allowShell and the local backend runs plugin %q as inline, so its secrets are in the agent container; set allowShell to false or use placement: service", agent.Source, agent.Name, manifest.Name)
+			}
+		}
+		if manifest.Image != "" && !imageAllowed(manifest.Image, m.cfg.Agents.AllowedImages) {
+			return fmt.Errorf("%s: agent %q: plugin %q image %q is not in agents.allowed_images", agent.Source, agent.Name, manifest.Name, manifest.Image)
+		}
+		if manifest.Service == nil || manifest.Service.MCPServer == "" {
+			continue
+		}
+		server, ok := m.mcpByName[manifest.Service.MCPServer]
+		if !ok {
+			return fmt.Errorf("%s: agent %q uses plugin %q with service.mcpServer %q, which is not defined", agent.Source, agent.Name, manifest.Name, manifest.Service.MCPServer)
+		}
+		if server.Transport != "http" {
+			return fmt.Errorf("%s: agent %q uses plugin %q with service.mcpServer %q, which is not an http MCP server", agent.Source, agent.Name, manifest.Name, manifest.Service.MCPServer)
+		}
+		if !scopeVisible(server.Scope, agent.Name) {
+			return fmt.Errorf("%s: agent %q uses plugin %q with service.mcpServer %q, which is not visible to the agent", agent.Source, agent.Name, manifest.Name, manifest.Service.MCPServer)
+		}
+	}
+	owners := make(map[string]string)
+	for _, manifest := range manifests {
+		for _, tool := range manifest.Tools {
+			name := plugin.ToolName(manifest.Name, tool.Name)
+			if prev, ok := owners[name]; ok {
+				return fmt.Errorf("%s: agent %q: plugins %q and %q expose the same tool name %q", agent.Source, agent.Name, prev, manifest.Name, name)
+			}
+			owners[name] = manifest.Name
 		}
 	}
 	return nil
@@ -170,6 +243,7 @@ func (m *Manager) agentInfo(agent agents.Agent) AgentInfo {
 		Image:              image,
 		Skills:             append([]string(nil), skillNames...),
 		MCPServers:         append([]string(nil), mcpNames...),
+		Plugins:            agent.PluginNames(),
 		AllowShell:         agentAllowShell(agent, m.cfg),
 		MaxSteps:           maxSteps,
 		MaxHistoryMessages: maxHistory,

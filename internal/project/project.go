@@ -1,6 +1,6 @@
 // Package project loads a Mayfly project bundle: agents, connections, sources,
-// and schedules. Scopes decide visibility, extends and overrides share one
-// RFC 7386 merge, and every schedule is compiled into an executable plan at
+// schedules, and plugins. Scopes decide visibility, extends and overrides share
+// one RFC 7386 merge, and every schedule is compiled into an executable plan at
 // load time so a bad bundle fails at startup instead of at 07:00.
 package project
 
@@ -19,6 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/hayfever/mayfly/internal/agents"
+	"github.com/hayfever/mayfly/internal/plugin"
 	"github.com/hayfever/mayfly/internal/prompt"
 	"github.com/hayfever/mayfly/internal/sources"
 )
@@ -48,6 +49,9 @@ type Options struct {
 	// config.SecretEnvNames). No bundle may declare them or read them from a
 	// template, and MAYFLY_* is always denied.
 	DeniedEnv []string
+	// RequirePluginImage makes plugin.image mandatory. The local backend runs
+	// local.command instead, so it leaves this false.
+	RequirePluginImage bool
 }
 
 // Schedule is one validated schedule bound to its agent and plan.
@@ -71,6 +75,7 @@ type Bundle struct {
 	Sources     map[string]sources.Definition
 	Connections map[string]sources.Connection
 	Plans       map[string]*sources.Plan
+	Plugins     map[string]plugin.Manifest
 
 	agentsByName    map[string]agents.Agent
 	schedulesByName map[string]Schedule
@@ -92,12 +97,36 @@ func (b *Bundle) Schedule(name string) (Schedule, bool) {
 // definition. It is the output of mayflyd -check.
 func (b *Bundle) Describe() string {
 	var out strings.Builder
-	fmt.Fprintf(&out, "agents: %d schedules: %d sources: %d connections: %d\n",
-		len(b.Agents), len(b.Schedules), len(b.Sources), len(b.Connections))
+	fmt.Fprintf(&out, "agents: %d schedules: %d sources: %d connections: %d plugins: %d\n",
+		len(b.Agents), len(b.Schedules), len(b.Sources), len(b.Connections), len(b.Plugins))
 	for _, agent := range b.Agents {
 		fmt.Fprintf(&out, "agent %s", agent.Name)
 		if agent.Default {
 			out.WriteString(" default")
+		}
+		if names := agent.PluginNames(); len(names) > 0 {
+			fmt.Fprintf(&out, " plugins=%s", strings.Join(names, ","))
+		}
+		out.WriteString("\n")
+	}
+	for _, name := range sortedKeys(b.Plugins) {
+		manifest := b.Plugins[name]
+		placement := manifest.Placement
+		if placement == "" {
+			placement = plugin.Inline
+		}
+		effects := strings.Join(manifest.Effects(), ",")
+		if effects == "" {
+			effects = "-"
+		}
+		image := manifest.Image
+		if image == "" {
+			image = "-"
+		}
+		fmt.Fprintf(&out, "plugin %s placement=%s scope=%s tools=%d effects=%s image=%s",
+			name, placement, manifest.Scope, len(manifest.Tools), effects, image)
+		if manifest.Service != nil && manifest.Service.MCPServer != "" {
+			fmt.Fprintf(&out, " mcpServer=%s", manifest.Service.MCPServer)
 		}
 		out.WriteString("\n")
 	}
@@ -141,9 +170,11 @@ type fileManifest struct {
 // Load reads every bundle file under dirs and resolves it.
 func Load(dirs []string, opts Options) (*Bundle, error) {
 	agentRaw := make([]rawDefinition, 0, 4)
+	pluginRaw := make([]plugin.Manifest, 0, 4)
 	sourceRaw := map[string]rawDefinition{}
 	connRaw := map[string]rawDefinition{}
 	seenAgents := map[string]string{}
+	seenPlugins := map[string]string{}
 
 	for _, dir := range dirs {
 		if dir == "" {
@@ -170,14 +201,41 @@ func Load(dirs []string, opts Options) (*Bundle, error) {
 				}
 				return nil
 			}
+			rel, err := filepath.Rel(dir, path)
+			if err != nil {
+				return err
+			}
+			name, isManifest, skip := plugin.IsManifestPath(filepath.ToSlash(rel))
+			if skip {
+				return nil
+			}
+			if isManifest {
+				raw, err := root.ReadFile(rel)
+				if err != nil {
+					return fmt.Errorf("%s: %w", path, err)
+				}
+				manifest, err := plugin.Parse(raw, path)
+				if err != nil {
+					return err
+				}
+				if manifest.Name != name {
+					return fmt.Errorf("%s: plugin name %q does not match %q from the path", path, manifest.Name, name)
+				}
+				if prev, ok := seenPlugins[name]; ok {
+					return fmt.Errorf("duplicate plugin %q in %s and %s", name, prev, path)
+				}
+				manifest.Dir, err = filepath.Abs(filepath.Dir(path))
+				if err != nil {
+					return fmt.Errorf("%s: %w", path, err)
+				}
+				seenPlugins[name] = path
+				pluginRaw = append(pluginRaw, manifest)
+				return nil
+			}
 			switch strings.ToLower(filepath.Ext(path)) {
 			case ".yaml", ".yml", ".json":
 			default:
 				return nil
-			}
-			rel, err := filepath.Rel(dir, path)
-			if err != nil {
-				return err
 			}
 			raw, err := root.ReadFile(rel)
 			if err != nil {
@@ -218,7 +276,7 @@ func Load(dirs []string, opts Options) (*Bundle, error) {
 			return nil, err
 		}
 	}
-	return buildBundle(agentRaw, sourceRaw, connRaw, seenAgents, opts)
+	return buildBundle(agentRaw, pluginRaw, sourceRaw, connRaw, seenAgents, opts)
 }
 
 func decodeManifest(raw []byte, path string) (fileManifest, error) {
@@ -300,13 +358,26 @@ func visible(scope, agent string) bool {
 	return scope == scopeShared || scopeOwner(scope) == agent
 }
 
-func buildBundle(agentRaw []rawDefinition, sourceRaw, connRaw map[string]rawDefinition, seenAgents map[string]string, opts Options) (*Bundle, error) {
+func buildBundle(agentRaw []rawDefinition, pluginRaw []plugin.Manifest, sourceRaw, connRaw map[string]rawDefinition, seenAgents map[string]string, opts Options) (*Bundle, error) {
 	bundle := &Bundle{
 		Sources:         map[string]sources.Definition{},
 		Connections:     map[string]sources.Connection{},
 		Plans:           map[string]*sources.Plan{},
+		Plugins:         map[string]plugin.Manifest{},
 		agentsByName:    map[string]agents.Agent{},
 		schedulesByName: map[string]Schedule{},
+	}
+	validateOpts := plugin.ValidateOptions{DeniedEnv: opts.DeniedEnv, RequireImage: opts.RequirePluginImage}
+	for _, manifest := range pluginRaw {
+		if err := manifest.Validate(validateOpts); err != nil {
+			return nil, err
+		}
+		scope, err := parseScope(manifest.Scope)
+		if err != nil {
+			return nil, fmt.Errorf("%s: plugin %q: %w", manifest.Origin, manifest.Name, err)
+		}
+		manifest.Scope = scope
+		bundle.Plugins[manifest.Name] = manifest
 	}
 	for _, item := range agentRaw {
 		var def agents.Definition
@@ -378,7 +449,7 @@ func buildBundle(agentRaw []rawDefinition, sourceRaw, connRaw map[string]rawDefi
 		bundle.Sources[name] = def
 	}
 
-	for _, scope := range []string{"source", "connection"} {
+	for _, scope := range []string{"source", "connection", "plugin"} {
 		if err := checkScopeOwners(bundle, scope, seenAgents); err != nil {
 			return nil, err
 		}
@@ -502,6 +573,14 @@ func checkScopeOwners(bundle *Bundle, kind string, seenAgents map[string]string)
 	if kind == "connection" {
 		for name, record := range bundle.Connections {
 			if err := check(name, record.Scope); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if kind == "plugin" {
+		for name, manifest := range bundle.Plugins {
+			if err := check(name, manifest.Scope); err != nil {
 				return err
 			}
 		}

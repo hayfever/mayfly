@@ -32,14 +32,17 @@ type Runtime struct {
 
 // Definition is one selectable agent.
 type Definition struct {
-	Name               string     `yaml:"name" json:"name"`
-	Description        string     `yaml:"description" json:"description"`
-	Harness            string     `yaml:"harness" json:"harness"`
-	Model              string     `yaml:"model" json:"model"`
-	SystemPrompt       string     `yaml:"systemPrompt" json:"systemPrompt"`
-	SystemPromptFile   string     `yaml:"systemPromptFile" json:"systemPromptFile"`
-	Skills             *[]string  `yaml:"skills" json:"skills"`
-	MCPServers         *[]string  `yaml:"mcpServers" json:"mcpServers"`
+	Name             string    `yaml:"name" json:"name"`
+	Description      string    `yaml:"description" json:"description"`
+	Harness          string    `yaml:"harness" json:"harness"`
+	Model            string    `yaml:"model" json:"model"`
+	SystemPrompt     string    `yaml:"systemPrompt" json:"systemPrompt"`
+	SystemPromptFile string    `yaml:"systemPromptFile" json:"systemPromptFile"`
+	Skills           *[]string `yaml:"skills" json:"skills"`
+	MCPServers       *[]string `yaml:"mcpServers" json:"mcpServers"`
+	// Plugins names the plugin manifests the agent may call. Nil and an empty
+	// list both select none.
+	Plugins            *[]string  `yaml:"plugins" json:"plugins"`
 	AllowShell         *bool      `yaml:"allowShell" json:"allowShell"`
 	MaxSteps           int        `yaml:"maxSteps" json:"maxSteps"`
 	MaxHistoryMessages int        `yaml:"maxHistoryMessages" json:"maxHistoryMessages"`
@@ -86,6 +89,15 @@ func (a Agent) RenderPrompt(data any) (string, error) {
 	return strings.TrimSpace(out.String()), nil
 }
 
+// PluginNames returns the declared plugin names, or nil when the agent selects
+// none. The result is a copy, so a caller cannot change the definition.
+func (d Definition) PluginNames() []string {
+	if d.Plugins == nil {
+		return nil
+	}
+	return append([]string(nil), (*d.Plugins)...)
+}
+
 // Build validates one definition and parses its prompt. The project loader
 // resolves systemPromptFile before it calls Build.
 func Build(def Definition, source string) (Agent, error) {
@@ -95,6 +107,18 @@ func Build(def Definition, source string) (Agent, error) {
 	}
 	if def.Harness != "" && !namePattern.MatchString(def.Harness) {
 		return Agent{}, fmt.Errorf("%s: agent %q has invalid harness %q", path, def.Name, def.Harness)
+	}
+	if def.Plugins != nil {
+		seen := make(map[string]bool, len(*def.Plugins))
+		for _, name := range *def.Plugins {
+			if !namePattern.MatchString(name) {
+				return Agent{}, fmt.Errorf("%s: agent %q has invalid plugin name %q", path, def.Name, name)
+			}
+			if seen[name] {
+				return Agent{}, fmt.Errorf("%s: agent %q lists plugin %q twice", path, def.Name, name)
+			}
+			seen[name] = true
+		}
 	}
 	if strings.TrimSpace(def.SystemPrompt) != "" && strings.TrimSpace(def.SystemPromptFile) != "" {
 		return Agent{}, fmt.Errorf("%s: agent %q sets both systemPrompt and systemPromptFile", path, def.Name)
