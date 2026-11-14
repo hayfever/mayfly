@@ -78,7 +78,8 @@ func buildLimiter(name string, rate *plugin.Rate, logger *slog.Logger) *ratelimi
 
 // reserve takes one in-flight slot for key until deadline. It prunes slots
 // whose dispatch outlived its timeout, which is what a runtime that died
-// mid-call leaves behind.
+// mid-call leaves behind. A key that already holds a slot keeps it: a retry
+// of the same call is the same dispatch, not a second one.
 func (l *limits) reserve(key string, now, deadline time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -86,6 +87,10 @@ func (l *limits) reserve(key string, now, deadline time.Time) bool {
 		if now.After(until) {
 			delete(l.inflight, k)
 		}
+	}
+	if _, held := l.inflight[key]; held {
+		l.inflight[key] = deadline
+		return true
 	}
 	if len(l.inflight) >= l.max {
 		return false

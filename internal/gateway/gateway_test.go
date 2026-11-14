@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -497,5 +498,132 @@ func TestDiscoverLocalTools(t *testing.T) {
 	}
 	if _, err := g.Discover(context.Background(), "missing"); statusOf(err) != 404 {
 		t.Fatalf("unknown session error = %v, want 404", err)
+	}
+}
+
+// TestGatewaySameRuntimeReissues covers a begin whose answer was lost: the
+// same runtime instance opens the same pending call again, and the gateway
+// issues it instead of recording an interruption.
+func TestGatewaySameRuntimeReissues(t *testing.T) {
+	ctx := context.Background()
+	g, mem := newTestGateway(t, Options{MaxInflight: 1}, inlineTool(otherTool, "alpha", "other", false))
+	req := BeginRequest{
+		Turn:       3,
+		Step:       4,
+		CallID:     "call_1",
+		Tool:       otherTool,
+		InstanceID: "run-1",
+		Arguments:  json.RawMessage(`{}`),
+	}
+
+	resp, err := g.Begin(ctx, "s1", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Dispatch == nil || resp.Dispatch.Key != "s1/3/4" {
+		t.Fatalf("first begin = %+v, want a dispatch", resp)
+	}
+
+	// The runtime never got that answer, so the tool never ran. The retry
+	// reuses the in-flight slot and is dispatched again.
+	again, err := g.Begin(ctx, "s1", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Dispatch == nil || again.Result != nil || again.Dispatch.Key != "s1/3/4" {
+		t.Fatalf("retry from the same instance = %+v, want a dispatch", again)
+	}
+	rec, found, err := mem.Get(ctx, "s1", "s1/3/4")
+	if err != nil || !found {
+		t.Fatalf("ledger record = found %v, %v", found, err)
+	}
+	if rec.State != journal.CallPending || rec.Attempts != 2 || rec.InstanceID != "run-1" {
+		t.Fatalf("ledger record = %+v", rec)
+	}
+
+	// A replacement container is a new instance: the call it never received
+	// is recorded as interrupted, not issued again.
+	restarted := req
+	restarted.InstanceID = "run-2"
+	resumed, err := g.Begin(ctx, "s1", restarted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Result == nil || !resumed.Result.Interrupted || resumed.Dispatch != nil {
+		t.Fatalf("begin from a new instance = %+v, want the interrupted result", resumed)
+	}
+	rec, _, err = mem.Get(ctx, "s1", "s1/3/4")
+	if err != nil || rec.State != journal.CallDone || !rec.Interrupted {
+		t.Fatalf("ledger record after interruption = %+v, %v", rec, err)
+	}
+}
+
+// TestDiscoverRequiredOwnerFollowsPlacement proves that only a service plugin
+// fails a session: an mcp.servers owner that shares a required plugin's name
+// reports its failure without failing the session.
+func TestDiscoverRequiredOwnerFollowsPlacement(t *testing.T) {
+	upstream := newFakeUpstream("send")
+	upstream.setFailInit(true)
+	server := httptest.NewServer(upstream)
+	defer server.Close()
+
+	manifests := func() []plugin.Manifest {
+		return []plugin.Manifest{
+			{Name: "chat", Placement: plugin.Service, Required: true},
+			{Name: "tickets", Placement: plugin.Service, Required: true},
+		}
+	}
+	def := config.MCPServerConfig{Name: "chat", Transport: "http", URL: server.URL}
+	opts := Options{
+		Manifests: manifests,
+		MCPServer: func(name string) (config.MCPServerConfig, bool) {
+			if name == def.Name {
+				return def, true
+			}
+			return config.MCPServerConfig{}, false
+		},
+		ServiceURL: func(name string) (string, []byte, error) {
+			return "", nil, errors.New("no endpoint")
+		},
+	}
+	mem := journal.NewMemory()
+	if err := mem.Reserve(context.Background(), "s1", 10); err != nil {
+		t.Fatal(err)
+	}
+	opts.Ledger = mem
+	opts.Sequencer = mem
+	opts.Logger = quietLogger()
+	g := New(opts)
+	g.Register(Grant{
+		SessionID: "s1",
+		Agent:     "helper",
+		Tools: map[string]GrantTool{
+			"plugin_tickets_query": {
+				Name:      "plugin_tickets_query",
+				Owner:     "tickets",
+				Remote:    "query",
+				Placement: Service,
+				Timeout:   5 * time.Second,
+				MaxOutput: 4096,
+			},
+		},
+		Wildcards: map[string]Placement{"chat": MCPHTTP},
+		MaxSteps:  4,
+	})
+
+	discovery, err := g.Discover(context.Background(), "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	required := map[string]bool{}
+	for _, failure := range discovery.Errors {
+		required[failure.Owner] = failure.Required
+	}
+	// The HTTP server shares the plugin's name but is not a bundle entry.
+	if required["chat"] {
+		t.Fatalf("discovery errors = %+v, want the HTTP server not required", discovery.Errors)
+	}
+	if !required["tickets"] {
+		t.Fatalf("discovery errors = %+v, want the required plugin reported", discovery.Errors)
 	}
 }

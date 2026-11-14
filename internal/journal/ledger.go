@@ -21,12 +21,16 @@ const (
 // the runtime derives from the turn and step. Arguments and results are not
 // journaled until the call completes, and only the result is stored.
 type Call struct {
-	Key         string    `json:"key"` // <session>/<turn>/<step>
-	SessionID   string    `json:"session_id"`
-	Turn        int64     `json:"turn"`
-	Step        int       `json:"step"`
-	Tool        string    `json:"tool"` // model-visible name
-	ArgsSHA256  string    `json:"args_sha256"`
+	Key        string `json:"key"` // <session>/<turn>/<step>
+	SessionID  string `json:"session_id"`
+	Turn       int64  `json:"turn"`
+	Step       int    `json:"step"`
+	Tool       string `json:"tool"` // model-visible name
+	ArgsSHA256 string `json:"args_sha256"`
+	// InstanceID names the runtime process that opened the call. A pending
+	// record with the same instance means the answer to the begin was lost,
+	// so the call never ran. A different instance means a restart.
+	InstanceID  string    `json:"instance_id,omitempty"`
 	State       CallState `json:"state"`
 	Content     string    `json:"content,omitempty"`
 	IsError     bool      `json:"is_error,omitempty"`
