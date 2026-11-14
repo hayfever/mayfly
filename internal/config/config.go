@@ -289,6 +289,12 @@ type MCPServerConfig struct {
 	// Scope is "shared" or "agent:<name>". A private server is available only
 	// to its owner, and never included in defaults.
 	Scope string `yaml:"scope"`
+	// Tools is the allowlist of a server. An empty list offers every tool the
+	// server reports.
+	Tools []string `yaml:"tools"`
+	// IdempotentTools names the tools that are safe to repeat after a
+	// container restart. Every other tool counts as non-idempotent.
+	IdempotentTools []string `yaml:"idempotent_tools"`
 
 	ResolvedHeaders map[string]string `yaml:"-"`
 }
@@ -826,6 +832,9 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("mcp server %q: transport must be stdio or http", s.Name)
 		}
+		if err := validateMCPToolLists(s); err != nil {
+			return err
+		}
 	}
 
 	for _, src := range c.Skills.Sources {
@@ -899,6 +908,36 @@ func (c *Config) Validate() error {
 			if t.RateLimit.Burst < 0 {
 				return fmt.Errorf("trigger %q: rate_limit.burst must not be negative", t.Name)
 			}
+		}
+	}
+	return nil
+}
+
+// validateMCPToolLists checks one server's tools and idempotent_tools: both
+// hold unique names, and an idempotent tool must also be allowed when the
+// server has an allowlist.
+func validateMCPToolLists(s MCPServerConfig) error {
+	allowed := make(map[string]bool, len(s.Tools))
+	for _, name := range s.Tools {
+		if name == "" {
+			return fmt.Errorf("mcp server %q: tools hold an empty name", s.Name)
+		}
+		if allowed[name] {
+			return fmt.Errorf("mcp server %q: duplicate tool %q", s.Name, name)
+		}
+		allowed[name] = true
+	}
+	idempotent := make(map[string]bool, len(s.IdempotentTools))
+	for _, name := range s.IdempotentTools {
+		if name == "" {
+			return fmt.Errorf("mcp server %q: idempotent_tools hold an empty name", s.Name)
+		}
+		if idempotent[name] {
+			return fmt.Errorf("mcp server %q: duplicate idempotent tool %q", s.Name, name)
+		}
+		idempotent[name] = true
+		if len(allowed) > 0 && !allowed[name] {
+			return fmt.Errorf("mcp server %q: idempotent tool %q is not in tools", s.Name, name)
 		}
 	}
 	return nil

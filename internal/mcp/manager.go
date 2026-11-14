@@ -77,6 +77,9 @@ func Start(ctx context.Context, defs []sessioncfg.MCPServer, token string, logge
 		}
 		m.clients[def.Name] = client
 		for _, tool := range tools {
+			if len(def.Tools) > 0 && !containsTool(def.Tools, tool.Name) {
+				continue
+			}
 			remote := tool.Name
 			name := toolName(def.Name, remote)
 			if n, ok := used[name]; ok {
@@ -131,7 +134,25 @@ func (m *Manager) Close() {
 }
 
 func toolName(server, tool string) string {
-	return "mcp_" + sanitize(server) + "_" + sanitize(tool)
+	return ToolPrefix(server) + sanitize(tool)
+}
+
+// ToolName returns the model-visible name of one MCP server tool. The gateway
+// and the runtime both build call keys from it, so the mapping lives here.
+func ToolName(server, tool string) string { return toolName(server, tool) }
+
+// ToolPrefix returns the prefix every tool of server has. A caller that only
+// holds a model-visible name can test it against this prefix.
+func ToolPrefix(server string) string { return "mcp_" + sanitize(server) + "_" }
+
+// containsTool reports whether names holds tool.
+func containsTool(names []string, tool string) bool {
+	for _, name := range names {
+		if name == tool {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitize(s string) string {

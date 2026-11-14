@@ -898,6 +898,8 @@ func (m *Manager) resolveMCP(agent agents.Agent, requested []string) ([]sessionc
 			Args:               def.Args,
 			Env:                def.Env,
 			InitTimeoutSeconds: int(def.InitTimeout.Std().Seconds()),
+			Tools:              append([]string(nil), def.Tools...),
+			IdempotentTools:    append([]string(nil), def.IdempotentTools...),
 		}
 		if def.Transport == "http" {
 			server.URL = internal + "/internal/v1/mcp/" + url.PathEscape(def.Name)
