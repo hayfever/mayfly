@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/k8s"
 	"github.com/hayfever/mayfly/internal/model"
@@ -307,5 +308,133 @@ func TestAdoptKeepsArtifactsAgentAndIdempotencyKey(t *testing.T) {
 	}
 	if again.ID != "a1" {
 		t.Fatalf("repeated create started %q, want adopted a1", again.ID)
+	}
+}
+
+// TestAdoptRebuildsGrant checks an adopted session gets the grant its
+// session.json declares, and its replacement pod the same plugin section.
+func TestAdoptRebuildsGrant(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := fake.NewSimpleClientset()
+	m := testManager(t)
+	m.cfg.LLM.Model = "test-model"
+	m.cfg.Server.InternalURL = "http://mayfly:8080"
+	if err := m.loadAgents(); err != nil {
+		t.Fatal(err)
+	}
+	m.cfg.Runtime.Backend = "kubernetes"
+	m.cfg.Sessions.MaxRestarts = 2
+	m.journal = journal.NewMemory()
+	m.kube = k8s.NewForClient(cs, "mayfly")
+	m.stateDir = t.TempDir()
+	fake := &fakeRunner{handle: runner.Handle{
+		Backend:             "kubernetes",
+		SessionID:           "p1",
+		Namespace:           "mayfly",
+		PodName:             "mayfly-p1-r1",
+		SecretName:          "mayfly-p1",
+		ConfigMapName:       "mayfly-p1",
+		PVCName:             "mayfly-p1-workspace",
+		PersistentWorkspace: true,
+	}}
+	m.runner = fake
+	registry := newFakeGateway()
+	m.SetGateway(registry)
+
+	cfg := sessioncfg.Config{
+		Version:    sessioncfg.Version,
+		SessionID:  "p1",
+		Agent:      "default",
+		Model:      "test-model",
+		Title:      "adopted",
+		TTLSeconds: 600,
+		CreatedAt:  time.Now().UTC(),
+		Plugins: []sessioncfg.Plugin{{
+			Name:               "notify",
+			Placement:          "inline",
+			Dir:                k8s.PluginsDir + "/notify",
+			Command:            "/plugin/notify",
+			Workdir:            "plugin",
+			Image:              "example/notify:1",
+			Tools:              []sessioncfg.PluginTool{{Name: "post_message", TimeoutSeconds: 30}},
+			InitTimeoutSeconds: 30,
+			MaxOutputBytes:     64 << 10,
+		}},
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := &k8s.SessionSpec{
+		Namespace:           "mayfly",
+		SessionID:           "p1",
+		PodName:             "mayfly-p1",
+		SecretName:          "mayfly-p1",
+		ConfigMapName:       "mayfly-p1",
+		Image:               "example/agent:1",
+		PlatformNs:          "mayfly",
+		PersistentWorkspace: true,
+		SessionJSON:         raw,
+		Token:               "token",
+		TTL:                 time.Hour,
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	client := k8s.NewForClient(cs, "mayfly")
+	if err := client.CreateSession(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.DeletePod(ctx, spec.PodName, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown(context.Background())
+
+	var grant gateway.Grant
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if found, ok := registry.grant("p1"); ok {
+			grant = found
+			break
+		}
+	}
+	if grant.SessionID != "p1" {
+		t.Fatal("adoption did not rebuild the grant")
+	}
+	tool, ok := grant.Tools["plugin_notify_post_message"]
+	if !ok || tool.Owner != "notify" || tool.Remote != "post_message" {
+		t.Fatalf("adopted grant tool = %+v", tool)
+	}
+	session, ok := m.Get("p1")
+	if !ok {
+		t.Fatal("session was not adopted")
+	}
+	if len(session.Plugins) != 1 || session.Plugins[0] != "notify" {
+		t.Fatalf("adopted plugins = %v", session.Plugins)
+	}
+
+	var replacement *k8s.SessionSpec
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		starts := fake.specs()
+		if len(starts) == 0 {
+			continue
+		}
+		if pod, ok := starts[0].K8sSpec.(*k8s.SessionSpec); ok {
+			replacement = pod
+			break
+		}
+	}
+	if replacement == nil {
+		t.Fatal("adoption did not start a replacement")
+	}
+	if len(replacement.Plugins) != 1 || replacement.Plugins[0].Name != "notify" {
+		t.Fatalf("replacement plugin section = %+v", replacement.Plugins)
+	}
+	if replacement.Plugins[0].Dir != cfg.Plugins[0].Dir {
+		t.Fatalf("replacement plugin dir = %q", replacement.Plugins[0].Dir)
 	}
 }

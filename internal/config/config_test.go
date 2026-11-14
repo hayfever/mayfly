@@ -440,3 +440,25 @@ func TestConfigPluginsDefaults(t *testing.T) {
 		t.Fatalf("zero in-flight cap error = %v", err)
 	}
 }
+
+func TestConfigPluginVolumeLimit(t *testing.T) {
+	cfg := validBase()
+	if cfg.Runtime.PluginVolumeLimit != "512Mi" {
+		t.Fatalf("runtime.plugin_volume_limit = %q, want 512Mi", cfg.Runtime.PluginVolumeLimit)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("default plugin volume limit did not validate: %v", err)
+	}
+
+	cfg = validBase()
+	cfg.Runtime.PluginVolumeLimit = "not-a-quantity"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "runtime.plugin_volume_limit") {
+		t.Fatalf("invalid plugin volume limit error = %v", err)
+	}
+
+	cfg = validBase()
+	cfg.Runtime.PluginVolumeLimit = "2Gi"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("explicit plugin volume limit did not validate: %v", err)
+	}
+}

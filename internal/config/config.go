@@ -16,6 +16,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
@@ -147,6 +149,9 @@ type RuntimeConfig struct {
 	Egress            []EgressRule      `yaml:"egress"`
 	WorkspaceLimit    string            `yaml:"workspace_limit"`
 	ArtifactLimit     string            `yaml:"artifact_volume_limit"`
+	// PluginVolumeLimit bounds the copied files of all inline plugins in a
+	// session pod.
+	PluginVolumeLimit string `yaml:"plugin_volume_limit"`
 	// StorageClass names the StorageClass of the per-session workspace claim.
 	// Empty uses the cluster default; a cluster without one leaves the claim
 	// pending until the session times out.
@@ -383,6 +388,7 @@ func Default() *Config {
 			DNSNamespace:      "kube-system",
 			WorkspaceLimit:    "1Gi",
 			ArtifactLimit:     "1Gi",
+			PluginVolumeLimit: "512Mi",
 			PollInterval:      Duration(2 * time.Second),
 			Egress:            []EgressRule{},
 			Env:               map[string]string{},
@@ -535,6 +541,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Runtime.ArtifactLimit == "" {
 		c.Runtime.ArtifactLimit = "1Gi"
+	}
+	if c.Runtime.PluginVolumeLimit == "" {
+		c.Runtime.PluginVolumeLimit = "512Mi"
 	}
 	if c.Plugins.Namespace == "" {
 		c.Plugins.Namespace = c.Sessions.Namespace
@@ -708,6 +717,9 @@ func (c *Config) Validate() error {
 		}
 	default:
 		return fmt.Errorf("runtime.backend must be kubernetes or local, got %q", c.Runtime.Backend)
+	}
+	if _, err := resource.ParseQuantity(c.Runtime.PluginVolumeLimit); err != nil {
+		return fmt.Errorf("runtime.plugin_volume_limit: %w", err)
 	}
 	if c.LLM.BaseURL == "" {
 		return fmt.Errorf("llm.base_url is required")
