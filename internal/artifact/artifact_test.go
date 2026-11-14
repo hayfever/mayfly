@@ -157,3 +157,31 @@ func TestS3StorePutGet(t *testing.T) {
 		t.Fatalf("get size=%d got=%q", size, got)
 	}
 }
+
+func TestLocalStoreLargePayload(t *testing.T) {
+	store, err := NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("0123456789abcdef"), (2<<20)/16)
+	sum := sha256.Sum256(payload)
+	digest := hex.EncodeToString(sum[:])
+	if _, err := store.Put(context.Background(), "runs/watch/run.json", bytes.NewReader(payload), int64(len(payload)), digest, "application/json"); err != nil {
+		t.Fatal(err)
+	}
+	rc, size, err := store.Get(context.Background(), "runs/watch/run.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size != int64(len(payload)) || len(got) != len(payload) {
+		t.Fatalf("size = %d/%d", size, len(got))
+	}
+	if sha256.Sum256(got) != sum {
+		t.Fatal("payload digest changed in the store")
+	}
+}

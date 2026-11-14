@@ -169,6 +169,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/journal", s.internalJournal)
 	mux.HandleFunc("GET /internal/v1/sessions/{id}/inbox", s.internalInbox)
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/artifacts", s.internalArtifact)
+	mux.HandleFunc("GET /internal/v1/sessions/{id}/artifacts", s.internalReadArtifact)
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/finalize", s.internalFinalize)
 	mux.HandleFunc("POST /internal/v1/llm/chat/completions", s.internalLLM)
 	mux.HandleFunc("/internal/v1/mcp/{server}", s.internalMCP)

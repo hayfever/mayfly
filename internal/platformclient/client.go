@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -421,4 +422,43 @@ func (c *Client) Turn(ctx context.Context, _ string, turn int64) ([]journal.Entr
 
 func (c *Client) LastTurn(ctx context.Context, _ string) (int64, error) {
 	return c.LastJournalTurn(ctx)
+}
+
+// ArtifactWindow is one bounded read of a stored session input.
+type ArtifactWindow struct {
+	Key         string `json:"key"`
+	Offset      int64  `json:"offset"`
+	Bytes       int64  `json:"bytes"`
+	Total       int64  `json:"total"`
+	NextOffset  *int64 `json:"next_offset"`
+	ContentType string `json:"content_type"`
+	Content     string `json:"content"`
+}
+
+// ReadArtifact reads a window of an artifact the control plane granted this
+// session. The token in the client authorizes only that session's grants.
+func (c *Client) ReadArtifact(ctx context.Context, key string, offset, limit int64) (ArtifactWindow, error) {
+	query := url.Values{}
+	query.Set("key", key)
+	query.Set("offset", strconv.FormatInt(offset, 10))
+	query.Set("limit", strconv.FormatInt(limit, 10))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.path("/artifacts")+"?"+query.Encode(), nil)
+	if err != nil {
+		return ArtifactWindow{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return ArtifactWindow{}, fmt.Errorf("read artifact: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return ArtifactWindow{}, fmt.Errorf("read artifact: status %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	var window ArtifactWindow
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&window); err != nil {
+		return ArtifactWindow{}, fmt.Errorf("read artifact: %w", err)
+	}
+	return window, nil
 }

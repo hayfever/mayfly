@@ -35,6 +35,14 @@ type Skill struct {
 	Scope string `json:"scope,omitempty"`
 }
 
+// Artifact is one read-only input made available to the session.
+type Artifact struct {
+	Key         string `json:"key"`
+	SHA256      string `json:"sha256"`
+	Bytes       int64  `json:"bytes"`
+	ContentType string `json:"content_type"`
+}
+
 // MCPServer describes one MCP server made available to the session.
 // HTTP servers are always reached through the platform MCP proxy; URL points
 // at the proxy, and credentials stay in the control plane.
@@ -75,8 +83,11 @@ type Config struct {
 	ArtifactMaxBytes   int64          `json:"artifact_max_bytes"`
 	Skills             []Skill        `json:"skills"`
 	MCPServers         []MCPServer    `json:"mcp_servers"`
-	CreatedAt          time.Time      `json:"created_at"`
-	AgentVersion       string         `json:"agent_version,omitempty"`
+	// Artifacts are read-only inputs the control plane stored before the
+	// session started. Their keys are the only ones read_artifact accepts.
+	Artifacts    []Artifact `json:"artifacts,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	AgentVersion string     `json:"agent_version,omitempty"`
 	// Resumable reports that a replacement container will resume this session
 	// from the journal and the same workspace. A runtime that is not resumable
 	// finalizes on SIGTERM instead of leaving the turn to a replacement.
