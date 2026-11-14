@@ -3,6 +3,8 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -299,13 +302,53 @@ type toolResult struct {
 // partition that outlasts it ends the process so a replacement resumes.
 var gatewayRetryBudget = 5 * time.Minute
 
-// gatewayAttemptTimeout bounds one attempt so a hung request cannot consume
-// the whole budget.
+// gatewayAttemptTimeout bounds one attempt of a request the gateway answers
+// from memory or the ledger.
 const gatewayAttemptTimeout = 15 * time.Second
+
+// gatewayDiscoveryAttempt bounds one attempt to read the tool grant. A
+// session's first discovery handshakes with every remote owner, so it gets
+// more room than a ledger read.
+const gatewayDiscoveryAttempt = 2 * gatewayAttemptTimeout
+
+// gatewayRemoteMargin extends a remote tool's begin attempt past the tool's
+// own timeout: the gateway answers a remote call only after the upstream call
+// finishes.
+const gatewayRemoteMargin = 15 * time.Second
 
 // gatewayRetryBackoff is the first wait between attempts. It doubles up to
 // five seconds so a long outage does not hammer the control plane.
 var gatewayRetryBackoff = 500 * time.Millisecond
+
+// runtimeInstance names this runtime process in every begin request. The
+// gateway re-issues a pending call that carries the same name instead of
+// interrupting it: this process never received the answer, so the tool never
+// ran. A replacement container is a new process with a new name.
+var runtimeInstance = newRuntimeInstance()
+
+// newRuntimeInstance returns a random nonce for this process.
+func newRuntimeInstance() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(raw[:])
+}
+
+// beginAttempt bounds one attempt to authorize one call. A remote placement
+// runs the upstream call inside the gateway's begin, so its attempt must
+// outlast the tool's own timeout. A local placement is answered from the
+// ledger or dispatched at once.
+func beginAttempt(tool gateway.DiscoveryTool) time.Duration {
+	if tool.Placement != gateway.Service && tool.Placement != gateway.MCPHTTP {
+		return gatewayAttemptTimeout
+	}
+	timeout := time.Duration(tool.TimeoutMS) * time.Millisecond
+	if timeout <= 0 {
+		timeout = mcpCallTimeout
+	}
+	return timeout + gatewayRemoteMargin
+}
 
 // callTool runs one tool. A granted tool goes through the gateway; every other
 // tool runs in the local toolset.
@@ -334,12 +377,13 @@ func (r *Runtime) callGranted(ctx context.Context, turn int64, step int, call ll
 	if len(bytes.TrimSpace(args)) == 0 {
 		args = json.RawMessage(`{}`)
 	}
-	resp, err := r.beginCall(ctx, gateway.BeginRequest{
-		Turn:      turn,
-		Step:      step,
-		CallID:    call.ID,
-		Tool:      tool.Name,
-		Arguments: args,
+	resp, err := r.beginCall(ctx, tool, gateway.BeginRequest{
+		Turn:       turn,
+		Step:       step,
+		CallID:     call.ID,
+		Tool:       tool.Name,
+		InstanceID: runtimeInstance,
+		Arguments:  args,
 	})
 	switch {
 	case err == nil:
@@ -391,8 +435,11 @@ func (r *Runtime) callGranted(ctx context.Context, turn int64, step int, call ll
 }
 
 // beginCall authorizes one call, retrying while the gateway is unreachable.
-func (r *Runtime) beginCall(ctx context.Context, req gateway.BeginRequest) (gateway.BeginResponse, error) {
-	return retryGateway(ctx, r.logger, "begin tool call "+req.Tool,
+// A remote tool's attempt outlasts its own timeout: the gateway runs the
+// upstream call inside this request.
+func (r *Runtime) beginCall(ctx context.Context, tool gateway.DiscoveryTool, req gateway.BeginRequest) (gateway.BeginResponse, error) {
+	attempt := beginAttempt(tool)
+	return retryGateway(ctx, r.logger, "begin tool call "+req.Tool, attempt, gatewayRetryBudget+attempt,
 		func(ctx context.Context) (gateway.BeginResponse, error) {
 			return r.gateway.BeginCall(ctx, req)
 		})
@@ -403,6 +450,7 @@ func (r *Runtime) beginCall(ctx context.Context, req gateway.BeginRequest) (gate
 // record, or a replacement would run it again.
 func (r *Runtime) completeCall(ctx context.Context, req gateway.CompleteRequest) error {
 	_, err := retryGateway(ctx, r.logger, "complete tool call "+req.Key,
+		gatewayAttemptTimeout, gatewayRetryBudget,
 		func(ctx context.Context) (struct{}, error) {
 			return struct{}{}, r.gateway.CompleteCall(ctx, req)
 		})
@@ -414,13 +462,14 @@ func (r *Runtime) completeCall(ctx context.Context, req gateway.CompleteRequest)
 
 // retryGateway runs one idempotent gateway request until it succeeds, is
 // rejected permanently, or the retry budget ends. A repeated request is safe:
-// the gateway answers a call key from its ledger.
-func retryGateway[T any](ctx context.Context, logger *slog.Logger, op string, fn func(context.Context) (T, error)) (T, error) {
-	ctx, cancel := context.WithTimeout(ctx, gatewayRetryBudget)
+// the gateway answers a call key from its ledger, and concurrent begins of one
+// key collapse into one dispatch.
+func retryGateway[T any](ctx context.Context, logger *slog.Logger, op string, attempt, budget time.Duration, fn func(context.Context) (T, error)) (T, error) {
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	backoff := gatewayRetryBackoff
 	for {
-		attemptCtx, attemptCancel := context.WithTimeout(ctx, gatewayAttemptTimeout)
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, attempt)
 		result, err := fn(attemptCtx)
 		attemptCancel()
 		if err == nil {

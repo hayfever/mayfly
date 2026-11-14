@@ -28,6 +28,10 @@ const (
 	// authErrorMessage replaces an upstream's own text on 401 and 403, so a
 	// credential failure reads the same over every transport.
 	authErrorMessage = "upstream rejected credentials"
+	// remoteFailureTTL bounds how long one failed handshake or listing
+	// answers later callers. A session discovery retries at once; this keeps
+	// a dead upstream from costing every call its init timeout in between.
+	remoteFailureTTL = 30 * time.Second
 )
 
 // remoteKey identifies one upstream MCP server in one session. The gateway
@@ -45,41 +49,80 @@ type remoteState struct {
 	discovery map[remoteKey]*discoveryEntry
 }
 
-// clientEntry opens one upstream client lazily. A failed handshake is cached
-// for the session, so one dead server cannot cost every call its init timeout.
+// clientEntry opens one upstream client lazily. opening is set while a
+// handshake is in flight, so concurrent callers wait for it instead of
+// repeating it. err is kept for remoteFailureTTL: one dead server must not
+// cost every call its init timeout, and one dropped request must not take the
+// server out for the session.
 type clientEntry struct {
-	once   sync.Once
-	client *remoteClient
-	err    error
+	mu      sync.Mutex
+	client  *remoteClient
+	opening chan struct{}
+	err     error
+	errAt   time.Time
 }
 
-// discoveryEntry lists one upstream's tools once per session.
+// discoveryEntry lists one upstream's tools once per session, with the same
+// waiting and failure rules as clientEntry.
 type discoveryEntry struct {
-	once  sync.Once
-	tools []mcp.Tool
-	err   error
+	mu      sync.Mutex
+	loaded  bool
+	tools   []mcp.Tool
+	opening chan struct{}
+	err     error
+	errAt   time.Time
 }
 
-// remoteClient is one upstream connection. token is set before a request that
-// needs a service call or discovery token; mu makes both the token and the
-// request that carries it change together.
+// resetFailure forgets a cached handshake failure so the next call retries.
+func (e *clientEntry) resetFailure() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.err = nil
+}
+
+// resetFailure forgets a cached listing failure so the next discovery
+// retries.
+func (e *discoveryEntry) resetFailure() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.err == nil {
+		return
+	}
+	e.loaded, e.tools, e.err = false, nil, nil
+}
+
+// remoteClient is one upstream connection. key is a service plugin's gateway
+// key, nil for an mcp.servers entry. The credential of one request travels in
+// that request's context, so concurrent calls share the connection without
+// waiting for one another.
 type remoteClient struct {
 	client *mcp.Client
-	key    []byte // service plugin gateway key; nil for an mcp.servers entry
-	mu     sync.Mutex
-	token  string
+	key    []byte
 }
 
-// setAuthorization adds the current call or discovery token to one request.
-func (c *remoteClient) setAuthorization(r *http.Request) {
-	if c.token != "" {
-		r.Header.Set("Authorization", "Bearer "+c.token)
+// requestTokenKey carries one request's upstream credential.
+type requestTokenKey struct{}
+
+// withRequestToken attaches the bearer token one upstream request carries.
+func withRequestToken(ctx context.Context, token string) context.Context {
+	if token == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, requestTokenKey{}, token)
+}
+
+// addRequestToken sets the bearer token carried by the request's context. It
+// is the per-request hook of a service client.
+func addRequestToken(r *http.Request) {
+	token, _ := r.Context().Value(requestTokenKey{}).(string)
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
 	}
 }
 
 // remoteClient returns the session's client for one upstream, opening it on
-// first use. A session that finalized while the client was opening closes it
-// instead of leaking it.
+// first use. The handshake runs on a context detached from the caller's
+// request, so a runtime that disconnects mid-call cannot poison the entry.
 func (g *Gateway) remoteClient(ctx context.Context, session, owner string, placement Placement) (*remoteClient, error) {
 	key := remoteKey{session: session, owner: owner}
 	g.remote.mu.Lock()
@@ -90,23 +133,55 @@ func (g *Gateway) remoteClient(ctx context.Context, session, owner string, place
 	}
 	g.remote.mu.Unlock()
 
-	entry.once.Do(func() {
-		initCtx, cancel := context.WithTimeout(ctx, remoteInitTimeout)
-		defer cancel()
-		entry.client, entry.err = g.openRemoteClient(initCtx, session, owner, placement)
-	})
-	if entry.err != nil {
-		return nil, entry.err
+	var opened *remoteClient
+	for {
+		entry.mu.Lock()
+		if entry.client != nil {
+			opened = entry.client
+			entry.mu.Unlock()
+			break
+		}
+		if entry.err != nil && g.now().Before(entry.errAt.Add(remoteFailureTTL)) {
+			err := entry.err
+			entry.mu.Unlock()
+			return nil, err
+		}
+		if opening := entry.opening; opening != nil {
+			entry.mu.Unlock()
+			select {
+			case <-opening:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		entry.opening = make(chan struct{})
+		entry.err = nil
+		entry.mu.Unlock()
+
+		initCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), remoteInitTimeout)
+		client, err := g.openRemoteClient(initCtx, session, owner, placement)
+		cancel()
+
+		entry.mu.Lock()
+		entry.client, entry.err = client, err
+		if err != nil {
+			entry.errAt = g.now()
+		}
+		close(entry.opening)
+		entry.opening = nil
+		entry.mu.Unlock()
+		return client, err
 	}
 
 	g.remote.mu.Lock()
 	current := g.remote.clients[key]
 	g.remote.mu.Unlock()
 	if current != entry {
-		_ = entry.client.client.Close()
+		_ = opened.client.Close()
 		return nil, errf(http.StatusNotFound, "session %q was finalized", session)
 	}
-	return entry.client, nil
+	return opened, nil
 }
 
 // openRemoteClient handshakes with one upstream. An HTTP mcp.servers entry
@@ -157,13 +232,13 @@ func (g *Gateway) openRemoteClient(ctx context.Context, session, owner string, p
 		if err != nil {
 			return nil, err
 		}
-		rc := &remoteClient{key: key, token: token}
-		client, err := g.serviceClient(owner, url, rc.setAuthorization)
+		rc := &remoteClient{key: key}
+		client, err := g.serviceClient(owner, url, addRequestToken)
 		if err != nil {
 			return nil, err
 		}
 		rc.client = client
-		if err := rc.client.Initialize(ctx); err != nil {
+		if err := rc.client.Initialize(withRequestToken(ctx, token)); err != nil {
 			_ = rc.client.Close()
 			return nil, err
 		}
@@ -207,9 +282,9 @@ func (g *Gateway) serviceClient(owner, url string, perRequest func(*http.Request
 	return mcp.NewUnixHTTP(owner, socket, perRequest), nil
 }
 
-// remoteTools lists one upstream's tools once per session. The result, error
-// included, is cached, so discovery runs once even when several tools are
-// asked for.
+// remoteTools lists one upstream's tools once per session. The result is
+// cached; a failure is cached for remoteFailureTTL, and a later discovery
+// retries it at once.
 func (g *Gateway) remoteTools(ctx context.Context, session, owner string, placement Placement) ([]mcp.Tool, error) {
 	key := remoteKey{session: session, owner: owner}
 	g.remote.mu.Lock()
@@ -220,10 +295,37 @@ func (g *Gateway) remoteTools(ctx context.Context, session, owner string, placem
 	}
 	g.remote.mu.Unlock()
 
-	entry.once.Do(func() {
-		entry.tools, entry.err = g.discoverUpstream(ctx, session, owner, placement)
-	})
-	return entry.tools, entry.err
+	for {
+		entry.mu.Lock()
+		if entry.loaded && (entry.err == nil || g.now().Before(entry.errAt.Add(remoteFailureTTL))) {
+			tools, err := entry.tools, entry.err
+			entry.mu.Unlock()
+			return tools, err
+		}
+		if opening := entry.opening; opening != nil {
+			entry.mu.Unlock()
+			select {
+			case <-opening:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		entry.opening = make(chan struct{})
+		entry.mu.Unlock()
+
+		tools, err := g.discoverUpstream(context.WithoutCancel(ctx), session, owner, placement)
+
+		entry.mu.Lock()
+		entry.tools, entry.err, entry.loaded = tools, err, true
+		if err != nil {
+			entry.errAt = g.now()
+		}
+		close(entry.opening)
+		entry.opening = nil
+		entry.mu.Unlock()
+		return tools, err
+	}
 }
 
 // discoverUpstream opens the upstream and lists its tools. A service plugin
@@ -234,8 +336,8 @@ func (g *Gateway) discoverUpstream(ctx context.Context, session, owner string, p
 	if err != nil {
 		return nil, err
 	}
-	client.mu.Lock()
-	defer client.mu.Unlock()
+	initCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), remoteInitTimeout)
+	defer cancel()
 	if client.key != nil {
 		token, err := SignToken(client.key, Claims{
 			SessionID: session,
@@ -246,10 +348,8 @@ func (g *Gateway) discoverUpstream(ctx context.Context, session, owner string, p
 		if err != nil {
 			return nil, err
 		}
-		client.token = token
+		initCtx = withRequestToken(initCtx, token)
 	}
-	initCtx, cancel := context.WithTimeout(ctx, remoteInitTimeout)
-	defer cancel()
 	return client.client.ListTools(initCtx)
 }
 
@@ -346,20 +446,43 @@ func (g *Gateway) beginRemote(ctx context.Context, grant Grant, tool GrantTool, 
 	return BeginResponse{Result: resultOf(done, false)}, nil
 }
 
-// callRemote performs one upstream tools/call under the tool timeout. The
-// _meta block carries the ledger key and the session identity; a service
-// plugin also gets a call token in Authorization.
+// callRemote performs one upstream tools/call under the tool timeout. A
+// service plugin that rejects its call token may have picked up a new gateway
+// key: the cached connection is dropped, so the reconciler is asked for the
+// endpoint again, and the call is retried once.
 func (g *Gateway) callRemote(ctx context.Context, grant Grant, tool GrantTool, rec journal.Call, args json.RawMessage) (string, bool) {
 	client, err := g.remoteClient(ctx, grant.SessionID, tool.Owner, tool.Placement)
 	if err != nil {
 		return err.Error(), true
 	}
+	content, isErr, timedOut, err := g.callUpstream(ctx, client, grant, tool, rec, args)
+	if err != nil && isAuthFailure(err) && client.key != nil {
+		g.forgetRemoteClient(grant.SessionID, tool.Owner)
+		if fresh, reopenErr := g.remoteClient(ctx, grant.SessionID, tool.Owner, tool.Placement); reopenErr == nil {
+			content, isErr, timedOut, err = g.callUpstream(ctx, fresh, grant, tool, rec, args)
+		}
+	}
+	switch {
+	case err == nil:
+		return content, isErr
+	case timedOut:
+		return fmt.Sprintf("tool %s timed out after %s", tool.Name, tool.Timeout), true
+	case isAuthFailure(err):
+		return authErrorMessage, true
+	}
+	return err.Error(), true
+}
 
-	client.mu.Lock()
-	defer client.mu.Unlock()
-
-	callCtx, cancel := context.WithTimeout(ctx, tool.Timeout)
-	defer cancel()
+// callUpstream performs one tools/call on one connection. The call runs on a
+// context detached from the begin request and bounded by the tool's timeout:
+// a runtime that disconnects no longer aborts a call that may already have
+// taken effect upstream. The _meta block carries the ledger key and the
+// session identity; a service plugin also gets a call token in Authorization.
+func (g *Gateway) callUpstream(ctx context.Context, client *remoteClient, grant Grant, tool GrantTool, rec journal.Call, args json.RawMessage) (string, bool, bool, error) {
+	if len(args) == 0 {
+		args = json.RawMessage("{}")
+	}
+	callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tool.Timeout)
 	if client.key != nil {
 		token, err := SignToken(client.key, Claims{
 			SessionID:  grant.SessionID,
@@ -370,35 +493,25 @@ func (g *Gateway) callRemote(ctx context.Context, grant Grant, tool GrantTool, r
 			Expires:    g.now().Add(tool.Timeout + sidecarTokenGrace).Unix(),
 		})
 		if err != nil {
-			return err.Error(), true
+			cancel()
+			return "", true, false, err
 		}
-		client.token = token
+		callCtx = withRequestToken(callCtx, token)
 	}
-
 	meta := map[string]any{
 		"mayfly.io/idempotency-key": rec.Key,
 		"mayfly.io/session":         grant.SessionID,
 		"mayfly.io/agent":           grant.Agent,
 	}
-	if len(args) == 0 {
-		args = json.RawMessage("{}")
-	}
 	content, isErr, id, err := client.client.CallToolMeta(callCtx, tool.Remote, args, meta)
 	timedOut := errors.Is(callCtx.Err(), context.DeadlineExceeded)
 	cancel()
-	if err == nil {
-		return content, isErr
-	}
 	if timedOut {
 		cancelCtx, stop := context.WithTimeout(context.Background(), cancelTimeout)
 		_ = client.client.Cancel(cancelCtx, id, "tool call timed out")
 		stop()
-		return fmt.Sprintf("tool %s timed out after %s", tool.Name, tool.Timeout), true
 	}
-	if isAuthFailure(err) {
-		return authErrorMessage, true
-	}
-	return err.Error(), true
+	return content, isErr, timedOut, err
 }
 
 // isAuthFailure reports a 401 or 403 from an upstream. The MCP HTTP transport
@@ -420,9 +533,11 @@ func (g *Gateway) dropRemote(session string) {
 			continue
 		}
 		delete(g.remote.clients, key)
+		entry.mu.Lock()
 		if entry.client != nil {
 			closing = append(closing, entry.client)
 		}
+		entry.mu.Unlock()
 	}
 	for key := range g.remote.discovery {
 		if key.session == session {
@@ -432,6 +547,53 @@ func (g *Gateway) dropRemote(session string) {
 	g.remote.mu.Unlock()
 	for _, client := range closing {
 		_ = client.client.Close()
+	}
+}
+
+// forgetRemoteClient closes one session's cached upstream connection and
+// forgets it, so the next call opens a new one. A service upstream that
+// rejects a credential may have rotated its gateway key, and reopening asks
+// the reconciler for the current one.
+func (g *Gateway) forgetRemoteClient(session, owner string) {
+	key := remoteKey{session: session, owner: owner}
+	g.remote.mu.Lock()
+	entry := g.remote.clients[key]
+	delete(g.remote.clients, key)
+	g.remote.mu.Unlock()
+	if entry == nil {
+		return
+	}
+	entry.mu.Lock()
+	client := entry.client
+	entry.mu.Unlock()
+	if client != nil {
+		_ = client.client.Close()
+	}
+}
+
+// retryRemoteFailures forgets one session's cached handshake and listing
+// failures. A discovery is the retry point for an owner that was unavailable
+// when the runtime first asked for it.
+func (g *Gateway) retryRemoteFailures(session string) {
+	g.remote.mu.Lock()
+	var clients []*clientEntry
+	for key, entry := range g.remote.clients {
+		if key.session == session {
+			clients = append(clients, entry)
+		}
+	}
+	var listings []*discoveryEntry
+	for key, entry := range g.remote.discovery {
+		if key.session == session {
+			listings = append(listings, entry)
+		}
+	}
+	g.remote.mu.Unlock()
+	for _, entry := range clients {
+		entry.resetFailure()
+	}
+	for _, entry := range listings {
+		entry.resetFailure()
 	}
 }
 

@@ -16,11 +16,15 @@ import (
 // BeginRequest is one runtime request to call a granted tool. Arguments are
 // sent so the gateway can hash them; they are never stored or audited.
 type BeginRequest struct {
-	Turn      int64           `json:"turn"`
-	Step      int             `json:"step"`
-	CallID    string          `json:"call_id,omitempty"`
-	Tool      string          `json:"tool"`
-	Arguments json.RawMessage `json:"arguments,omitempty"`
+	Turn   int64  `json:"turn"`
+	Step   int    `json:"step"`
+	CallID string `json:"call_id,omitempty"`
+	Tool   string `json:"tool"`
+	// InstanceID names the runtime process that asks. A begin that repeats a
+	// pending call of the same instance re-issues it: the runtime never got
+	// the answer, so the tool never ran.
+	InstanceID string          `json:"instance_id,omitempty"`
+	Arguments  json.RawMessage `json:"arguments,omitempty"`
 }
 
 // CompleteRequest reports the result of a locally dispatched call.
