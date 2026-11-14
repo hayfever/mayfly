@@ -44,8 +44,21 @@ func (s *Server) internalJournal(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPost:
+		limit := s.cfg.Journal.MaxEntryBytes
+		if limit <= 0 {
+			limit = 8 << 20
+		}
+		raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "read body")
+			return
+		}
+		if int64(len(raw)) > limit {
+			writeError(w, http.StatusRequestEntityTooLarge, "journal entry is over journal.max_entry_bytes")
+			return
+		}
 		var e journal.Entry
-		if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&e); err != nil {
+		if err := json.Unmarshal(raw, &e); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}

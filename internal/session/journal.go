@@ -47,11 +47,38 @@ func (m *Manager) AppendJournal(ctx context.Context, id, token string, e journal
 	if e.Turn < current {
 		return journal.Entry{}, fmt.Errorf("%w: turn %d is older than journaled turn %d", journal.ErrInvalid, e.Turn, current)
 	}
+	if limit := maxJournalSteps(inst.runtimeCfg.MaxSteps); e.Step >= limit {
+		return journal.Entry{}, fmt.Errorf("%w: step %d is over the %d steps a turn of this session can take", journal.ErrInvalid, e.Step, limit)
+	}
+	size := journalEntryBytes(e)
+	if quota := m.cfg.Journal.MaxSessionBytes; quota > 0 && inst.journalBytes+size > quota {
+		return journal.Entry{}, fmt.Errorf("%w: session journal is over journal.max_session_bytes (%d)", journal.ErrInvalid, quota)
+	}
 	if err := m.journal.Append(ctx, e); err != nil {
 		return journal.Entry{}, err
 	}
+	inst.journalBytes += size
 	m.publishStepEvents(inst, e)
 	return e, nil
+}
+
+// maxToolCallsPerRound bounds the tool calls the step cap allows for one model
+// round. It is generous: the cap exists to keep a runtime from writing
+// arbitrary step keys, and journal.max_session_bytes bounds the volume.
+const maxToolCallsPerRound = 128
+
+// maxJournalSteps is the number of steps one turn can journal: the user step,
+// then per round one model step and its tool calls.
+func maxJournalSteps(maxSteps int) int {
+	if maxSteps <= 0 {
+		maxSteps = 1
+	}
+	return 1 + maxSteps*(1+maxToolCallsPerRound)
+}
+
+// journalEntryBytes is what an entry adds to the session's journal quota.
+func journalEntryBytes(e journal.Entry) int64 {
+	return int64(len(e.Name) + len(e.Input) + len(e.Output) + len(e.Err))
 }
 
 // publishStepEvents adds the thread events of a newly journaled step. It is

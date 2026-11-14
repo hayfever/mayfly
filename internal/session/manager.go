@@ -127,6 +127,9 @@ type instance struct {
 	// journalMu orders AppendJournal's turn check with its write, so two
 	// containers of one session cannot both pass the check.
 	journalMu sync.Mutex
+	// journalBytes counts what this session journaled in this control-plane
+	// lifetime, for journal.max_session_bytes. It is guarded by journalMu.
+	journalBytes int64
 }
 
 // Manager is the control plane session registry and lifecycle engine.

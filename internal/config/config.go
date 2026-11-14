@@ -99,6 +99,14 @@ type SessionsConfig struct {
 type JournalConfig struct {
 	Backend string            `yaml:"backend"` // memory or bbolt
 	Bolt    BoltJournalConfig `yaml:"bbolt"`
+	// MaxEntryBytes bounds one journaled step as the runtime posts it. A
+	// model step can carry a whole write_file argument (up to 4 MiB of
+	// content, JSON-escaped), so the default is 8 MiB.
+	MaxEntryBytes int64 `yaml:"max_entry_bytes"`
+	// MaxSessionBytes bounds everything one session journals during one
+	// control-plane lifetime, so a runaway or hostile runtime cannot fill the
+	// state volume the queue and schedule watermark share.
+	MaxSessionBytes int64 `yaml:"max_session_bytes"`
 }
 
 // BoltJournalConfig points at the journal database file.
@@ -391,8 +399,10 @@ func Default() *Config {
 			Redis:             RedisQueueConfig{KeyPrefix: "mayfly"},
 		},
 		Journal: JournalConfig{
-			Backend: "bbolt",
-			Bolt:    BoltJournalConfig{Path: ".mayfly/journal.db"},
+			Backend:         "bbolt",
+			Bolt:            BoltJournalConfig{Path: ".mayfly/journal.db"},
+			MaxEntryBytes:   8 << 20,
+			MaxSessionBytes: 64 << 20,
 		},
 	}
 }
@@ -711,6 +721,12 @@ func (c *Config) Validate() error {
 		}
 	default:
 		return fmt.Errorf("journal.backend must be memory or bbolt, got %q", c.Journal.Backend)
+	}
+	if c.Journal.MaxEntryBytes <= 0 {
+		return fmt.Errorf("journal.max_entry_bytes must be positive")
+	}
+	if c.Journal.MaxSessionBytes < c.Journal.MaxEntryBytes {
+		return fmt.Errorf("journal.max_session_bytes must be at least journal.max_entry_bytes")
 	}
 	// A session start can take up to 90s (runner start timeout); a shorter
 	// lease would expire while the first worker is still creating the session.
