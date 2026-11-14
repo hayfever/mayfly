@@ -2,7 +2,7 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
-## v0.1.0 - 2026-11-11
+## v0.1.0 - Unreleased (release candidate v0.1.0-rc.1)
 
 First public release.
 
@@ -35,6 +35,19 @@ First public release.
 - Job-to-session correlation: `trigger.job_id` on the session and `GET /api/v1/queue/jobs/{id}` backed by a `queue.tombstone_ttl` record.
 - `queue` configuration block with `max_jobs`, `max_attempts`, `retry_base`, `visibility_timeout`, `dedupe_ttl`, and `poll_interval`.
 - Helm `persistence` option that puts the queue database on a PersistentVolume.
+- Turn step journal (`internal/journal`) with bbolt and in-memory stores. Each `user`, `llm`, `tool:<name>`, and `assistant` step records its input, output, error, and resulting `conversation.jsonl` length.
+- Internal journal endpoints (`POST` and `GET /internal/v1/sessions/{id}/journal`) authenticated by the session token.
+- Session resume: the runtime always checks the journal on startup, truncates `conversation.jsonl` to the last journaled step, rebuilds the turn event from the journal, and executes only missing steps. A replacement needs no configuration change, so the ConfigMap is no longer updated for it.
+- Replacement containers: a non-terminal pod failure or disappearance starts a new pod with the same session, Secret, ConfigMap, NetworkPolicy, and workspace claim, up to `sessions.max_restarts` (default `2`). The local backend restarts the child in the same state directory.
+- `sessions.persistent_workspace` (default `true`) and one per-session PVC, `mayfly-<id>-workspace`, mounted at `/workspace` and `/artifacts` through subPaths. The claim is deleted during cleanup.
+- `sessions.max_restarts` and `journal` configuration blocks.
+- Control-plane restart recovery restores the last journaled turn to the thread with its step keys and publishes step events that were recorded in the journal.
+- Runtime retries transient model requests, so a control-plane replacement does not end an in-flight turn. Each step has a five-minute retry budget; after it the runtime exits and a replacement resumes.
+- Optional `step_key` on session events; the hub drops duplicates so a re-executed step does not post the same tool or assistant message twice.
+- Adopted sessions reserve their hub sequence in the journal, in blocks of 1000, so a restarted control plane never reuses a turn key. The runtime also rejects a journaled turn whose recorded user event is not the message it received, and compares step inputs and step numbers during replay.
+- Labelled session objects whose pod is gone are garbage-collected at adoption instead of leaking their Secret, ConfigMap, network policy, and claim. A session that still has all three resumable objects gets a replacement pod instead, which covers a control plane that stops between deleting a failed pod and starting its replacement.
+- `runtime.storage_class` selects the workspace claim's StorageClass. The claim is now sized as `workspace_limit + artifact_volume_limit`, because the bundle is staged on the same volume.
+- End-to-end tests for forced and graceful pod deletion and control-plane replacement mid-turn, and a local SIGKILL/resume integration test.
 
 ### Changed
 
@@ -49,6 +62,23 @@ First public release.
 - The module path and published images use `github.com/hayfever/mayfly` and `ghcr.io/hayfever`.
 - The S3 store sends checksums only when required, for compatibility with R2, B2, and older MinIO.
 - `mayflyd` rejects unknown configuration fields.
+- `conversation.jsonl` is loaded on runtime start instead of being truncated by a fresh process.
+- The Kubernetes agent writes artifacts under `/artifacts` on the session workspace claim; the old `/var/lib/mayfly` EmptyDir mount is gone.
+- The stub MCP server counts `tools/call` executions and exposes `GET /counts`; the stub LLM calls the MCP tool before writing its report.
+- An assistant message and a tool result are published only when their step is journaled. The live tool call is still emitted, because it is deterministic once the model step is journaled, and the journal publication's copy is deduplicated by its step key.
+- On SIGTERM the runtime stops the turn, closes its logs, and exits non-zero without finalizing unless a close control event was received. Drains, evictions, preemptions, and `kubectl delete` now start a replacement instead of finalizing the session as completed. A session that cannot resume (`sessions.max_restarts: 0`, or a Kubernetes session without a persistent workspace) still finalizes on SIGTERM so its full bundle is exported.
+- A journal apply failure or a `conversation.jsonl` length that does not match its journaled `ConvLen` ends the process so the replacement repairs the conversation from the journal.
+- The journal is deleted when its session finalizes; the artifact bundle is the durable history.
+- Control-plane persistence is on by default in the Helm chart, and the kustomize base mounts `/var/lib/mayfly` from the `mayfly-state` claim, so a restarted control plane keeps its queue, journal, and local artifacts.
+- If the control-plane journal is lost anyway (persistence disabled), adoption of a running session seeds its event sequence at the current time in microseconds, above every key the lost journal could have handed out, and logs a warning. The in-flight turn finishes, and a message posted before its next step can no longer get the same turn key.
+- The journal rejects a step for a turn older than the session's last journaled turn, so a stale container cannot move the resume point back.
+- A replacement retries deleting the pod it replaces (four attempts over about three seconds) before it starts, instead of leaving a live old pod on the workspace claim until cleanup.
+- Session cleanup deletes the ConfigMap before the pod, and `mayflyd` shutdown waits for cleanups in progress. Adoption deletes a session pod whose ConfigMap is gone instead of keeping it, so a control plane that stops mid-cleanup cannot bring a finalized session back as a pod-less replacement.
+- A replayed step records its reply or tool result in `events.jsonl` when the crashed process applied it without logging it. Events already in the log for that step are not written again.
+- The internal events endpoint no longer accepts a batch-level `step_key`. Only the per-event key is used.
+- `sessions.persistent_workspace: false` now disables replacement containers instead of resuming onto an empty workspace.
+- The idle timer no longer finalizes a session while a turn is running, and only resets between turns.
+- Pod failure detection treats a pod that is terminating or Running but not ready as missing, and stops waiting on container configuration errors that cannot recover.
 
 ### Fixed
 
@@ -70,6 +100,9 @@ First public release.
 - No Prometheus metrics or tracing endpoint; structured logs only.
 - No OpenAPI schema. The HTTP API is documented manually and may change in 0.x.
 - No artifact encryption, image signing, or admission policy is provided by the platform itself.
+- Exactly-once external side effects are not provided. A tool that was executing when the container died can run again; `run_command` in particular may repeat.
+- Streaming assistant deltas are not journaled, so a retried step can show duplicate deltas.
+- The journal keeps every turn of an active session until it finalizes. There is no per-session size cap, so a very long session grows its journal until then.
 
 ### Security
 

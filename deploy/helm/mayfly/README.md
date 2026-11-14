@@ -112,10 +112,10 @@ For Bedrock on EKS, annotate `litellm.serviceAccount.annotations` with your IRSA
 | `config.llm.base_url` | empty | OpenAI by default; LiteLLM URL when enabled |
 | `config.agents.allowed_images` | empty | Image allowlist for manifests |
 | `config.queue.backend` | `bbolt` | `memory`, `bbolt`, or `redis`; see [docs/configuration.md](../../../docs/configuration.md#queue) |
-| `persistence.enabled` | false | Put `/var/lib/mayfly` (queue database and local artifacts) on a PersistentVolume |
+| `persistence.enabled` | true | Put `/var/lib/mayfly` (queue database, turn journal, local artifacts) on a PersistentVolume; disabling loses accepted work and in-flight turns across a control-plane restart |
 | `persistence.size` | `2Gi` | Volume size |
 | `ingress.enabled` | false | Create an Ingress |
 | `controlPlane.resources` | small | Control-plane resources |
 | `litellm.enabled` | false | Deploy LiteLLM |
 
-The control plane runs one replica. Session history is in memory; accepted webhook work and artifacts are durable with `bbolt` plus persistence, or with `redis`. See [docs/deployment.md](../../../docs/deployment.md).
+The control plane runs one replica. Session history is in memory; accepted webhook work, the turn journal, and artifacts are durable with `bbolt` plus persistence, or with `redis` for the queue. See [docs/deployment.md](../../../docs/deployment.md).

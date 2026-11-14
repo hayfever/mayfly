@@ -101,5 +101,5 @@ spec:
           emptyDir:
             sizeLimit: 256Mi
         - name: state
-          emptyDir:
-            sizeLimit: 2Gi
+          persistentVolumeClaim:
+            claimName: mayfly-state

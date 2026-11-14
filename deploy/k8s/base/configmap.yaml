@@ -18,6 +18,8 @@ data:
       idle_timeout: 15m
       close_grace: 90s
       max_concurrent: 50
+      max_restarts: 2
+      persistent_workspace: true
       retention: 30m
       allow_shell: false
       shell_timeout: 120s
@@ -33,6 +35,7 @@ data:
       dns_namespace: kube-system
       workspace_limit: 1Gi
       artifact_volume_limit: 1Gi
+      storage_class: ""
       resources:
         requests:
           cpu: 100m
@@ -57,6 +60,10 @@ data:
       max_jobs: 1000
       max_attempts: 5
       dedupe_ttl: 72h
+    journal:
+      backend: bbolt
+      bbolt:
+        path: /var/lib/mayfly/journal.db
     skills:
       dirs: [/etc/mayfly-skills]
     mcp:

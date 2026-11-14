@@ -58,7 +58,9 @@ func NewLocal(binary, stateDir string, logger *slog.Logger) (*Local, error) {
 	}, nil
 }
 
-// Start launches the agent process with a session config file.
+// Start launches the agent process with a session config file. A replacement
+// process is started with the same StateDir, so it appends to the existing
+// conversation and artifact logs and finds the journal on startup.
 func (l *Local) Start(ctx context.Context, spec Spec) (Handle, error) {
 	dir := spec.StateDir
 	if dir == "" {

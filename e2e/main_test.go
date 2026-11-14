@@ -267,9 +267,37 @@ func (c *cluster) waitReady(timeout time.Duration) error {
 // pods and queue storage are left alone, as on a real rollout or node drain.
 func (c *cluster) restartControlPlane(t *testing.T) {
 	t.Helper()
+	c.restartDeployment(t, false)
+}
+
+// killControlPlane force-deletes the control plane pod, so an in-flight
+// request cannot finish during graceful shutdown. The Deployment recreates it.
+func (c *cluster) killControlPlane(t *testing.T) {
+	t.Helper()
+	c.restartDeployment(t, true)
+}
+
+func (c *cluster) restartDeployment(t *testing.T, force bool) {
+	t.Helper()
 	deploy := "deployment/" + c.release
-	if _, err := c.kubectl("rollout", "restart", deploy); err != nil {
-		t.Fatal(err)
+	if force {
+		out, err := c.kubectl("get", "pods",
+			"-l", "app.kubernetes.io/instance="+c.release+",app.kubernetes.io/component=control-plane",
+			"-o", "name")
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := strings.Fields(out)
+		if len(names) == 0 {
+			t.Fatal("control-plane pod not found")
+		}
+		if _, err := c.kubectl("delete", "pod", strings.TrimPrefix(names[0], "pod/"), "--grace-period=0", "--force"); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if _, err := c.kubectl("rollout", "restart", deploy); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := c.kubectl("rollout", "status", deploy, "--timeout=180s"); err != nil {
 		t.Fatal(err)
@@ -292,7 +320,7 @@ func (c *cluster) sessionObjects(id string) ([]string, error) {
 	if id != "" {
 		selector = "mayfly.io/session=" + id
 	}
-	out, err := c.kubectl("get", "pods,secrets,configmaps,networkpolicies", "-l", selector, "-o", "name")
+	out, err := c.kubectl("get", "pods,secrets,configmaps,networkpolicies,persistentvolumeclaims", "-l", selector, "-o", "name")
 	if err != nil {
 		return nil, err
 	}
@@ -314,4 +342,59 @@ func (c *cluster) waitNoSessionObjects(timeout time.Duration) error {
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// forwardService forwards a random local port to a Service and returns the
+// base URL plus a stop function. Tests use it to reach the deterministic
+// stubs, which are not exposed through the control plane.
+func (c *cluster) forwardService(t *testing.T, service string, remotePort int) (string, func()) {
+	t.Helper()
+	cmd := exec.Command("kubectl", c.kubectlArgs("port-forward", "svc/"+service, fmt.Sprintf(":%d", remotePort))...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start port-forward to %s: %v", service, err)
+	}
+	found := make(chan string, 1)
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		sent := false
+		for scanner.Scan() {
+			if m := forwardingRE.FindStringSubmatch(scanner.Text()); m != nil && !sent {
+				found <- m[1]
+				sent = true
+			}
+		}
+	}()
+	select {
+	case port := <-found:
+		return "http://127.0.0.1:" + port, func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+			}
+		}
+	case <-time.After(30 * time.Second):
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("port-forward to %s did not start within 30s", service)
+		return "", nil
+	}
+}
+
+// podNames lists the pods currently labeled for a session.
+func (c *cluster) podNames(t *testing.T, id string) []string {
+	t.Helper()
+	out, err := c.kubectl("get", "pods", "-l", "mayfly.io/session="+id, "-o", "name")
+	if err != nil {
+		return nil
+	}
+	names := []string{}
+	for _, name := range strings.Fields(out) {
+		names = append(names, strings.TrimPrefix(name, "pod/"))
+	}
+	return names
 }

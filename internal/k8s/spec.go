@@ -28,8 +28,13 @@ const (
 	ConfigFile = "/etc/mayfly/session.json"
 	// WorkspaceDir is where the agent works.
 	WorkspaceDir = "/workspace"
-	// ArtifactsDir holds the bundle while it is built.
-	ArtifactsDir = "/var/lib/mayfly/artifacts"
+	// ArtifactsDir holds logs and the bundle while it is built.
+	ArtifactsDir = "/artifacts"
+
+	// WorkspaceSubPath and ArtifactsSubPath select directories inside the
+	// per-session workspace volume.
+	WorkspaceSubPath = "workspace"
+	ArtifactsSubPath = "artifacts"
 
 	agentUID = 65532
 	agentGID = 65532
@@ -55,6 +60,9 @@ type SessionSpec struct {
 	TTL                 time.Duration
 	WorkspaceLimit      string
 	ArtifactLimit       string
+	PersistentWorkspace bool
+	PVCName             string
+	StorageClass        string
 	Resources           ResourceConfig
 	Env                 map[string]string
 	Labels              map[string]string
@@ -68,6 +76,9 @@ type SessionSpec struct {
 	Args                []string
 	SessionJSON         []byte
 	Token               string
+	// NetworkPolicyName is the policy's own name. It must not follow the pod
+	// name: a replacement pod changes the name, while the policy stays.
+	NetworkPolicyName string
 }
 
 // ResourceConfig holds resource quantities.
@@ -115,6 +126,10 @@ func (s *SessionSpec) Validate() error {
 	if s.ArtifactLimit == "" {
 		s.ArtifactLimit = "1Gi"
 	}
+	if s.PersistentWorkspace && s.PVCName == "" {
+		s.PVCName = "mayfly-" + s.SessionID + "-workspace"
+	}
+	s.NetworkPolicyName = s.policyName()
 	for _, q := range append(append([]string{}, values(s.Resources.Requests)...), values(s.Resources.Limits)...) {
 		if _, err := resource.ParseQuantity(q); err != nil {
 			return fmt.Errorf("invalid resource quantity %q: %w", q, err)
@@ -135,6 +150,15 @@ func values(m map[string]string) []string {
 		out = append(out, v)
 	}
 	return out
+}
+
+// policyName is the network policy's own name. It must not follow the pod
+// name: a replacement pod changes the pod name while the policy stays.
+func (s *SessionSpec) policyName() string {
+	if s.NetworkPolicyName != "" {
+		return s.NetworkPolicyName
+	}
+	return "mayfly-" + s.SessionID + "-netpol"
 }
 
 // Secret returns the per-session bearer token secret.
@@ -238,46 +262,99 @@ func (s *SessionSpec) Pod() *corev1.Pod {
 					Requests: quantities(s.Resources.Requests),
 					Limits:   quantities(s.Resources.Limits),
 				},
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: "config", MountPath: "/etc/mayfly", ReadOnly: true},
-					{Name: "workspace", MountPath: WorkspaceDir},
-					{Name: "artifacts", MountPath: "/var/lib/mayfly"},
-					{Name: "tmp", MountPath: "/tmp"},
-				},
+				VolumeMounts: s.volumeMounts(),
 			}},
-			Volumes: []corev1.Volume{
-				{
-					Name: "config",
-					VolumeSource: corev1.VolumeSource{
-						ConfigMap: &corev1.ConfigMapVolumeSource{
-							LocalObjectReference: corev1.LocalObjectReference{Name: s.ConfigMapName},
-						},
-					},
+			Volumes: s.volumes(),
+		},
+	}
+}
+
+func (s *SessionSpec) volumeMounts() []corev1.VolumeMount {
+	mounts := []corev1.VolumeMount{
+		{Name: "config", MountPath: "/etc/mayfly", ReadOnly: true},
+	}
+	if s.PersistentWorkspace {
+		mounts = append(mounts,
+			corev1.VolumeMount{Name: "workspace", MountPath: WorkspaceDir, SubPath: WorkspaceSubPath},
+			corev1.VolumeMount{Name: "workspace", MountPath: ArtifactsDir, SubPath: ArtifactsSubPath},
+		)
+	} else {
+		mounts = append(mounts,
+			corev1.VolumeMount{Name: "workspace", MountPath: WorkspaceDir},
+			corev1.VolumeMount{Name: "artifacts", MountPath: ArtifactsDir},
+		)
+	}
+	return append(mounts, corev1.VolumeMount{Name: "tmp", MountPath: "/tmp"})
+}
+
+func (s *SessionSpec) volumes() []corev1.Volume {
+	volumes := []corev1.Volume{{
+		Name: "config",
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: s.ConfigMapName},
+			},
+		},
+	}}
+	if s.PersistentWorkspace {
+		volumes = append(volumes, corev1.Volume{
+			Name: "workspace",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: s.PVCName},
+			},
+		})
+	} else {
+		volumes = append(volumes,
+			corev1.Volume{
+				Name: "workspace",
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: quantityPtr(s.WorkspaceLimit)},
 				},
-				{
-					Name: "workspace",
-					VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: quantityPtr(s.WorkspaceLimit)},
-					},
+			},
+			corev1.Volume{
+				Name: "artifacts",
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: quantityPtr(s.ArtifactLimit)},
 				},
-				{
-					Name: "artifacts",
-					VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: quantityPtr(s.ArtifactLimit)},
-					},
-				},
-				{
-					Name: "tmp",
-					VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{
-							Medium:    corev1.StorageMediumMemory,
-							SizeLimit: quantityPtr("256Mi"),
-						},
-					},
+			},
+		)
+	}
+	return append(volumes, corev1.Volume{
+		Name: "tmp",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: quantityPtr("256Mi"),
+			},
+		},
+	})
+}
+
+// PersistentVolumeClaim returns the workspace claim shared by a session and
+// all of its replacement containers. The claim holds the agent workspace and
+// the bundle staging directory, so it is sized for both limits.
+func (s *SessionSpec) PersistentVolumeClaim() *corev1.PersistentVolumeClaim {
+	storage := resource.MustParse(s.WorkspaceLimit)
+	storage.Add(resource.MustParse(s.ArtifactLimit))
+	claim := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      s.PVCName,
+			Namespace: s.Namespace,
+			Labels:    s.labels(),
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: storage,
 				},
 			},
 		},
 	}
+	if s.StorageClass != "" {
+		claim.Spec.StorageClassName = &s.StorageClass
+	}
+	return claim
 }
 
 // NetworkPolicy denies all ingress and limits egress to the control plane,
@@ -328,7 +405,7 @@ func (s *SessionSpec) NetworkPolicy() *networkingv1.NetworkPolicy {
 
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      s.PodName,
+			Name:      s.policyName(),
 			Namespace: s.Namespace,
 			Labels:    s.labels(),
 		},

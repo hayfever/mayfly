@@ -178,3 +178,63 @@ func TestPodIgnoresReservedEnv(t *testing.T) {
 		t.Fatal("literal env was dropped")
 	}
 }
+
+func TestPersistentWorkspaceUsesOnePVC(t *testing.T) {
+	spec := testSpec()
+	spec.PersistentWorkspace = true
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if spec.PVCName != "mayfly-abc123-workspace" {
+		t.Fatalf("PVC name = %q", spec.PVCName)
+	}
+	pvc := spec.PersistentVolumeClaim()
+	if pvc.Name != spec.PVCName || pvc.Spec.AccessModes[0] != corev1.ReadWriteOnce {
+		t.Fatalf("PVC = %+v", pvc)
+	}
+	// The claim holds the workspace and the bundle staging directory.
+	if got := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; got.String() != "384Mi" {
+		t.Fatalf("PVC size = %s", got.String())
+	}
+	if pvc.Spec.StorageClassName != nil {
+		t.Fatalf("unconfigured storage class = %q", *pvc.Spec.StorageClassName)
+	}
+	spec.StorageClass = "fast"
+	if got := spec.PersistentVolumeClaim().Spec.StorageClassName; got == nil || *got != "fast" {
+		t.Fatalf("storage class = %v", got)
+	}
+	if got := spec.NetworkPolicy().Name; got != "mayfly-abc123-netpol" {
+		t.Fatalf("network policy name = %q", got)
+	}
+	pod := spec.Pod()
+	var mounts []corev1.VolumeMount
+	for _, m := range pod.Spec.Containers[0].VolumeMounts {
+		if m.Name == "workspace" {
+			mounts = append(mounts, m)
+		}
+	}
+	if len(mounts) != 2 {
+		t.Fatalf("workspace mounts = %+v", mounts)
+	}
+	if mounts[0].MountPath != WorkspaceDir || mounts[0].SubPath != WorkspaceSubPath {
+		t.Fatalf("workspace mount = %+v", mounts[0])
+	}
+	if mounts[1].MountPath != ArtifactsDir || mounts[1].SubPath != ArtifactsSubPath {
+		t.Fatalf("artifacts mount = %+v", mounts[1])
+	}
+	var claim string
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == "workspace" {
+			if v.PersistentVolumeClaim == nil {
+				t.Fatal("workspace volume is not a PVC")
+			}
+			claim = v.PersistentVolumeClaim.ClaimName
+		}
+	}
+	if claim != spec.PVCName {
+		t.Fatalf("workspace claim = %q", claim)
+	}
+	if pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Fatal("replacement is handled by the control plane, not the kubelet")
+	}
+}

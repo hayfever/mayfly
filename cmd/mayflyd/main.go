@@ -20,6 +20,7 @@ import (
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/httpapi"
 	"github.com/hayfever/mayfly/internal/hub"
+	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/k8s"
 	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/runner"
@@ -71,6 +72,27 @@ func main() {
 		}
 	}()
 
+	var journalStore journal.Durable
+	switch cfg.Journal.Backend {
+	case "memory":
+		journalStore = journal.NewMemory()
+	case "bbolt":
+		boltJournal, err := journal.OpenBolt(cfg.Journal.Bolt.Path)
+		if err != nil {
+			logger.Error("configure journal", "error", err)
+			os.Exit(2)
+		}
+		defer func() {
+			if err := boltJournal.Close(); err != nil {
+				logger.Warn("close journal", "error", err)
+			}
+		}()
+		journalStore = boltJournal
+	default:
+		logger.Error("configure journal", "error", fmt.Errorf("unknown backend %q", cfg.Journal.Backend))
+		os.Exit(2)
+	}
+
 	var sessionRunner runner.Runner
 	var kube *k8s.Client
 	switch cfg.Runtime.Backend {
@@ -90,7 +112,7 @@ func main() {
 	}
 
 	h := hub.New(cfg.Sessions.EventBuffer)
-	mgr, err := session.New(cfg, store, h, sessionRunner, kube, logger)
+	mgr, err := session.New(cfg, store, h, journalStore, sessionRunner, kube, logger)
 	if err != nil {
 		logger.Error("create session manager", "error", err)
 		os.Exit(2)
