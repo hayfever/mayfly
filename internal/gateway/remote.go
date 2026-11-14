@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -28,6 +29,8 @@ const (
 	// authErrorMessage replaces an upstream's own text on 401 and 403, so a
 	// credential failure reads the same over every transport.
 	authErrorMessage = "upstream rejected credentials"
+	// localMCPPath is the path a local service shim serves.
+	localMCPPath = "/mcp"
 )
 
 // remoteKey identifies one upstream MCP server in one session. The gateway
@@ -130,6 +133,17 @@ func (g *Gateway) openRemoteClient(ctx context.Context, session, owner string, p
 		return &remoteClient{client: client}, nil
 
 	case Service:
+		if def, ok := g.serviceEndpoint(owner); ok {
+			if def.Transport != "http" {
+				return nil, fmt.Errorf("mcp server %q is not an HTTP server", def.Name)
+			}
+			client := mcp.NewHTTPWithClient(owner, def.URL, def.ResolvedHeaders, g.opts.HTTPClient, nil)
+			if err := client.Initialize(ctx); err != nil {
+				_ = client.Close()
+				return nil, err
+			}
+			return &remoteClient{client: client}, nil
+		}
 		if g.opts.ServiceURL == nil {
 			return nil, errors.New("service plugins are not configured")
 		}
@@ -147,7 +161,11 @@ func (g *Gateway) openRemoteClient(ctx context.Context, session, owner string, p
 			return nil, err
 		}
 		rc := &remoteClient{key: key, token: token}
-		rc.client = mcp.NewHTTPWithClient(owner, url, nil, g.opts.HTTPClient, rc.setAuthorization)
+		client, err := g.serviceClient(owner, url, rc.setAuthorization)
+		if err != nil {
+			return nil, err
+		}
+		rc.client = client
 		if err := rc.client.Initialize(ctx); err != nil {
 			_ = rc.client.Close()
 			return nil, err
@@ -157,6 +175,49 @@ func (g *Gateway) openRemoteClient(ctx context.Context, session, owner string, p
 	default:
 		return nil, fmt.Errorf("tool owner %q has no remote transport", owner)
 	}
+}
+
+// serviceEndpoint returns the mcp.servers entry that a service plugin points
+// at. Such a plugin renders no workload; the gateway calls that server under
+// the plugin's tool names.
+func (g *Gateway) serviceEndpoint(owner string) (config.MCPServerConfig, bool) {
+	if g.opts.Manifests == nil {
+		return config.MCPServerConfig{}, false
+	}
+	for _, manifest := range g.opts.Manifests() {
+		if manifest.Name != owner || manifest.Placement != plugin.Service {
+			continue
+		}
+		if manifest.Service == nil || manifest.Service.MCPServer == "" {
+			continue
+		}
+		return g.mcpServer(manifest.Service.MCPServer)
+	}
+	return config.MCPServerConfig{}, false
+}
+
+// serviceClient builds the MCP client of one service workload. A local
+// backend service listens on a Unix socket, which the URL marks with a
+// "unix:" prefix; the shim always serves the fixed /mcp path there.
+func (g *Gateway) serviceClient(owner, url string, perRequest func(*http.Request)) (*mcp.Client, error) {
+	if !strings.HasPrefix(url, "unix:") {
+		return mcp.NewHTTPWithClient(owner, url, nil, g.opts.HTTPClient, perRequest), nil
+	}
+	socket := strings.TrimPrefix(url, "unix:")
+	if socket == "" {
+		return nil, errors.New("service socket path is empty")
+	}
+	client := &http.Client{Timeout: 5 * time.Minute}
+	if g.opts.HTTPClient != nil {
+		*client = *g.opts.HTTPClient
+	}
+	dialer := &net.Dialer{}
+	client.Transport = &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "unix", socket)
+		},
+	}
+	return mcp.NewHTTPWithClient(owner, "http://plugin"+localMCPPath, nil, client, perRequest), nil
 }
 
 // remoteTools lists one upstream's tools once per session. The result, error

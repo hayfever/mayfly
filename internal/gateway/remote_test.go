@@ -14,6 +14,7 @@ import (
 
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/journal"
+	"github.com/hayfever/mayfly/internal/plugin"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
@@ -525,7 +526,7 @@ func mustGrant(t *testing.T, g *Gateway) Grant {
 	return grant
 }
 
-func TestRemoteServiceCallToken(t *testing.T) {
+func TestGatewayServiceCall(t *testing.T) {
 	upstream := newFakeUpstream("query")
 	server := httptest.NewServer(upstream)
 	defer server.Close()
@@ -596,6 +597,90 @@ func TestRemoteServiceCallToken(t *testing.T) {
 	}
 	if claims.Key != "s1/2/3" {
 		t.Fatalf("call token key = %q", claims.Key)
+	}
+}
+
+// TestServiceMCPServerRef proves that a service plugin with service.mcpServer
+// calls the configured mcp.servers entry with its headers, under the plugin's
+// tool names, and never asks the service reconciler for an endpoint.
+func TestServiceMCPServerRef(t *testing.T) {
+	upstream := newFakeUpstream("find_account")
+	server := httptest.NewServer(upstream)
+	defer server.Close()
+
+	def := config.MCPServerConfig{
+		Name:            "crm",
+		Transport:       "http",
+		URL:             server.URL,
+		ResolvedHeaders: map[string]string{"Authorization": "Bearer crm-token"},
+	}
+	manifest := plugin.Manifest{
+		Name:      "crm",
+		Placement: plugin.Service,
+		Service:   &plugin.ServiceSpec{MCPServer: "crm"},
+		Tools:     []plugin.Tool{{Name: "find_account", Idempotent: true}},
+	}
+	mem := journal.NewMemory()
+	if err := mem.Reserve(context.Background(), "s1", 10); err != nil {
+		t.Fatal(err)
+	}
+	g := New(Options{
+		Ledger:    mem,
+		Sequencer: mem,
+		Manifests: func() []plugin.Manifest { return []plugin.Manifest{manifest} },
+		MCPServer: func(name string) (config.MCPServerConfig, bool) {
+			if name == def.Name {
+				return def, true
+			}
+			return config.MCPServerConfig{}, false
+		},
+		ServiceURL: func(name string) (string, []byte, error) {
+			t.Fatalf("ServiceURL was called for an mcpServer plugin %q", name)
+			return "", nil, nil
+		},
+	})
+	cfg := sessioncfg.Config{
+		SessionID: "s1",
+		MaxSteps:  4,
+		Plugins: []sessioncfg.Plugin{{
+			Name:      "crm",
+			Placement: "service",
+			Tools:     []sessioncfg.PluginTool{{Name: "find_account", Idempotent: true, TimeoutSeconds: 5}},
+		}},
+	}
+	g.Register(GrantFor(cfg, "helper", nil))
+
+	discovery, err := g.Discover(context.Background(), "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Tools) != 1 || discovery.Tools[0].Name != "plugin_crm_find_account" {
+		t.Fatalf("discovery tools = %+v", discovery.Tools)
+	}
+	if discovery.Tools[0].Description != "description of find_account" {
+		t.Fatalf("discovery description = %q", discovery.Tools[0].Description)
+	}
+	if len(discovery.Errors) != 0 {
+		t.Fatalf("discovery errors = %+v", discovery.Errors)
+	}
+
+	resp, err := begin(g, "plugin_crm_find_account", 2, 3, `{"id":"abc"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Result == nil || resp.Result.Content != "ok:find_account" {
+		t.Fatalf("endpoint result = %+v", resp)
+	}
+	call := upstream.lastCall(t)
+	if call.meta["mayfly.io/idempotency-key"] != "s1/2/3" {
+		t.Fatalf("call meta = %v", call.meta)
+	}
+	if call.meta["mayfly.io/session"] != "s1" {
+		t.Fatalf("call meta session = %v", call.meta)
+	}
+	headers := upstream.headerValues("Authorization")
+	if len(headers) == 0 || headers[len(headers)-1] != "Bearer crm-token" {
+		t.Fatalf("authorization headers = %v", headers)
 	}
 }
 
