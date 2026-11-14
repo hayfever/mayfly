@@ -52,6 +52,13 @@ func writeEnvironment(b *strings.Builder, cfg sessioncfg.Config) {
 	b.WriteString("- Multiple people may send messages. Treat each message as a request and keep replies concise.\n")
 	b.WriteString("- Use tools when they make the answer more accurate. Do not invent tool results.\n")
 	b.WriteString("- When the task is complete, reply with a short summary and stop.\n")
+	if len(cfg.Artifacts) > 0 {
+		keys := make([]string, 0, len(cfg.Artifacts))
+		for _, a := range cfg.Artifacts {
+			keys = append(keys, a.Key)
+		}
+		fmt.Fprintf(b, "- Input artifacts: %s. Read them with read_artifact, then continue at next_offset.\n", strings.Join(keys, ", "))
+	}
 	if len(cfg.MCPServers) > 0 {
 		names := make([]string, 0, len(cfg.MCPServers))
 		for _, s := range cfg.MCPServers {

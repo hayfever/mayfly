@@ -116,7 +116,11 @@ func (r *Runtime) Run(ctx context.Context) error {
 	for _, err := range r.mcp.Errors() {
 		r.events.Emit(ctx, model.EventSystem, "mayfly", "MCP server unavailable: "+err.Error(), nil)
 	}
-	tools, err := newToolset(r.cfg.WorkspaceDir, r.cfg.AllowShell, time.Duration(r.cfg.ShellTimeoutSecs)*time.Second, r.mcp)
+	var artifacts ArtifactReader
+	if len(r.cfg.Artifacts) > 0 {
+		artifacts = r.platform
+	}
+	tools, err := newToolset(r.cfg.WorkspaceDir, r.cfg.AllowShell, time.Duration(r.cfg.ShellTimeoutSecs)*time.Second, r.mcp, artifacts)
 	if err != nil {
 		return r.finalize(context.Background(), "failed", err)
 	}

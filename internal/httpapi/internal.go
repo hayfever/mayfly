@@ -277,3 +277,60 @@ func (s *Server) internalMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	s.broker.ServeMCP(w, r, def)
 }
+
+func (s *Server) internalReadArtifact(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.internalSession(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	query := r.URL.Query()
+	key := strings.TrimSpace(query.Get("key"))
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "key is required")
+		return
+	}
+	offset, err := parseWindowInt(query.Get("offset"), 0)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "offset must be a non-negative integer")
+		return
+	}
+	limit, err := parseWindowInt(query.Get("limit"), 24<<10)
+	if err != nil || limit <= 0 {
+		writeError(w, http.StatusBadRequest, "limit must be a positive integer")
+		return
+	}
+	window, err := s.mgr.ReadArtifact(r.Context(), id, bearerToken(r), key, offset, limit)
+	switch {
+	case errors.Is(err, session.ErrUnauthorized):
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	case errors.Is(err, session.ErrNotFound):
+		writeError(w, http.StatusNotFound, "artifact not found")
+		return
+	case err != nil:
+		s.logger.Warn("read artifact failed", "session", id, "key", key, "error", err)
+		writeError(w, http.StatusInternalServerError, "artifact read failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"key":          window.Key,
+		"offset":       window.Offset,
+		"bytes":        window.Bytes,
+		"total":        window.Total,
+		"next_offset":  window.NextOffset,
+		"content_type": window.ContentType,
+		"content":      string(window.Content),
+	})
+}
+
+func parseWindowInt(raw string, fallback int64) (int64, error) {
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return value, nil
+}

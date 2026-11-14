@@ -18,6 +18,7 @@ import (
 
 	"github.com/hayfever/mayfly/internal/llm"
 	"github.com/hayfever/mayfly/internal/mcp"
+	"github.com/hayfever/mayfly/internal/platformclient"
 )
 
 const (
@@ -28,15 +29,21 @@ const (
 	mcpCallTimeout   = 120 * time.Second
 )
 
+// ArtifactReader reads a window of one input artifact.
+type ArtifactReader interface {
+	ReadArtifact(ctx context.Context, key string, offset, limit int64) (platformclient.ArtifactWindow, error)
+}
+
 type toolset struct {
 	root         *os.Root
 	rootPath     string
 	allowShell   bool
 	shellTimeout time.Duration
 	mcp          *mcp.Manager
+	artifacts    ArtifactReader
 }
 
-func newToolset(workspace string, allowShell bool, shellTimeout time.Duration, manager *mcp.Manager) (*toolset, error) {
+func newToolset(workspace string, allowShell bool, shellTimeout time.Duration, manager *mcp.Manager, artifacts ArtifactReader) (*toolset, error) {
 	root, err := os.OpenRoot(workspace)
 	if err != nil {
 		return nil, fmt.Errorf("open workspace: %w", err)
@@ -47,6 +54,7 @@ func newToolset(workspace string, allowShell bool, shellTimeout time.Duration, m
 		allowShell:   allowShell,
 		shellTimeout: shellTimeout,
 		mcp:          manager,
+		artifacts:    artifacts,
 	}, nil
 }
 
@@ -83,6 +91,17 @@ func (t *toolset) Tools() []llm.Tool {
 			"required":["command"]
 		}`)))
 	}
+	if t.artifacts != nil {
+		tools = append(tools, llm.NewTool("read_artifact", "Read a slice of a read-only input artifact. The result reports total bytes and next_offset; call again with offset=next_offset to continue.", json.RawMessage(`{
+			"type":"object",
+			"properties":{
+				"key":{"type":"string","description":"Artifact key from the prompt"},
+				"offset":{"type":"integer","description":"Byte offset to start reading (default 0)"},
+				"limit":{"type":"integer","description":"Maximum bytes to return (default 24576)"}
+			},
+			"required":["key"]
+		}`)))
+	}
 	if t.mcp != nil {
 		for _, mt := range t.mcp.Tools() {
 			schema := mt.InputSchema
@@ -113,6 +132,8 @@ func (t *toolset) Call(ctx context.Context, name string, args json.RawMessage) (
 			return "", false, errors.New("run_command is disabled for this session")
 		}
 		return t.runCommand(ctx, args)
+	case "read_artifact":
+		return t.readArtifact(ctx, args)
 	}
 	if t.mcp != nil {
 		callCtx, cancel := context.WithTimeout(ctx, mcpCallTimeout)
@@ -337,4 +358,66 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + fmt.Sprintf("\n(truncated at %d bytes)", max)
+}
+
+// artifactWindowBytes bounds one read so the JSON envelope stays under the
+// tool output cap even when the payload needs escaping.
+const artifactWindowBytes = 24 << 10
+
+func (t *toolset) readArtifact(ctx context.Context, args json.RawMessage) (string, bool, error) {
+	if t.artifacts == nil {
+		return "", false, errors.New("this session has no input artifacts")
+	}
+	var in struct {
+		Key    string `json:"key"`
+		Offset int64  `json:"offset"`
+		Limit  int64  `json:"limit"`
+	}
+	if err := json.Unmarshal(args, &in); err != nil {
+		return "", false, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if strings.TrimSpace(in.Key) == "" {
+		return "", false, errors.New("key is required")
+	}
+	if in.Offset < 0 {
+		return "", false, errors.New("offset must not be negative")
+	}
+	limit := in.Limit
+	if limit <= 0 || limit > artifactWindowBytes {
+		limit = artifactWindowBytes
+	}
+	window, err := t.artifacts.ReadArtifact(ctx, in.Key, in.Offset, limit)
+	if err != nil {
+		return "", true, err
+	}
+	envelope := map[string]any{
+		"key":          window.Key,
+		"content_type": window.ContentType,
+		"offset":       window.Offset,
+		"bytes":        window.Bytes,
+		"total":        window.Total,
+		"next_offset":  window.NextOffset,
+	}
+	content := window.Content
+	for {
+		envelope["content"] = content
+		envelope["bytes"] = int64(len(content))
+		if len(content) == 0 || window.NextOffset == nil {
+			envelope["next_offset"] = nil
+		} else {
+			next := window.Offset + int64(len(content))
+			envelope["next_offset"] = next
+		}
+		out, err := json.Marshal(envelope)
+		if err != nil {
+			return "", false, err
+		}
+		if len(out) <= maxToolOutput {
+			return string(out), false, nil
+		}
+		if len(content) < 2 {
+			return "", false, errors.New("artifact window does not fit the tool output limit")
+		}
+		content = content[:len(content)/2]
+	}
 }

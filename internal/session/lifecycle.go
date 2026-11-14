@@ -611,6 +611,7 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 				Title:        cfg.Title,
 				Status:       model.StatusPending,
 				Prompt:       cfg.Prompt,
+				Agent:        cfg.Agent,
 				Model:        cfg.Model,
 				Skills:       skillNames(cfg.Skills),
 				MCPServers:   mcpNames(cfg.MCPServers),
@@ -625,6 +626,8 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 			token:      token,
 			tokenHash:  hashToken(token),
 			runtimeCfg: cfg,
+			// The session may still read the inputs it was started with.
+			artifacts:  artifactMap(cfg.Artifacts),
 			image:      image,
 			command:    command,
 			args:       args,
@@ -748,6 +751,8 @@ func (m *Manager) adoptPodless(ctx context.Context, id string, objs k8s.OrphanOb
 		token:      token,
 		tokenHash:  hashToken(token),
 		runtimeCfg: cfg,
+		// The session may still read the inputs it was started with.
+		artifacts:  artifactMap(cfg.Artifacts),
 		image:      image,
 		command:    append([]string(nil), agent.Runtime.Command...),
 		args:       append([]string(nil), agent.Runtime.Args...),
