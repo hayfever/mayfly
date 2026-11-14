@@ -90,7 +90,7 @@ func (l *Local) Start(ctx context.Context, spec Spec) (Handle, error) {
 	}
 	env["MAYFLY_CONFIG"] = cfgPath
 	env["MAYFLY_SESSION_TOKEN"] = spec.Token
-	cmd.Env = setEnv(os.Environ(), env)
+	cmd.Env = setEnv(baseEnv(os.LookupEnv), env)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -177,6 +177,29 @@ func tailFile(path string, maxBytes int64) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// passEnv lists the host variables a local session inherits: what a shell,
+// a TLS client, and a stdio MCP child need to run. Everything else, including
+// MAYFLY_API_TOKEN, the LLM key, and provider tokens such as NOTION_TOKEN, is
+// dropped. runtime.env adds variables explicitly.
+var passEnv = []string{
+	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TZ",
+	"LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TERM",
+	"SSL_CERT_FILE", "SSL_CERT_DIR",
+	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+	"MAYFLY_LOG_LEVEL",
+}
+
+// baseEnv is the minimal environment a local session starts from.
+func baseEnv(lookup func(string) (string, bool)) []string {
+	out := make([]string, 0, len(passEnv))
+	for _, name := range passEnv {
+		if value, ok := lookup(name); ok {
+			out = append(out, name+"="+value)
+		}
+	}
+	return out
 }
 
 func setEnv(base []string, overrides map[string]string) []string {

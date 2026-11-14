@@ -85,6 +85,7 @@ First public release.
 - `runtime.image_pull_secrets` now reaches session pods, so private agent images pull correctly.
 - `runtime.env` and agent `runtime.env` cannot set `MAYFLY_CONFIG` or `MAYFLY_SESSION_TOKEN`; startup fails and the pod builder drops them.
 - GitHub triggers no longer accept the static `X-Mayfly-Token` header, which could be replayed.
+- The `local` runtime starts the agent with a minimal environment instead of mayflyd's.
 
 ### Known limitations
 
