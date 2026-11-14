@@ -12,14 +12,15 @@ Error responses:
 
 | Status | Meaning |
 |---|---|
-| 400 | Invalid request, unknown skill/server, bad TTL |
+| 400 | Invalid request, unknown skill/server, bad TTL, bad tool turn or step |
 | 401 | Missing or wrong token, invalid webhook signature |
-| 404 | Unknown session, trigger, artifact, job, or dead job |
-| 409 | Session is closed |
+| 403 | Tool is not granted to the session |
+| 404 | Unknown session, trigger, artifact, job, or dead job; a tool route for a non-built-in harness |
+| 409 | Session is closed, or a tool call key was reused with another tool or other arguments |
 | 413 | Body or artifact too large |
-| 429 | Trigger rate limit, `queue.max_jobs` reached, or `sessions.max_concurrent` reached on the admin API; `Retry-After` is set |
+| 429 | Trigger rate limit, `queue.max_jobs` reached, `sessions.max_concurrent` reached on the admin API, or a plugin rate limit; `Retry-After` is set |
 | 500 | Startup, storage, or internal failure |
-| 503 | Control plane is not ready (`/readyz`), or the queue rejected the write |
+| 503 | Control plane is not ready (`/readyz`), the tool gateway's in-flight cap is reached, or the queue rejected the write |
 
 ## Public
 
@@ -212,6 +213,42 @@ These endpoints accept the scoped session token, never the admin token.
 | `POST /internal/v1/sessions/{id}/artifacts` | Upload a tar.gz bundle. Requires `Content-Length` and `X-Mayfly-SHA256`. Optional `X-Mayfly-Partial: true` |
 | `POST /internal/v1/sessions/{id}/finalize` | `{"status":"completed"\|"failed","reason":"...","error":"..."}` |
 | `POST /internal/v1/llm/chat/completions` | OpenAI-compatible proxy. The model must be the one assigned to the session; an empty model field is filled with it |
+| `GET /internal/v1/sessions/{id}/tools` | The session's tool grant, sidecar discovery tokens, and unavailable owners |
+| `POST /internal/v1/sessions/{id}/tools/calls` | Authorize one tool call. The answer is a recorded result or a dispatch |
+| `POST /internal/v1/sessions/{id}/tools/calls/complete` | Report the result of a locally dispatched call |
 | `POST\|GET\|DELETE /internal/v1/mcp/{server}` | HTTP MCP proxy; server must be assigned to the session |
 
 Inbox events use SSE `event: message` frames whose data is the event JSON. Comments (`: ping`) are keepalives. If `after` is greater than the control plane's current sequence (for example after a control-plane restart), the inbox sends `event: reset`; the runtime reconnects with `after=0`.
+
+### Tool calls
+
+The three tool routes serve the built-in harness only. A session whose agent selects another harness gets `404`.
+
+`GET /internal/v1/sessions/{id}/tools`:
+
+```json
+{
+  "tools": [
+    {"name": "plugin_tickets_get_ticket", "owner": "tickets", "placement": "service",
+     "description": "...", "input_schema": {"type": "object"}, "idempotent": true, "timeout_ms": 120000}
+  ],
+  "sidecars": {"notify": {"discovery_token": "v1...."}},
+  "errors": [{"owner": "tickets", "required": false, "error": "no ready replica"}]
+}
+```
+
+Remote tools carry the description and schema from gateway discovery. Local tools carry the grant fields, and the runtime fills the rest from the plugin's `tools/list`. A required owner in `errors` fails the session at start. A `wildcards` map names `mcp.servers` entries whose tools the grant does not list; the runtime resolves a stdio tool against its own list.
+
+`POST /internal/v1/sessions/{id}/tools/calls` with
+`{"turn":3,"step":4,"call_id":"call_ab","tool":"plugin_notify_post","arguments":{}}`
+answers with exactly one of:
+
+```json
+{"result": {"content": "...", "is_error": false, "replayed": false, "interrupted": false}}
+{"dispatch": {"key": "s1/3/4", "timeout_ms": 30000, "token": "v1...."}}
+```
+
+`token` is set only for a sidecar tool. `replayed` marks a result the ledger already held. `interrupted` marks a non-idempotent call that a container restart cut short and the gateway did not run again.
+
+`POST /internal/v1/sessions/{id}/tools/calls/complete` with
+`{"key":"s1/3/4","content":"...","is_error":false}` answers `204`. A repeat with identical content is also `204`; a different result for a completed key is `409`, and an unknown key is `404`.

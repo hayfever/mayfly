@@ -5,7 +5,8 @@
 1. **Trigger/API caller** — authenticated by an admin token or a per-trigger secret.
 2. **Control plane** — holds the admin token, LLM key, MCP credentials, and object-store credentials.
 3. **Session container** — untrusted by default. It holds one scoped session token and no long-lived credentials.
-4. **Artifact store** — receives bundles from the control plane only.
+4. **Plugin workload** — trusted operator code, but not trusted with the agent's data: an inline plugin shares the agent container, a sidecar shares the session pod, and a service is its own Deployment.
+5. **Artifact store** — receives bundles from the control plane only.
 
 ## Session isolation defaults
 
@@ -35,7 +36,9 @@ The session runtime never receives:
 - object-store credentials,
 - HTTP MCP server credentials.
 
-Model calls go through `/internal/v1/llm/chat/completions`. The broker checks that the requested model is the one assigned to the session, injects the configured key, and streams the response. A session token cannot choose a different allowlisted model. With LiteLLM, the broker holds only the LiteLLM master key; provider keys live in LiteLLM. Keep LiteLLM private and do not expose it through the Mayfly ingress. HTTP MCP calls go through `/internal/v1/mcp/{server}`. The proxy injects configured headers, including values resolved from `env:NAME`, and checks that the session was assigned that server.
+Model calls go through `/internal/v1/llm/chat/completions`. The broker checks that the requested model is the one assigned to the session, injects the configured key, and streams the response. A session token cannot choose a different allowlisted model. With LiteLLM, the broker holds only the LiteLLM master key; provider keys live in LiteLLM. Keep LiteLLM private and do not expose it through the Mayfly ingress.
+
+Tool calls go through `/internal/v1/sessions/{id}/tools`. The gateway holds each session's tool grant, checks the call against it, records it in the ledger, and injects the upstream credential. HTTP `mcp.servers` credentials are read from the resolved configuration and never sent to the session. `* /internal/v1/mcp/{server}` still proxies HTTP MCP calls for alternate harnesses, which bypass the gateway and its ledger.
 
 The session token is a random 32-byte value. It is stored in a per-session Kubernetes Secret and indexed by SHA-256 in the control plane. It authorizes only:
 
@@ -44,6 +47,7 @@ The session token is a random 32-byte value. It is stored in a per-session Kuber
 - uploading that session's artifact,
 - finalizing that session,
 - model calls,
+- calling the tools granted to that session,
 - HTTP MCP calls for servers assigned to that session.
 
 The token is removed from the index when the session finalizes or is deleted.
@@ -59,6 +63,30 @@ Remote skill archives are fetched by the control plane at startup, verified by S
 `harness` selects an executable from the image, normally `/opt/mayfly/harnesses/<name>`. Harness executables are trusted image content. A missing or non-executable selected harness fails the session; it does not fall back to Mayfly. An empty harness selects the built-in loop. Mayfly never installs harness packages at session start.
 
 `runtime.command`, `runtime.args`, and `runtime.env` are trusted manifest configuration. They become pod settings. Do not accept them from API requests. Environment values are literal and visible in the pod spec; `MAYFLY_SESSION_TOKEN` and `MAYFLY_CONFIG` are reserved and rejected at startup if a manifest or `runtime.env` sets them. The pod builder also drops them, so a repeated env name cannot override the session token. Harness-specific data belongs in `runtime.config`, which the built-in runtime ignores. `runtime.config` is written to the session ConfigMap, so do not put secrets there either.
+
+## Plugins
+
+A plugin is an MCP server declared in the bundle. It is trusted operator code. The placement decides what it can reach and where its credentials live.
+
+| Placement | Runs in | Credentials | Agent container can read them |
+|---|---|---|---|
+| `inline` | A child of the agent runtime | Files under `/var/run/mayfly/plugin-secrets/<name>/`, mode 0400 | Yes. The runtime passes them to that plugin only, but `run_command` runs in the same container |
+| `sidecar` | Its own container in the session pod | Environment from `secretKeyRef` | No. The Secret is mounted only into the sidecar |
+| `service` | Its own Deployment in `plugins.namespace` | Environment from `secretKeyRef` | No |
+| `service.mcpServer` | A remote `mcp.servers` entry | Headers resolved in `mayflyd` | No |
+
+Call tokens:
+
+- **Sidecar.** `mayflyd` signs a token with a per-session key stored in the session Secret as `gateway-key`. The key is mounted only into sidecar containers, never into the agent container. The token names the session, plugin, remote tool, idempotency key, argument hash, and expiry. The shim rejects a missing, expired, or mismatched token, and a second use of a key while the first call is in flight. It keeps the last 1024 completed keys and returns the stored result for a replay, so a dropped response does not run the tool twice.
+- **Service.** The key is per plugin, in `Secret/mayfly-gateway-<name>` in `plugins.namespace`. The reconciler creates it once and does not rotate it. A `transport: http` service receives the key as `MAYFLY_GATEWAY_KEY` and may check the `Authorization: Bearer` header itself. The service NetworkPolicy is the required control in that mode.
+
+The `allowShell` rule: an agent with `allowShell: true` cannot select an `inline` plugin that declares `secrets`, because `run_command` runs in the same container and could read them. On the local backend the rule covers `sidecar` plugins too, because they run inline there. The error suggests `placement: sidecar` for the cluster, or `placement: service`.
+
+Service network: a service plugin's NetworkPolicy admits ingress only from control-plane pods on the plugin port, and allows egress only to cluster DNS and `service.egress`. Session pods cannot reach a service; the gateway calls it.
+
+Audit: the gateway writes one `call.begin` and one `call.done` record per call. Arguments and results are never logged; `plugins.audit_path` appends the records to a file with mode 0600.
+
+What this does not do: sandbox plugin code, verify plugin image signatures, allow hostname egress, rotate the service gateway key, or apply the gateway to alternate harnesses. See [plugins.md](plugins.md) for the placement model.
 
 ## Trigger authentication
 
@@ -87,7 +115,10 @@ A verified webhook becomes one queued job and is answered immediately. Replay pr
 - Admin token is a shared bearer token. Rotate it and mount it from a Secret.
 - Session history is in memory and is dropped after `sessions.retention` (`30m` by default). The journal keeps the completed steps of every turn of an active session in the control-plane database for resume, and is deleted when the session finalizes; the artifact bundle is the durable history. Artifact metadata stays available until the control plane restarts; the live thread does not.
 - No image signature verification, admission policy, or runtime sandbox beyond the Kubernetes security context.
-- No per-session egress allowlist beyond the configured static CIDRs and the control plane.
+- No per-session egress allowlist beyond the configured static CIDRs and the control plane. Service plugins get their own NetworkPolicy, which also matches CIDRs only.
+- Plugins are trusted code. An inline plugin runs in the agent container, a sidecar shares the session pod's kernel, and a service runs with its own credentials.
+- A service plugin's gateway key is created once and not rotated. The shim accepts one key file.
+- Alternate harnesses bypass the tool gateway, so their MCP calls have no ledger record and no resume protection.
 - No artifact encryption at rest. Enable bucket encryption and access policies.
 - NetworkPolicy enforcement depends on the CNI. Verify it in your cluster.
 - No Kubernetes ResourceQuota/LimitRange management. Add them per namespace.
@@ -100,6 +131,9 @@ A verified webhook becomes one queued job and is answered immediately. Replay pr
 - Keep the agent ServiceAccount without RBAC bindings and with token automount disabled.
 - Set `runtime.network_policy: true`.
 - Store LLM, MCP, and S3 credentials in a Kubernetes Secret; never in the ConfigMap.
+- Set `plugins.namespace` to a namespace you control, and keep the plugin RBAC there.
+- Set `plugins.audit_path` on durable storage when you need a per-call record.
+- Keep `agents.allowed_images` non-empty and pin plugin images by digest.
 - Restrict admin API access at the ingress.
 - Set short TTLs and enable idle timeout for untrusted triggers.
 - Verify NetworkPolicy enforcement with your CNI.

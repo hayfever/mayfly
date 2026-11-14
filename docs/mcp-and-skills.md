@@ -57,7 +57,17 @@ The runtime adds the session token. The control plane checks that `github` is as
 
 Session pods only need network access to the control plane. Upstream MCP credentials and URLs stay outside the container.
 
-Supported methods: `POST`, `GET`, `DELETE`. Request bodies are limited to `llm.max_body_bytes` (default 16 MiB); larger requests get `413`. Headers forwarded: `Content-Type`, `Accept`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `Last-Event-ID`. Response headers forwarded: `Content-Type`, `Cache-Control`, `Mcp-Session-Id`, `MCP-Protocol-Version`.
+The runtime uses that connection to list the server's tools. A `tools/call`
+is a granted tool call: the runtime asks the tool gateway, and the gateway
+calls the upstream itself with the resolved headers. The call is recorded in
+the gateway's ledger before the model sees a result. `* /internal/v1/mcp/{server}`
+remains for alternate harnesses, which do not use the gateway.
+
+Supported methods on the proxy: `POST`, `GET`, `DELETE`. Request bodies are
+limited to `llm.max_body_bytes` (default 16 MiB); larger requests get `413`.
+Headers forwarded: `Content-Type`, `Accept`, `Mcp-Session-Id`,
+`MCP-Protocol-Version`, `Last-Event-ID`. Response headers forwarded:
+`Content-Type`, `Cache-Control`, `Mcp-Session-Id`, `MCP-Protocol-Version`.
 
 ### stdio servers
 
@@ -73,11 +83,32 @@ mcp:
       opt_in: true
 ```
 
-The runtime spawns the process inside the session container, performs `initialize`, then `tools/list`.
+The runtime spawns the process inside the session container, performs `initialize`, then `tools/list`. Each `tools/call` is authorized and recorded by the tool gateway, which returns a dispatch; the runtime calls the process and reports the result back.
 
 Environment values using `env:` are rejected: secrets would land in the pod ConfigMap. Use an HTTP MCP server behind the proxy when credentials are required.
 
 The agent image includes Node, npm/npx, git, curl, jq, and ripgrep. Add tools to the image when your stdio servers need them. `HOME` and npm caches point at the writable `/tmp` mount.
+
+### Tool allowlist and idempotency
+
+Two optional keys narrow and classify a server's tools:
+
+```yaml
+mcp:
+  servers:
+    - name: github
+      transport: http
+      url: https://mcp.example.com/mcp
+      tools: [search_issues, get_issue]
+      idempotent_tools: [search_issues, get_issue]
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `tools` | `[]` | Model-visible tools this server contributes. Empty means every tool the server reports |
+| `idempotent_tools` | `[]` | Tools that are safe to repeat after a container restart. Must be a subset of `tools` when `tools` is set. Every other tool is non-idempotent |
+
+A tool outside `tools` is not offered to the model, and the gateway refuses a call to it. A stdio server without `tools` is granted by name prefix: the runtime resolves each tool its own manager listed, and the gateway checks the prefix when the call begins. An HTTP server is always discovered by the gateway.
 
 ### Tool names
 
@@ -89,9 +120,11 @@ mcp_<server>_<tool>
 
 Example: server `github`, tool `search_issues` becomes `mcp_github_search_issues`. Collisions receive a numeric suffix. Built-in tools are `read_file`, `write_file`, `list_files`, and `run_command` (when enabled).
 
+Plugin tools use the same scheme with a different prefix: `plugin_<plugin>_<tool>`. A plugin is declared in the bundle, not under `mcp.servers`; see [plugins.md](plugins.md).
+
 ### Startup failures
 
-One unavailable MCP server does not reject the session. The runtime records a `system` event naming the server, exposes the remaining tools, and continues. Initialization is bounded by `init_timeout` (default 30 seconds).
+One unavailable MCP server does not reject the session. The runtime records a `system` event naming the server, exposes the remaining tools, and continues. Initialization is bounded by `init_timeout` (default 30 seconds). A tool gateway discovery failure is reported the same way, and fails the session only when a required plugin caused it.
 
 ### Per-session selection
 
@@ -103,6 +136,36 @@ curl -sS http://localhost:8080/api/v1/sessions \
 ```
 
 `opt_in: true` servers are used only when selected explicitly. Selection by unknown name rejects the request.
+
+## Tool calls through the gateway
+
+With the built-in harness, every `mcp.servers` call and every plugin call goes
+through the tool gateway in `mayflyd`. For an MCP server, the gateway:
+
+- checks that the tool is in the session's grant: the `tools` allowlist, or
+  every tool the server reports when no allowlist is set,
+- applies the in-flight cap and, for a plugin, its declared rate limit,
+- records the call in its ledger under `<session>/<turn>/<step>` and hashes the
+  arguments; it never stores them,
+- calls an HTTP server itself, or hands a stdio call to the runtime and stores
+  the result the runtime reports,
+- writes one `call.begin` and one `call.done` audit record without arguments or
+  results.
+
+The session token is the gateway credential. A tool outside the grant gets
+`403`. A call key reused for another tool or other arguments gets `409`, which
+is fatal for the turn.
+
+Resume behavior changed with the gateway. Before, an `mcp_*` call that was in
+flight when the container died ran again after resume. Now it does not: the
+model gets an error result saying the call may already have taken effect, and
+a `system` event says the same in the thread. List read-only tools and tools
+that forward the idempotency key in `idempotent_tools` to keep a repeat for
+them. A call that finished but whose journal step did not land replays the
+recorded result instead of running again.
+
+Alternate harnesses bypass the gateway through `* /internal/v1/mcp/{server}`
+and keep the old behavior.
 
 ## Built-in tools
 

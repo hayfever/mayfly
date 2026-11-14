@@ -55,6 +55,7 @@ Complete example: [examples/config.local.yaml](../examples/config.local.yaml). K
 | `egress` | `[]` | Extra egress CIDRs: `[{cidr: 203.0.113.0/24, ports: [443]}]` |
 | `workspace_limit` | `1Gi` | Workspace size. With `sessions.persistent_workspace` it sizes the workspace half of the per-session PVC (`mayfly-<id>-workspace`); otherwise it sizes the EmptyDir |
 | `artifact_volume_limit` | `1Gi` | Artifact staging size. With persistence, the PVC is sized as `workspace_limit + artifact_volume_limit` because the bundle is staged on the same claim; otherwise it sizes the artifact EmptyDir |
+| `plugin_volume_limit` | `512Mi` | Size of the EmptyDir that holds the copied files of all inline plugins in one session pod |
 | `storage_class` | `""` | StorageClass for the workspace claim. Empty uses the cluster default; set it on a cluster without a default class, or the claim never binds and the session times out |
 | `resources.requests` | `{}` | Container requests, for example `cpu: 100m` |
 | `resources.limits` | `{}` | Container limits |
@@ -166,7 +167,30 @@ journal:
 
 The journal also rejects a step number of `1 + max_steps × 129` or more within a turn: one user step, then one model step and up to 128 tool calls per round. These bounds keep a compromised or prompt-injected runtime from filling the state volume that the queue and the schedule watermark share.
 
-`bbolt` locks its file, so only one control-plane replica can use it. A session's entries are deleted when it finalizes: the artifact bundle is the durable history. The database also holds a per-session sequence reservation, which keeps a restarted control plane from reusing a turn key.
+`bbolt` locks its file, so only one control-plane replica can use it. A session's entries are deleted when it finalizes: the artifact bundle is the durable history. The database also holds a per-session sequence reservation, which keeps a restarted control plane from reusing a turn key, and the tool ledger: one `pending` or `done` record per granted tool call, keyed by `<session>/<turn>/<step>`. The ledger is deleted with the session's journal.
+
+## plugins
+
+Service plugin workloads and the tool gateway.
+
+```yaml
+plugins:
+  namespace: ""             # defaults to sessions.namespace
+  reconcile_interval: 60s
+  prune: true
+  audit_path: ""            # optional JSONL file
+  max_inflight_calls: 256
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `namespace` | `sessions.namespace` | Holds the Deployments, Services, NetworkPolicies, and `mayfly-gateway-<name>` Secrets of service plugins |
+| `reconcile_interval` | `60s` | How often service plugin objects are reconciled. Minimum `10s` |
+| `prune` | `true` | Delete service objects whose manifest left the bundle |
+| `audit_path` | `""` | Append one JSONL record per `call.begin` and `call.done`. Empty keeps the records in the process log only |
+| `max_inflight_calls` | `256` | Dispatched tool calls allowed across every session. Over the cap, a call gets `503` and the runtime retries within its budget |
+
+Service plugins use `agents.allowed_images`, `runtime.image_pull_policy`, and `runtime.image_pull_secrets` like session images. Placement, limits, and secrets are in [plugins.md](plugins.md).
 
 ## agents
 
@@ -180,7 +204,7 @@ agents:
 
 | Key | Meaning |
 |---|---|
-| `dirs` | Directories of `.yaml`, `.yml`, or `.json` bundles. A bundle holds agents, schedules, connections, and sources. Loaded at startup; hidden directories are skipped |
+| `dirs` | Directories of `.yaml`, `.yml`, or `.json` bundles. A bundle holds agents, schedules, connections, sources, and plugins. Loaded at startup; hidden directories are skipped |
 | `allowed_images` | Globs for images declared by manifests. Empty means any manifest image is allowed |
 
 Agent manifests and selection are documented in [agents.md](agents.md). The built-in `default` agent uses the global model, skill, MCP, and limit settings. Manifest agents can select a named in-image `harness`, and can set a `runtime` image, command, args, env, and harness config.
@@ -271,8 +295,12 @@ mcp:
 | `command`, `args`, `env` | stdio process definition. `env` values must be literal; `env:` references are rejected |
 | `opt_in` | If true, the server is used only when a request selects it |
 | `init_timeout` | MCP initialize and tools/list timeout |
+| `tools` | Allowlist of model-visible tool names. Empty offers every tool the server reports |
+| `idempotent_tools` | Tools that are safe to repeat after a container restart. Empty means every tool is non-idempotent. Must be a subset of `tools` when `tools` is set |
 
 HTTP server URLs in session configuration point at the control plane proxy. Session pods never see the upstream URL or its headers.
+
+With the built-in harness, every `mcp_*` tool call goes through the tool gateway, which records it in the ledger and writes the call audit record. `* /internal/v1/mcp/{server}` remains for alternate harnesses. See [mcp-and-skills.md](mcp-and-skills.md#tool-calls-through-the-gateway).
 
 ## triggers
 
