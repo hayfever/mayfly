@@ -12,10 +12,10 @@
 The pod and container set:
 
 - `runAsNonRoot`, UID/GID 65532, no privilege escalation, all capabilities dropped.
-- `readOnlyRootFilesystem` with writable EmptyDir mounts at `/workspace`, `/var/lib/mayfly`, and `/tmp`.
+- `readOnlyRootFilesystem` with writable mounts at `/workspace` and `/artifacts` (the per-session PVC or EmptyDirs) and `/tmp` (memory-backed EmptyDir).
 - `seccompProfile: RuntimeDefault`.
 - `automountServiceAccountToken: false`; `enableServiceLinks: false`.
-- Restart policy `Never` and an `activeDeadlineSeconds` backstop.
+- Restart policy `Never`. The kubelet does not restart a container; the control plane starts a replacement for an active session. `activeDeadlineSeconds` remains a hard stop for the container's own lifetime.
 - Resource requests/limits and EmptyDir size limits.
 
 The NetworkPolicy sets:
@@ -85,7 +85,7 @@ A verified webhook becomes one queued job and is answered immediately. Replay pr
 - Single tenant. There is no user identity, per-user authorization, or audit log beyond events.
 - No TLS termination or authentication proxy. Put Mayfly behind an ingress with OIDC/SSO and TLS.
 - Admin token is a shared bearer token. Rotate it and mount it from a Secret.
-- Session history is in memory and is dropped after `sessions.retention` (`30m` by default). Artifacts are durable, and their metadata stays available until the control plane restarts; the live thread does not.
+- Session history is in memory and is dropped after `sessions.retention` (`30m` by default). The journal keeps the completed steps of every turn of an active session in the control-plane database for resume, and is deleted when the session finalizes; the artifact bundle is the durable history. Artifact metadata stays available until the control plane restarts; the live thread does not.
 - No image signature verification, admission policy, or runtime sandbox beyond the Kubernetes security context.
 - No per-session egress allowlist beyond the configured static CIDRs and the control plane.
 - No artifact encryption at rest. Enable bucket encryption and access policies.

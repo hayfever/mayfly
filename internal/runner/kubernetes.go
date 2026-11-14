@@ -18,22 +18,29 @@ func NewKubernetes(client *k8s.Client) *Kubernetes {
 	return &Kubernetes{client: client}
 }
 
-// Start creates the session pod and its supporting objects.
+// Start creates the session pod and its supporting objects, or only a
+// replacement pod when the caller reuses an existing session.
 func (k *Kubernetes) Start(ctx context.Context, spec Spec) (Handle, error) {
 	pod, ok := spec.K8sSpec.(*k8s.SessionSpec)
 	if !ok || pod == nil {
 		return Handle{}, fmt.Errorf("kubernetes backend requires K8sSpec")
 	}
-	if err := k.client.CreateSession(ctx, pod); err != nil {
+	if spec.Reuse {
+		if err := k.client.CreatePod(ctx, pod); err != nil {
+			return Handle{}, err
+		}
+	} else if err := k.client.CreateSession(ctx, pod); err != nil {
 		return Handle{}, err
 	}
 	return Handle{
-		Backend:       "kubernetes",
-		Namespace:     pod.Namespace,
-		PodName:       pod.PodName,
-		SecretName:    pod.SecretName,
-		ConfigMapName: pod.ConfigMapName,
-		NetworkPolicy: pod.EnableNetworkPolicy,
+		Backend:             "kubernetes",
+		Namespace:           pod.Namespace,
+		PodName:             pod.PodName,
+		SecretName:          pod.SecretName,
+		ConfigMapName:       pod.ConfigMapName,
+		PVCName:             pod.PVCName,
+		PersistentWorkspace: pod.PersistentWorkspace,
+		NetworkPolicyName:   pod.NetworkPolicyName,
 	}, nil
 }
 
@@ -48,7 +55,9 @@ func (k *Kubernetes) Stop(ctx context.Context, handle Handle, force bool) error 
 		PodName:             handle.PodName,
 		SecretName:          handle.SecretName,
 		ConfigMapName:       handle.ConfigMapName,
-		EnableNetworkPolicy: handle.NetworkPolicy,
+		PVCName:             handle.PVCName,
+		PersistentWorkspace: handle.PersistentWorkspace,
+		NetworkPolicyName:   handle.NetworkPolicyName,
 	}
 	return k.client.DeleteSession(ctx, spec, grace)
 }

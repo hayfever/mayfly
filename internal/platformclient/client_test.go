@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/model"
 )
 
@@ -40,14 +41,39 @@ func TestInboxResetsAfterSequenceGap(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var got []model.Event
+	resets := 0
 	err := client.Inbox(ctx, 9, func(ev model.Event) {
 		got = append(got, ev)
 		cancel()
-	})
+	}, func() { resets++ })
 	if err == nil {
 		t.Fatal("expected context cancellation")
 	}
 	if len(got) != 1 || got[0].Text != "hello" {
 		t.Fatalf("events = %+v", got)
+	}
+	if resets != 1 {
+		t.Fatalf("reset callback ran %d times", resets)
+	}
+}
+
+func TestJournalRetryBudget(t *testing.T) {
+	old := journalRetryBudget
+	journalRetryBudget = 50 * time.Millisecond
+	defer func() { journalRetryBudget = old }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "sess", "token")
+	start := time.Now()
+	err := client.AppendJournal(context.Background(), journal.Entry{SessionID: "sess", Turn: 1, Step: 0, Name: "user"})
+	if err == nil {
+		t.Fatal("a permanently failing journal write returned no error")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("journal retry took %s despite a 50ms budget", elapsed)
 	}
 }

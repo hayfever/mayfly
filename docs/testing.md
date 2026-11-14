@@ -4,8 +4,8 @@ Mayfly has three test layers. The first two run in seconds without a cluster; th
 
 | Layer | Command | What it proves |
 |---|---|---|
-| Unit | `make test` | Package behavior: config, triggers, queue stores (memory, bbolt, Redis), pod spec, broker, bundle |
-| Integration | `go test ./test/integration` | Webhook → queue → worker → real `mayfly-agent` process → MCP → WebSocket → close → artifact, in one process |
+| Unit | `make test` | Package behavior: config, triggers, queue stores (memory, bbolt, Redis), journal stores and sequence reservation (memory, bbolt), turn identity and replay checks, pod spec, claim sizing and garbage collection, pod failure handling, restart budget, retry budgets, broker, bundle, conversation replay |
+| Integration | `go test ./test/integration` | Webhook → queue → worker → real `mayfly-agent` process → MCP → WebSocket → close → artifact, in one process; plus a SIGKILL/resume test on the local backend |
 | End-to-end | `make e2e` | The released images and Helm chart on a real Kubernetes cluster with an enforcing CNI |
 
 ## End-to-end suite
@@ -29,6 +29,9 @@ No API keys are needed: `llmstub` answers every model call. A full run takes abo
 | `TestQueueSurvivesRestart` | With `sessions.max_concurrent` full, a webhook waits without spending attempts. After the control plane pod is replaced, the waiting job, a finished job's record, and the running sessions (adopted) are all still there, and the job runs when a slot frees |
 | `TestDeadLetter` | A job whose session cannot start (pod denied by an admission policy) is retried, buried after `queue.max_attempts`, leaves no objects behind, and can be retried and deleted through the dead-letter API |
 | `TestSessionTTLExpiry` | A session past its TTL ends `expired`, exports a bundle recording the reason, and is cleaned up |
+| `TestSessionResumesAfterPodDeletion` | Force-deleting a running session pod mid-turn starts a replacement with the same workspace, the turn completes, the user message appears once, and a completed MCP tool call runs once |
+| `TestSessionResumesAfterGracefulPodDeletion` | The same with the default grace period: SIGTERM does not finalize the session, the runtime exits non-zero, and a replacement resumes the turn |
+| `TestControlPlaneRestartContinuesTurn` | Replacing `mayflyd` while the final model call is in flight adopts the pod, restores the journaled thread, finishes the turn, and does not repeat the tool call or the user message |
 | `TestSessionImagePullFailure` | A session whose image cannot be pulled fails with the reason instead of waiting for its TTL |
 | `TestDeleteSession` | `DELETE` stops a running session at once |
 | `TestControlPlaneAuth` | Probes are open; the admin API needs the admin token; the admin token is refused by the session-only LLM proxy |

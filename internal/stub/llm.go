@@ -81,7 +81,23 @@ func handleLLM(w http.ResponseWriter, r *http.Request) {
 	var calls []llmToolCall
 	content := ""
 	finish := "stop"
+	mcpTool := ""
+	for _, tool := range req.Tools {
+		name := tool.Function.Name
+		if strings.HasPrefix(name, "mcp_") && !executed[name] {
+			mcpTool = name
+			break
+		}
+	}
 	switch {
+	case mcpTool != "":
+		args, _ := json.Marshal(map[string]string{"text": "hello from mayfly"})
+		calls = []llmToolCall{{
+			ID:       "call_stub_mcp",
+			Type:     "function",
+			Function: llmFunctionCall{Name: mcpTool, Arguments: string(args)},
+		}}
+		finish = "tool_calls"
 	case toolNames["write_file"] && !executed["write_file"]:
 		body, _ := json.Marshal(map[string]string{
 			"path":    "report.md",
@@ -94,22 +110,12 @@ func handleLLM(w http.ResponseWriter, r *http.Request) {
 		}}
 		finish = "tool_calls"
 	default:
-		for _, tool := range req.Tools {
-			name := tool.Function.Name
-			if strings.HasPrefix(name, "mcp_") && !executed[name] {
-				args, _ := json.Marshal(map[string]string{"text": "hello from mayfly"})
-				calls = []llmToolCall{{
-					ID:       "call_stub_mcp",
-					Type:     "function",
-					Function: llmFunctionCall{Name: name, Arguments: string(args)},
-				}}
-				finish = "tool_calls"
-				break
-			}
+		// The resume e2e test kills the container while this reply is in
+		// flight; other scenarios get an immediate answer.
+		if strings.Contains(strings.ToLower(firstUser), "resume-slow-final") {
+			time.Sleep(5 * time.Second)
 		}
-		if len(calls) == 0 {
-			content = "Completed. " + summarize(firstUser)
-		}
+		content = "Completed. " + summarize(firstUser)
 	}
 
 	if req.Stream {

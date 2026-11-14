@@ -18,6 +18,7 @@ import (
 
 	"net/http"
 
+	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/model"
 )
 
@@ -78,10 +79,11 @@ func (c *Client) Emit(ctx context.Context, events ...model.Event) error {
 
 var errInboxReset = errors.New("inbox sequence reset")
 
-// Inbox streams human messages and control actions until ctx is canceled.
-// The callback receives events in order. Gaps are reported as a system event
-// with type control and data action "gap".
-func (c *Client) Inbox(ctx context.Context, after int64, fn func(model.Event)) error {
+// Inbox streams human messages and control actions until ctx is canceled. The
+// callback receives events in order. onReset runs when the control plane was
+// replaced and the stream restarts from zero, which invalidates any sequence
+// the runtime remembered.
+func (c *Client) Inbox(ctx context.Context, after int64, fn func(model.Event), onReset func()) error {
 	backoff := time.Second
 	for {
 		if err := ctx.Err(); err != nil {
@@ -96,6 +98,9 @@ func (c *Client) Inbox(ctx context.Context, after int64, fn func(model.Event)) e
 		if errors.Is(err, errInboxReset) {
 			after = 0
 			backoff = time.Second
+			if onReset != nil {
+				onReset()
+			}
 			continue
 		}
 		if ctx.Err() != nil {
@@ -252,4 +257,168 @@ func (c *Client) Finalize(ctx context.Context, status model.SessionStatus, reaso
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+// httpStatusError carries a non-2xx response from the control plane.
+type httpStatusError struct {
+	op     string
+	status int
+	body   string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("%s: status %d: %s", e.op, e.status, e.body)
+}
+
+// retryable reports whether a journal request can be repeated. Client errors
+// other than timeouts and rate limits will not succeed on a retry.
+func retryable(err error) bool {
+	var status *httpStatusError
+	if errors.As(err, &status) {
+		if status.status == http.StatusRequestTimeout || status.status == http.StatusTooManyRequests {
+			return true
+		}
+		return status.status >= 500
+	}
+	return !errors.Is(err, context.Canceled)
+}
+
+// journalRetryBudget bounds one journal request across all its attempts. A
+// control-plane restart is covered; a partition that outlasts the budget ends
+// the turn so a replacement resumes from the journal.
+var journalRetryBudget = 5 * time.Minute
+
+// journalRetry runs one idempotent journal request until it succeeds, is
+// rejected permanently, or the budget ends. A control-plane restart must not
+// make a step execute without its durable record.
+func journalRetry(ctx context.Context, op string, fn func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(ctx, journalRetryBudget)
+	defer cancel()
+	backoff := 500 * time.Millisecond
+	for {
+		attemptCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err := fn(attemptCtx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if !retryable(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%s: %w", op, ctx.Err())
+		case <-time.After(backoff):
+		}
+		if backoff < 5*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
+// AppendJournal records one turn step before its effect is committed locally.
+func (c *Client) AppendJournal(ctx context.Context, e journal.Entry) error {
+	body, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	return journalRetry(ctx, "append journal", func(ctx context.Context) error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.path("/journal"), bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+c.token)
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return fmt.Errorf("append journal: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			return &httpStatusError{op: "append journal", status: resp.StatusCode, body: strings.TrimSpace(string(msg))}
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
+	})
+}
+
+// TurnJournal reads the steps of one turn.
+func (c *Client) TurnJournal(ctx context.Context, session string, turn int64) ([]journal.Entry, error) {
+	var out []journal.Entry
+	err := journalRetry(ctx, "read journal", func(ctx context.Context) error {
+		u := fmt.Sprintf("%s?turn=%d", c.path("/journal"), turn)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.token)
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return fmt.Errorf("read journal: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			return &httpStatusError{op: "read journal", status: resp.StatusCode, body: strings.TrimSpace(string(msg))}
+		}
+		var payload struct {
+			Entries []journal.Entry `json:"entries"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			return fmt.Errorf("decode journal response: %w", err)
+		}
+		out = payload.Entries
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []journal.Entry{}
+	}
+	return out, nil
+}
+
+// LastJournalTurn returns the highest journaled turn for the session.
+func (c *Client) LastJournalTurn(ctx context.Context) (int64, error) {
+	var turn int64
+	err := journalRetry(ctx, "read last journal turn", func(ctx context.Context) error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.path("/journal"), nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.token)
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return fmt.Errorf("read last journal turn: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			return &httpStatusError{op: "read last journal turn", status: resp.StatusCode, body: strings.TrimSpace(string(msg))}
+		}
+		var payload struct {
+			Turn int64 `json:"turn"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			return fmt.Errorf("decode journal response: %w", err)
+		}
+		turn = payload.Turn
+		return nil
+	})
+	return turn, err
+}
+
+// Append, Turn, and LastTurn make the client a journal.Store for one session.
+func (c *Client) Append(ctx context.Context, e journal.Entry) error {
+	return c.AppendJournal(ctx, e)
+}
+
+func (c *Client) Turn(ctx context.Context, _ string, turn int64) ([]journal.Entry, error) {
+	return c.TurnJournal(ctx, c.sessionID, turn)
+}
+
+func (c *Client) LastTurn(ctx context.Context, _ string) (int64, error) {
+	return c.LastJournalTurn(ctx)
 }

@@ -79,6 +79,16 @@ func New(baseURL, token, model string) *Client {
 	}
 }
 
+// StatusError reports a non-200 upstream response.
+type StatusError struct {
+	Code int
+	Body string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("llm status %d: %s", e.Code, e.Body)
+}
+
 type chatRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
@@ -131,7 +141,7 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool,
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return Message{}, "", fmt.Errorf("llm status %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+		return Message{}, "", &StatusError{Code: resp.StatusCode, Body: strings.TrimSpace(string(msg))}
 	}
 	if onDelta != nil {
 		return c.readStream(resp.Body, onDelta)

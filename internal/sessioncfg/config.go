@@ -74,6 +74,10 @@ type Config struct {
 	MCPServers         []MCPServer    `json:"mcp_servers"`
 	CreatedAt          time.Time      `json:"created_at"`
 	AgentVersion       string         `json:"agent_version,omitempty"`
+	// Resumable reports that a replacement container will resume this session
+	// from the journal and the same workspace. A runtime that is not resumable
+	// finalizes on SIGTERM instead of leaving the turn to a replacement.
+	Resumable bool `json:"resumable,omitempty"`
 }
 
 // Validate checks invariants that both the control plane and the runtime rely on.

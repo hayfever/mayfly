@@ -20,20 +20,25 @@ type Spec struct {
 	Token         string
 	Env           map[string]string
 	Runtime       sessioncfg.Config
-	K8sSpec       any // *k8s.SessionSpec, set by the Kubernetes backend caller
+	// Reuse creates only a replacement pod and updates the existing
+	// ConfigMap. The Secret, NetworkPolicy, and workspace claim stay.
+	Reuse   bool
+	K8sSpec any // *k8s.SessionSpec, set by the Kubernetes backend caller
 }
 
 // Handle identifies a running session for later operations.
 type Handle struct {
-	Backend       string
-	SessionID     string
-	Namespace     string
-	PodName       string
-	SecretName    string
-	ConfigMapName string
-	StateDir      string
-	NetworkPolicy bool
-	Done          <-chan struct{}
+	Backend             string
+	SessionID           string
+	Namespace           string
+	PodName             string
+	SecretName          string
+	ConfigMapName       string
+	PVCName             string
+	PersistentWorkspace bool
+	StateDir            string
+	NetworkPolicyName   string
+	Done                <-chan struct{}
 }
 
 // Runner is a session execution backend.

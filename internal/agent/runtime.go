@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/llm"
 	"github.com/hayfever/mayfly/internal/mcp"
 	"github.com/hayfever/mayfly/internal/model"
@@ -32,6 +33,7 @@ type Runtime struct {
 	tools      *toolset
 	toolsList  []llm.Tool
 	conv       *conversation
+	journal    journal.Store
 	trace      *tracer
 	events     *emitter
 	system     string
@@ -40,6 +42,16 @@ type Runtime struct {
 	finalizeMu sync.Mutex
 	finalized  bool
 	finalErr   error
+
+	// resumeMu guards resumeEv, the inbox event the runtime replayed from the
+	// journal. Its redelivery is skipped by identity, not by sequence number:
+	// sequence numbers are reused after a control-plane restart.
+	resumeMu sync.Mutex
+	resumeEv *model.Event
+	// fatalErr receives the first failure that cannot be handled in place. Run
+	// then exits without finalizing so the control plane starts a replacement
+	// that resumes from the journal.
+	fatalCh chan error
 }
 
 // New prepares a runtime. It does not start any network or process activity.
@@ -83,9 +95,11 @@ func New(cfg sessioncfg.Config, token string, logger *slog.Logger) (*Runtime, er
 		platform: platform,
 		llm:      llm.New(cfg.LLMBaseURL, token, cfg.Model),
 		conv:     conv,
+		journal:  platform,
 		trace:    trace,
 		events:   events,
 		system:   systemPrompt(cfg),
+		fatalCh:  make(chan error, 1),
 	}, nil
 }
 
@@ -134,6 +148,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 
 	turnCtx, cancelTurns := context.WithCancel(context.Background())
 	turnDone := make(chan struct{})
+	turnFinished := make(chan struct{}, 32)
 	go func() {
 		defer close(turnDone)
 		for {
@@ -142,15 +157,42 @@ func (r *Runtime) Run(ctx context.Context) error {
 				return
 			case ev := <-workCh:
 				r.handleTurn(turnCtx, ev)
+				// Every started turn reports exactly once. Blocking here is
+				// safe because shutdown cancels turnCtx before waiting.
+				select {
+				case turnFinished <- struct{}{}:
+				case <-turnCtx.Done():
+					return
+				}
 			}
 		}
 	}()
 
+	// The journal is the only source of truth for an interrupted turn. A
+	// replacement container needs no flag to consult it, and a stale config
+	// cannot make it skip the replay.
+	var pending turnCounter
+	resumeAfter := int64(0)
+	after, resumed, err := r.prepareResume(ctx)
+	if err != nil {
+		cancelTurns()
+		return r.finalize(context.Background(), "failed", err)
+	}
+	resumeAfter = after
+	if resumed != nil {
+		r.armResume(*resumed)
+		workCh <- *resumed
+		pending.start()
+	}
+
 	inboxCtx, cancelInbox := context.WithCancel(ctx)
 	go func() {
-		err := r.platform.Inbox(inboxCtx, 0, func(ev model.Event) {
+		err := r.platform.Inbox(inboxCtx, resumeAfter, func(ev model.Event) {
 			switch ev.Type {
 			case model.EventUserMessage:
+				if r.skipResumeEvent(ev) {
+					return
+				}
 				select {
 				case userCh <- ev:
 				default:
@@ -164,7 +206,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 				default:
 				}
 			}
-		})
+		}, r.clearResumeEvent)
 		if err != nil && !errors.Is(err, context.Canceled) && inboxCtx.Err() == nil {
 			r.events.Emit(ctx, model.EventError, "mayfly", "Inbox stream failed: "+err.Error(), nil)
 		}
@@ -196,17 +238,26 @@ func (r *Runtime) Run(ctx context.Context) error {
 	}
 
 	reason := "closed"
+	closed := false
+	var stopErr error
 	for {
 		select {
 		case ev := <-userCh:
 			resetIdle()
 			select {
 			case workCh <- ev:
+				pending.start()
 			default:
 				r.events.Emit(ctx, model.EventError, "mayfly", "Agent is busy; message dropped.", nil)
 			}
+		case <-turnFinished:
+			pending.finish()
+			// A long turn is not an idle session. The idle timer measures
+			// silence from the user, not from the runtime.
+			resetIdle()
 		case msg := <-controlCh:
 			if msg.action == "close" {
+				closed = true
 				if msg.reason != "" {
 					reason = msg.reason
 				}
@@ -214,13 +265,44 @@ func (r *Runtime) Run(ctx context.Context) error {
 				goto shutdown
 			}
 		case <-idleC:
+			if pending.active() {
+				// A retrying or queued turn must not be finalized as idle.
+				resetIdle()
+				break
+			}
 			reason = "idle"
 			goto shutdown
 		case <-ttlC:
 			reason = "ttl"
 			goto shutdown
+		case err := <-r.fatalCh:
+			stopErr = err
+			goto shutdown
 		case <-ctx.Done():
-			reason = "terminated"
+			// A close event and the signal can arrive together; the close is
+			// the control plane's authoritative instruction.
+			select {
+			case msg := <-controlCh:
+				if msg.action == "close" {
+					closed = true
+					if msg.reason != "" {
+						reason = msg.reason
+					}
+				}
+			default:
+			}
+			if !closed {
+				// SIGTERM is how Kubernetes drains, evicts, and deletes a
+				// pod. A resumable session is not over: exit non-zero without
+				// finalizing so the control plane replaces the container and
+				// the replacement resumes the journaled turn. One that cannot
+				// resume keeps its full bundle by finalizing here.
+				signalReason, signalErr := signalStop(r.cfg.Resumable, ctx.Err())
+				if signalReason != "" {
+					reason = signalReason
+				}
+				stopErr = signalErr
+			}
 			goto shutdown
 		}
 	}
@@ -245,82 +327,112 @@ shutdown:
 	if r.mcp != nil {
 		r.mcp.Close()
 	}
+	if stopErr != nil {
+		r.logger.Warn("session stopped without finalizing", "error", stopErr)
+		r.closeLogs()
+		return stopErr
+	}
 	return r.finalize(context.Background(), reason, nil)
 }
 
-func (r *Runtime) handleTurn(ctx context.Context, ev model.Event) {
-	text := ev.Text
-	if ev.Actor != "" && ev.Actor != "trigger" {
-		text = "[" + ev.Actor + "] " + text
+// turnCounter counts turns that are queued or running. The idle timer must not
+// finalize a session while any of them can still write to the conversation.
+type turnCounter struct{ n int }
+
+func (c *turnCounter) start() { c.n++ }
+
+func (c *turnCounter) finish() {
+	if c.n > 0 {
+		c.n--
 	}
-	if err := r.conv.Append(llm.Message{Role: "user", Content: text}); err != nil {
-		r.logger.Warn("append user message", "error", err)
+}
+
+func (c *turnCounter) active() bool { return c.n > 0 }
+
+// signalStop decides what a signal without a close event means. A resumable
+// session leaves its turn to a replacement; one that cannot resume finalizes
+// with the full bundle instead.
+func signalStop(resumable bool, cause error) (reason string, stopErr error) {
+	if !resumable {
+		return "terminated", nil
+	}
+	return "", fmt.Errorf("terminated before the control plane closed the session: %w", cause)
+}
+
+func (r *Runtime) handleTurn(ctx context.Context, ev model.Event) {
+	if ctx.Err() != nil {
+		return
+	}
+	turn := ev.Seq
+	if turn <= 0 {
+		r.failTurn(ctx, fatal(fmt.Errorf("inbox event %q has no sequence number", ev.Type)))
+		return
+	}
+	entries, err := r.journal.Turn(ctx, r.cfg.SessionID, turn)
+	if err != nil {
+		r.failTurn(ctx, fatal(fmt.Errorf("turn journal read failed: %w", err)))
+		return
+	}
+	if len(entries) > 0 {
+		// The sequence is a key, not an identity. A turn that already has
+		// entries must belong to this exact message before it is replayed or
+		// extended.
+		if err := verifyTurn(entries, ev); err != nil {
+			r.failTurn(ctx, fatal(err))
+			return
+		}
+	}
+
+	step := 0
+	userInput, _ := json.Marshal(ev)
+	if err := checkStepName(entryAt(entries, step), "user"); err != nil {
+		r.failTurn(ctx, fatal(err))
+		return
+	}
+	if _, _, err := r.runOrReplay(ctx, turn, step, userInput, entryAt(entries, step),
+		func() (stepRun, error) {
+			msg := userMessage(ev)
+			out, err := json.Marshal(userStepOutput{Message: msg})
+			return stepRun{name: "user", message: msg, output: out}, err
+		}, r.applyUser); err != nil {
+		r.failTurn(ctx, err)
+		return
 	}
 	r.messages.Add(1)
+	step++
 
-	for step := range r.cfg.MaxSteps {
+	for round := 0; round < r.cfg.MaxSteps; round++ {
 		if ctx.Err() != nil {
 			return
 		}
 		messages := r.conv.MessagesForModel(r.system, r.cfg.MaxHistoryMessages)
-		llmTimeout := time.Duration(r.cfg.LLMTimeoutSeconds) * time.Second
-		if llmTimeout <= 0 {
-			llmTimeout = 180 * time.Second
+		modelInput, _ := json.Marshal(modelStepInput{
+			Model:    r.cfg.Model,
+			Messages: len(messages),
+			Tools:    len(r.toolsList),
+		})
+		if existing := entryAt(entries, step); existing != nil && existing.Name != "llm" && existing.Name != "assistant" {
+			r.failTurn(ctx, fatal(fmt.Errorf("journal step %d is %q, want llm or assistant", step, existing.Name)))
+			return
 		}
-		llmCtx, cancel := context.WithTimeout(ctx, llmTimeout)
-		started := time.Now()
-		r.trace.Write("llm_request", map[string]any{
-			"step":     step,
-			"messages": len(messages),
-			"tools":    len(r.toolsList),
-			"model":    r.cfg.Model,
-		})
-		msg, finish, err := r.llm.Complete(llmCtx, messages, r.toolsList, func(delta string) {
-			if ctx.Err() == nil {
-				r.events.Emit(ctx, model.EventAssistantDelta, "agent", delta, nil)
-			}
-		})
-		cancel()
+		entry, _, err := r.runOrReplay(ctx, turn, step, modelInput, entryAt(entries, step),
+			func() (stepRun, error) { return r.executeModel(ctx, turn, step, round, messages) },
+			r.applyModel)
 		if err != nil {
-			r.trace.Write("llm_error", map[string]any{"step": step, "error": err.Error(), "duration_ms": time.Since(started).Milliseconds()})
-			r.events.Emit(ctx, model.EventError, "agent", "Model request failed: "+err.Error(), nil)
+			r.failTurn(ctx, err)
 			return
 		}
-		r.trace.Write("llm_response", map[string]any{
-			"step":          step,
-			"finish_reason": finish,
-			"content":       msg.Content,
-			"tool_calls":    len(msg.ToolCalls),
-			"duration_ms":   time.Since(started).Milliseconds(),
-		})
-		msg.Role = "assistant"
-
-		if len(msg.ToolCalls) == 0 {
-			if err := r.conv.Append(msg); err != nil {
-				r.logger.Warn("append assistant message", "error", err)
-			}
-			r.messages.Add(1)
-			r.events.Emit(ctx, model.EventAssistantMessage, "agent", msg.Content, map[string]any{"finish_reason": finish})
+		var out modelStepOutput
+		if err := json.Unmarshal(entry.Output, &out); err != nil {
+			r.failTurn(ctx, fatal(fmt.Errorf("decode journaled model step %d: %w", step, err)))
 			return
-		}
-
-		if msg.Content != "" {
-			r.events.Emit(ctx, model.EventAssistantMessage, "agent", msg.Content, map[string]any{"tool_calls": len(msg.ToolCalls)})
-		}
-		for i := range msg.ToolCalls {
-			if msg.ToolCalls[i].Type == "" {
-				msg.ToolCalls[i].Type = "function"
-			}
-			if msg.ToolCalls[i].ID == "" {
-				msg.ToolCalls[i].ID = fmt.Sprintf("call_%d_%d", step, i)
-			}
-		}
-		if err := r.conv.Append(msg); err != nil {
-			r.logger.Warn("append assistant tool call", "error", err)
 		}
 		r.messages.Add(1)
-
-		for _, call := range msg.ToolCalls {
+		step++
+		if len(out.Message.ToolCalls) == 0 {
+			return
+		}
+		for _, call := range out.Message.ToolCalls {
 			if ctx.Err() != nil {
 				return
 			}
@@ -328,51 +440,395 @@ func (r *Runtime) handleTurn(ctx context.Context, ev model.Event) {
 			if args == "" {
 				args = "{}"
 			}
-			if !json.Valid([]byte(args)) {
-				r.events.Emit(ctx, model.EventToolCall, "agent", "Invalid JSON arguments for "+call.Function.Name, map[string]any{
-					"tool":      call.Function.Name,
-					"call_id":   call.ID,
-					"arguments": args,
-				})
-				r.conv.Append(llm.Message{Role: "tool", ToolCallID: call.ID, Content: "ERROR: invalid JSON arguments"})
-				continue
-			}
-			r.events.Emit(ctx, model.EventToolCall, "agent", call.Function.Name, map[string]any{
-				"tool":      call.Function.Name,
-				"call_id":   call.ID,
-				"arguments": args,
+			toolInput, _ := json.Marshal(toolStepInput{
+				Tool:      call.Function.Name,
+				CallID:    call.ID,
+				Arguments: args,
 			})
-			started := time.Now()
-			out, isErr, err := r.tools.Call(ctx, call.Function.Name, json.RawMessage(args))
+			if existing := entryAt(entries, step); existing != nil && existing.Name != "tool:"+call.Function.Name {
+				r.failTurn(ctx, fatal(fmt.Errorf("journal step %d is %q, want tool:%s", step, existing.Name, call.Function.Name)))
+				return
+			}
+			entry, _, err := r.runOrReplay(ctx, turn, step, toolInput, entryAt(entries, step),
+				func() (stepRun, error) { return r.executeTool(ctx, turn, step, call) },
+				r.applyTool)
 			if err != nil {
-				out = "ERROR: " + err.Error()
-				isErr = true
+				r.failTurn(ctx, err)
+				return
 			}
-			out = truncate(out, maxToolOutput)
-			r.toolCalls.Add(1)
-			r.events.Emit(ctx, model.EventToolResult, "agent", truncate(out, 8<<10), map[string]any{
-				"tool":    call.Function.Name,
-				"call_id": call.ID,
-				"error":   isErr,
-			})
-			r.trace.Write("tool_result", map[string]any{
-				"tool":        call.Function.Name,
-				"call_id":     call.ID,
-				"arguments":   args,
-				"is_error":    isErr,
-				"output":      out,
-				"duration_ms": time.Since(started).Milliseconds(),
-			})
-			content := out
-			if isErr && !strings.HasPrefix(content, "ERROR:") {
-				content = "ERROR: " + content
+			var toolOut toolStepOutput
+			if err := json.Unmarshal(entry.Output, &toolOut); err != nil {
+				r.failTurn(ctx, fatal(fmt.Errorf("decode journaled tool step %d: %w", step, err)))
+				return
 			}
-			if err := r.conv.Append(llm.Message{Role: "tool", ToolCallID: call.ID, Content: content}); err != nil {
-				r.logger.Warn("append tool result", "error", err)
+			if toolOut.Executed {
+				r.toolCalls.Add(1)
 			}
+			step++
 		}
 	}
 	r.events.Emit(ctx, model.EventError, "mayfly", fmt.Sprintf("Step limit (%d) reached; stopping this turn.", r.cfg.MaxSteps), nil)
+}
+
+// checkStepName rejects a recorded step of the wrong kind before it is
+// applied to the conversation.
+func checkStepName(entry *journal.Entry, want string) error {
+	if entry == nil || entry.Name == want {
+		return nil
+	}
+	return fmt.Errorf("journal step %d is %q, want %q", entry.Step, entry.Name, want)
+}
+
+// executeModel runs one model request. The assistant message is published only
+// when the step reaches the journal, so a crash between the model response and
+// the append cannot leave a visible reply that the conversation does not hold.
+func (r *Runtime) executeModel(ctx context.Context, turn int64, step, round int, messages []llm.Message) (stepRun, error) {
+	llmTimeout := time.Duration(r.cfg.LLMTimeoutSeconds) * time.Second
+	if llmTimeout <= 0 {
+		llmTimeout = 180 * time.Second
+	}
+	// One step gets one overall budget. A partition that outlasts it must end
+	// the process so a replacement resumes from the journal, instead of
+	// retrying until the idle or TTL timer finalizes the session.
+	retryCtx, retryCancel := context.WithTimeout(ctx, modelRetryBudget)
+	defer retryCancel()
+	started := time.Now()
+	r.trace.Write("llm_request", map[string]any{
+		"step":     round,
+		"messages": len(messages),
+		"tools":    len(r.toolsList),
+		"model":    r.cfg.Model,
+	})
+	var msg llm.Message
+	var finish string
+	var err error
+	deadlineFailures := 0
+	backoff := time.Second
+	for attempt := 0; ; attempt++ {
+		attemptCtx, attemptCancel := context.WithTimeout(retryCtx, llmTimeout)
+		msg, finish, err = r.llm.Complete(attemptCtx, messages, r.toolsList, func(delta string) {
+			if ctx.Err() == nil {
+				r.events.Emit(ctx, model.EventAssistantDelta, "agent", delta, nil)
+			}
+		})
+		attemptCancel()
+		if err == nil {
+			break
+		}
+		if retryCtx.Err() != nil {
+			break
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			deadlineFailures++
+			if deadlineFailures >= 3 {
+				break
+			}
+		} else if !retryableModelError(err) {
+			break
+		}
+		r.trace.Write("llm_retry", map[string]any{
+			"step":     round,
+			"attempt":  attempt + 1,
+			"error":    err.Error(),
+			"wait_ms":  backoff.Milliseconds(),
+			"duration": time.Since(started).Milliseconds(),
+		})
+		r.logger.Warn("model request failed; retrying", "turn_step", step, "attempt", attempt+1, "error", err)
+		select {
+		case <-retryCtx.Done():
+		case <-time.After(backoff):
+		}
+		if backoff < 5*time.Second {
+			backoff *= 2
+		}
+	}
+	if err != nil {
+		r.trace.Write("llm_error", map[string]any{"step": round, "error": err.Error(), "duration_ms": time.Since(started).Milliseconds()})
+		if retryCtx.Err() != nil && ctx.Err() == nil {
+			return stepRun{}, fatal(fmt.Errorf("model request retry budget exhausted: %w", err))
+		}
+		return stepRun{}, fmt.Errorf("model request failed: %w", err)
+	}
+	r.trace.Write("llm_response", map[string]any{
+		"step":          round,
+		"finish_reason": finish,
+		"content":       msg.Content,
+		"tool_calls":    len(msg.ToolCalls),
+		"duration_ms":   time.Since(started).Milliseconds(),
+	})
+	msg.Role = "assistant"
+	for i := range msg.ToolCalls {
+		if msg.ToolCalls[i].Type == "" {
+			msg.ToolCalls[i].Type = "function"
+		}
+		if msg.ToolCalls[i].ID == "" {
+			msg.ToolCalls[i].ID = fmt.Sprintf("call_%d_%d", round, i)
+		}
+	}
+	name := modelStepName(msg)
+	var events []journal.StepEvent
+	switch {
+	case len(msg.ToolCalls) == 0:
+		events = append(events, journal.StepEvent{
+			Type:  string(model.EventAssistantMessage),
+			Actor: "agent",
+			Text:  msg.Content,
+			Data:  map[string]any{"finish_reason": finish},
+		})
+	case msg.Content != "":
+		events = append(events, journal.StepEvent{
+			Type:  string(model.EventAssistantMessage),
+			Actor: "agent",
+			Text:  msg.Content,
+			Data:  map[string]any{"tool_calls": len(msg.ToolCalls)},
+		})
+	}
+	out, err := json.Marshal(modelStepOutput{Message: msg, FinishReason: finish, Events: events})
+	if err != nil {
+		return stepRun{}, err
+	}
+	return stepRun{name: name, message: msg, output: out}, nil
+}
+
+// executeTool runs one tool call. The call itself is emitted before it runs so
+// a slow tool is visible while it works; it is deterministic once the model
+// step is journaled, and its step key drops the copy published from the
+// journal. The result is published only when the step reaches the journal, so
+// a crash cannot show a result the conversation does not contain.
+func (r *Runtime) executeTool(ctx context.Context, turn int64, step int, call llm.ToolCall) (stepRun, error) {
+	name := call.Function.Name
+	args := call.Function.Arguments
+	if args == "" {
+		args = "{}"
+	}
+	callKey := stepEventKey(turn, step, "call")
+	if !json.Valid([]byte(args)) {
+		ev := journal.StepEvent{
+			Type:  string(model.EventToolCall),
+			Actor: "agent",
+			Text:  "Invalid JSON arguments for " + name,
+			Data: map[string]any{
+				"tool":      name,
+				"call_id":   call.ID,
+				"arguments": args,
+			},
+		}
+		r.events.EmitRecord(ctx, callKey, ev)
+		msg := llm.Message{Role: "tool", ToolCallID: call.ID, Content: "ERROR: invalid JSON arguments"}
+		out, err := json.Marshal(toolStepOutput{Message: msg, Events: []journal.StepEvent{ev}})
+		if err != nil {
+			return stepRun{}, err
+		}
+		return stepRun{name: "tool:" + name, message: msg, output: out, errMsg: "invalid JSON arguments"}, nil
+	}
+	callEvent := journal.StepEvent{
+		Type:  string(model.EventToolCall),
+		Actor: "agent",
+		Text:  name,
+		Data: map[string]any{
+			"tool":      name,
+			"call_id":   call.ID,
+			"arguments": args,
+		},
+	}
+	r.events.EmitRecord(ctx, callKey, callEvent)
+	started := time.Now()
+	out, isErr, err := r.tools.Call(ctx, name, json.RawMessage(args))
+	if err != nil {
+		out = "ERROR: " + err.Error()
+		isErr = true
+	}
+	out = truncate(out, maxToolOutput)
+	resultEvent := journal.StepEvent{
+		Type:  string(model.EventToolResult),
+		Actor: "agent",
+		Text:  truncate(out, 8<<10),
+		Data: map[string]any{
+			"tool":    name,
+			"call_id": call.ID,
+			"error":   isErr,
+		},
+	}
+	r.trace.Write("tool_result", map[string]any{
+		"tool":        name,
+		"call_id":     call.ID,
+		"arguments":   args,
+		"is_error":    isErr,
+		"output":      out,
+		"duration_ms": time.Since(started).Milliseconds(),
+	})
+	content := out
+	if isErr && !strings.HasPrefix(content, "ERROR:") {
+		content = "ERROR: " + content
+	}
+	msg := llm.Message{Role: "tool", ToolCallID: call.ID, Content: content}
+	raw, err := json.Marshal(toolStepOutput{
+		Message:  msg,
+		IsError:  isErr,
+		Executed: true,
+		Events:   []journal.StepEvent{callEvent, resultEvent},
+	})
+	if err != nil {
+		return stepRun{}, err
+	}
+	errMsg := ""
+	if isErr {
+		errMsg = truncate(content, 2<<10)
+	}
+	return stepRun{name: "tool:" + name, message: msg, output: raw, errMsg: errMsg}, nil
+}
+
+// prepareResume truncates a partially applied conversation and returns the
+// turn that must be replayed. The event itself is rebuilt from step zero's
+// recorded Input, so recovery does not depend on the control plane still
+// holding the old inbox event.
+func (r *Runtime) prepareResume(ctx context.Context) (int64, *model.Event, error) {
+	last, err := r.journal.LastTurn(ctx, r.cfg.SessionID)
+	if err != nil {
+		return 0, nil, fmt.Errorf("read last journal turn: %w", err)
+	}
+	if last <= 0 {
+		return 0, nil, nil
+	}
+	entries, err := r.journal.Turn(ctx, r.cfg.SessionID, last)
+	if err != nil {
+		return 0, nil, fmt.Errorf("read journal turn %d: %w", last, err)
+	}
+	if len(entries) == 0 {
+		return last - 1, nil, nil
+	}
+	// Validate the turn before touching the conversation: a journal entry that
+	// does not describe a user turn must not shorten the recorded history.
+	var ev model.Event
+	if err := json.Unmarshal(entries[0].Input, &ev); err != nil {
+		return last - 1, nil, fmt.Errorf("decode journal turn event: %w", err)
+	}
+	if ev.Seq == 0 {
+		ev.Seq = last
+	}
+	if ev.Seq != last || ev.Type != model.EventUserMessage {
+		return last - 1, nil, fmt.Errorf("journal turn %d does not start with its user event (seq %d type %q)", last, ev.Seq, ev.Type)
+	}
+	lastConv := entries[len(entries)-1].ConvLen
+	if r.conv.Size() > lastConv {
+		if err := r.conv.Truncate(lastConv); err != nil {
+			return 0, nil, err
+		}
+	}
+	r.logger.Info("resuming journaled turn", "turn", last, "steps", len(entries), "conversation_bytes", r.conv.Size())
+	return last - 1, &ev, nil
+}
+
+// armResume remembers the inbox event the runtime replayed from the journal.
+func (r *Runtime) armResume(ev model.Event) {
+	r.resumeMu.Lock()
+	defer r.resumeMu.Unlock()
+	r.resumeEv = &ev
+}
+
+// skipResumeEvent reports whether ev is the redelivered event the runtime has
+// already replayed from the journal. Identity decides, not the sequence
+// number: a sequence assigned before a control-plane restart is handed out
+// again, and skipping it would silently drop a new message.
+func (r *Runtime) skipResumeEvent(ev model.Event) bool {
+	r.resumeMu.Lock()
+	defer r.resumeMu.Unlock()
+	if r.resumeEv == nil || !sameTurnEvent(*r.resumeEv, ev) {
+		return false
+	}
+	r.resumeEv = nil
+	return true
+}
+
+// clearResumeEvent drops the pending skip. An inbox reset rewinds the stream to
+// zero, so the event may never arrive again; the journal decides replay.
+func (r *Runtime) clearResumeEvent() {
+	r.resumeMu.Lock()
+	defer r.resumeMu.Unlock()
+	r.resumeEv = nil
+}
+
+// sameTurnEvent reports whether two deliveries describe the same message. The
+// sequence number is ephemeral and shared across control-plane restarts, so
+// the content is compared as well.
+func sameTurnEvent(a, b model.Event) bool {
+	return a.Seq == b.Seq && a.Type == b.Type && a.Actor == b.Actor &&
+		a.Text == b.Text && a.Time.Equal(b.Time)
+}
+
+// verifyTurn rejects a journaled turn that does not describe this event or has
+// gaps between its steps. The conversation is replayed in step order, so a gap
+// would make a later step execute again and overwrite its entry.
+func verifyTurn(entries []journal.Entry, ev model.Event) error {
+	for i := range entries {
+		if entries[i].Step != i {
+			return fmt.Errorf("journal turn %d has step %d at position %d", ev.Seq, entries[i].Step, i)
+		}
+	}
+	var recorded model.Event
+	if err := json.Unmarshal(entries[0].Input, &recorded); err != nil {
+		return fmt.Errorf("decode journal turn %d event: %w", ev.Seq, err)
+	}
+	if !sameTurnEvent(recorded, ev) {
+		return fmt.Errorf("journal turn %d belongs to a different message", ev.Seq)
+	}
+	return nil
+}
+
+// failTurn ends the turn. A fatal failure also ends the process: the control
+// plane starts a replacement, which resumes from the journal instead of
+// continuing on a conversation the journal does not describe.
+func (r *Runtime) failTurn(ctx context.Context, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	if isFatal(err) {
+		r.logger.Error("agent turn cannot continue", "error", err)
+		select {
+		case r.fatalCh <- err:
+		default:
+		}
+		return
+	}
+	r.turnFailed(ctx, err)
+}
+
+// closeLogs closes the local logs without exporting an artifact. A runtime
+// stopped by a signal leaves the bundle to its replacement.
+func (r *Runtime) closeLogs() {
+	if err := r.conv.Close(); err != nil {
+		r.logger.Debug("close conversation log", "error", err)
+	}
+	if err := r.trace.Close(); err != nil {
+		r.logger.Debug("close trace log", "error", err)
+	}
+	if err := r.events.Close(); err != nil {
+		r.logger.Debug("close event log", "error", err)
+	}
+}
+
+func (r *Runtime) turnFailed(ctx context.Context, err error) {
+	r.logger.Warn("agent turn failed", "error", err)
+	if ctx.Err() != nil {
+		return
+	}
+	r.events.Emit(ctx, model.EventError, "agent", err.Error(), nil)
+}
+
+// modelRetryBudget bounds one model step across all its attempts. It is long
+// enough to cover a control-plane restart and short enough to hand the turn to
+// a replacement container when the network does not come back.
+var modelRetryBudget = 5 * time.Minute
+
+// retryableModelError keeps a turn alive across a control-plane replacement,
+// where the broker connection and 5xx responses are transient. A provider
+// rejecting the request is not retried.
+func retryableModelError(err error) bool {
+	var status *llm.StatusError
+	if errors.As(err, &status) {
+		return status.Code >= 500 || status.Code == 408 || status.Code == 429
+	}
+	return !errors.Is(err, context.Canceled)
 }
 
 // Version returns the runtime version string.

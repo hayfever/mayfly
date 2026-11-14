@@ -29,11 +29,13 @@ Complete example: [examples/config.local.yaml](../examples/config.local.yaml). K
 | `max_history_messages` | `120` | Messages sent to the model; oldest are trimmed at a user boundary |
 | `max_concurrent` | `50` | Maximum sessions that have not finalized. Webhook work waits in the queue; direct API calls get `429` and `Retry-After`. `0` removes the cap |
 | `retention` | `30m` | How long a finalized session stays in memory for status and events. Artifact metadata is kept separately. `0` keeps sessions forever |
-| `connect_timeout` | `2m` | A pending session whose runtime has not reached the control plane in this time is failed. Measured from container start on Kubernetes and from process start locally. `0` disables |
+| `connect_timeout` | `2m` | A session whose runtime has not reached the control plane in this time is failed. Measured from launch, including time the pod spends Pending. `0` disables |
+| `max_restarts` | `2` | Replacement containers for a non-terminal session whose pod fails or disappears. `0` disables replacement and falls back immediately; on SIGTERM the runtime then finalizes with its bundle instead of waiting for a replacement |
+| `persistent_workspace` | `true` | Mount one per-session PVC at the workspace and artifact paths. `false` uses EmptyDirs; the workspace and `conversation.jsonl` would not survive a container, so no replacement is started and the session fails instead. On SIGTERM the runtime then finalizes with its bundle instead of waiting for a replacement |
 | `allow_shell` | `false` | Enables the `run_command` tool inside the container |
 | `shell_timeout` | `120s` | Maximum command duration |
 | `workspace_dir` | `/workspace` | Container workspace path; overridden for the local backend |
-| `artifacts_dir` | `/var/lib/mayfly/artifacts` | Container bundle staging path; overridden for the local backend |
+| `artifacts_dir` | `/var/lib/mayfly/artifacts` | Container bundle staging path. The Kubernetes backend uses `/artifacts` on the workspace claim; the local backend uses its state directory |
 
 ## runtime
 
@@ -51,8 +53,9 @@ Complete example: [examples/config.local.yaml](../examples/config.local.yaml). K
 | `network_policy` | `true` | Create a per-session NetworkPolicy |
 | `dns_namespace` | `kube-system` | Namespace allowed for DNS egress |
 | `egress` | `[]` | Extra egress CIDRs: `[{cidr: 203.0.113.0/24, ports: [443]}]` |
-| `workspace_limit` | `1Gi` | EmptyDir workspace size |
-| `artifact_volume_limit` | `1Gi` | EmptyDir artifact staging size |
+| `workspace_limit` | `1Gi` | Workspace size. With `sessions.persistent_workspace` it sizes the workspace half of the per-session PVC (`mayfly-<id>-workspace`); otherwise it sizes the EmptyDir |
+| `artifact_volume_limit` | `1Gi` | Artifact staging size. With persistence, the PVC is sized as `workspace_limit + artifact_volume_limit` because the bundle is staged on the same claim; otherwise it sizes the artifact EmptyDir |
+| `storage_class` | `""` | StorageClass for the workspace claim. Empty uses the cluster default; set it on a cluster without a default class, or the claim never binds and the session times out |
 | `resources.requests` | `{}` | Container requests, for example `cpu: 100m` |
 | `resources.limits` | `{}` | Container limits |
 | `env` | `{}` | Literal environment variables added to the session pod. Do not put secrets here; pod specs are readable in the namespace. `MAYFLY_CONFIG` and `MAYFLY_SESSION_TOKEN` are owned by the control plane and are rejected at startup |
@@ -140,6 +143,24 @@ Backend requirements:
 - `redis` runs two Lua scripts for atomic accept and claim, so the cache must support `EVAL`. Redis, Valkey, KeyDB, Dragonfly, ElastiCache, Memorystore, Azure Managed Redis, and Upstash do.
 - `redis` must not evict keys: set `maxmemory-policy noeviction` on a dedicated instance or database, and enable AOF (`appendonly yes`, `everysec`) or snapshots. An `allkeys-lru` cache silently drops accepted jobs.
 - Dedupe keys live for `dedupe_ttl`, so size the cache for roughly one key per accepted delivery in that window. Completed jobs keep a tombstone for `tombstone_ttl`; buried jobs stay until retried or deleted.
+
+## journal
+
+The journal records completed turn steps so a replacement session container can finish an interrupted turn without repeating them. `memory` is for tests and single-process development; `bbolt` survives a control-plane restart and is the chart default.
+
+```yaml
+journal:
+  backend: bbolt            # memory or bbolt
+  bbolt:
+    path: /var/lib/mayfly/journal.db
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `backend` | `bbolt` in config and chart | `memory` or `bbolt` |
+| `bbolt.path` | `.mayfly/journal.db` in config, `/var/lib/mayfly/journal.db` in the chart | Database file. Put it on the control-plane PersistentVolume; a control-plane restart must be able to read the last turn |
+
+`bbolt` locks its file, so only one control-plane replica can use it. A session's entries are deleted when it finalizes: the artifact bundle is the durable history. The database also holds a per-session sequence reservation, which keeps a restarted control plane from reusing a turn key.
 
 ## agents
 

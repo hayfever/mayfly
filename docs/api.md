@@ -193,8 +193,10 @@ These endpoints accept the scoped session token, never the admin token.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /internal/v1/sessions/{id}/events` | Append runtime events |
+| `POST /internal/v1/sessions/{id}/events` | Append runtime events. An event may include `step_key`; a repeated key is dropped |
 | `GET /internal/v1/sessions/{id}/inbox?after=<seq>` | SSE stream of human messages and close controls |
+| `POST /internal/v1/sessions/{id}/journal` | Append one completed turn step (`session_id`, `turn`, `step`, `name`, `input`, `output`, `err`, `conv_len`, `time`) |
+| `GET /internal/v1/sessions/{id}/journal?turn=<n>` | Steps for one turn. Omit `turn` for the last turn, which also returns its number |
 | `POST /internal/v1/sessions/{id}/artifacts` | Upload a tar.gz bundle. Requires `Content-Length` and `X-Mayfly-SHA256`. Optional `X-Mayfly-Partial: true` |
 | `POST /internal/v1/sessions/{id}/finalize` | `{"status":"completed"\|"failed","reason":"...","error":"..."}` |
 | `POST /internal/v1/llm/chat/completions` | OpenAI-compatible proxy. The model must be the one assigned to the session; an empty model field is filled with it |

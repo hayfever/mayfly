@@ -135,7 +135,13 @@ func checkPodHardening(t *testing.T, name string) {
 			t.Errorf("control plane secret %s leaked into the session pod", e.Name)
 		}
 	}
-	if _, err := env.kubectl("get", "networkpolicy", name); err != nil {
+	session := pod.Labels["mayfly.io/session"]
+	if session == "" {
+		t.Error("pod has no mayfly.io/session label")
+	}
+	// The policy follows the session, not the pod name, so a replacement pod
+	// keeps it. Its name is mayfly-<id>-netpol.
+	if _, err := env.kubectl("get", "networkpolicy", "mayfly-"+session+"-netpol"); err != nil {
 		t.Errorf("session NetworkPolicy missing: %v", err)
 	}
 }

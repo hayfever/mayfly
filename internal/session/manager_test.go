@@ -282,3 +282,63 @@ func TestReapFailsPendingSessionThatNeverConnects(t *testing.T) {
 		t.Fatalf("fresh session status = %s, want pending", fresh.Status)
 	}
 }
+
+// TestCreateMarksResumable checks the runtime gets the signal behavior that
+// matches where its workspace lives: local restates in place, Kubernetes needs
+// the persistent claim.
+func TestCreateMarksResumable(t *testing.T) {
+	ctx := context.Background()
+	m := testManager(t)
+	m.runner = nopRunner{}
+	if err := m.loadAgents(); err != nil {
+		t.Fatal(err)
+	}
+
+	local, err := m.Create(ctx, CreateOptions{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst, ok := m.instance(local.ID)
+	if !ok {
+		t.Fatal("created session is not registered")
+	}
+	if !inst.runtimeCfg.Resumable {
+		t.Fatalf("local backend Resumable = false, want true")
+	}
+
+	m.cfg.Runtime.Backend = "kubernetes"
+	m.cfg.Sessions.PersistentWorkspace = new(false)
+	remote, err := m.Create(ctx, CreateOptions{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst, ok = m.instance(remote.ID)
+	if !ok {
+		t.Fatal("created session is not registered")
+	}
+	if inst.runtimeCfg.Resumable {
+		t.Fatalf("kubernetes without a persistent workspace Resumable = true, want false")
+	}
+
+	m.cfg.Sessions.PersistentWorkspace = new(true)
+	persistent, err := m.Create(ctx, CreateOptions{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst, _ = m.instance(persistent.ID)
+	if !inst.runtimeCfg.Resumable {
+		t.Fatalf("kubernetes with a persistent workspace Resumable = false, want true")
+	}
+
+	// max_restarts: 0 starts no replacement, so nothing would resume a turn
+	// a signal interrupted.
+	m.cfg.Sessions.MaxRestarts = 0
+	noRestarts, err := m.Create(ctx, CreateOptions{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst, _ = m.instance(noRestarts.ID)
+	if inst.runtimeCfg.Resumable {
+		t.Fatalf("max_restarts 0 Resumable = true, want false")
+	}
+}
