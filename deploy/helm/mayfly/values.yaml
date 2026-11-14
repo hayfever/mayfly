@@ -101,10 +101,16 @@ config:
     local:
       dir: /var/lib/mayfly/artifacts
     max_bytes: 268435456
+  sources:
+    state_path: /var/lib/mayfly/schedule.db
+    max_artifact_bytes: 16777216
+    concurrency: 4
+    timeout: 15m
+    job_timeout: 30m
   skills:
     dirs: [/etc/mayfly-skills]
   agents:
-    dirs: [/etc/mayfly-agents]
+    dirs: [/etc/mayfly-agents, /etc/mayfly-bundles]
     allowed_images: []
   queue:
     backend: bbolt
@@ -135,6 +141,10 @@ skills:
 
 agents:
   files: {}
+  # Optional ConfigMap of extra bundle files mounted at /etc/mayfly-bundles.
+  # The chart never creates or owns it, so upgrades leave it alone. Empty
+  # means "<release fullname>-bundles".
+  bundlesConfigMap: ""
 
 litellm:
   enabled: false
@@ -192,6 +202,9 @@ controlPlane:
   podAnnotations: {}
   podLabels: {}
   extraEnv: []
+  # Optional Secret whose keys become control-plane environment variables.
+  # Source connections read provider credentials from here.
+  sourcesSecret: ""
   securityContext:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true

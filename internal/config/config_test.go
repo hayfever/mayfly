@@ -371,3 +371,33 @@ func TestShippedConfigsHaveNoUnknownFields(t *testing.T) {
 		t.Fatalf("%s config subtree: %v", path, err)
 	}
 }
+
+func TestSecretEnvNames(t *testing.T) {
+	cfg := Default()
+	cfg.Server.TokenEnv = "MAYFLY_API_TOKEN"
+	cfg.LLM.APIKeyEnv = "OPENAI_API_KEY"
+	cfg.Queue.Redis.PasswordEnv = "REDIS_PASSWORD"
+	cfg.Triggers = []TriggerConfig{{Name: "gh", SecretEnv: "GITHUB_WEBHOOK_SECRET"}}
+	cfg.MCP.Servers = []MCPServerConfig{{Name: "slack", Headers: map[string]string{"Authorization": "env:SLACK_MCP_TOKEN", "X": "plain"}}}
+	got := strings.Join(cfg.SecretEnvNames(), ",")
+	for _, want := range []string{"MAYFLY_API_TOKEN", "OPENAI_API_KEY", "REDIS_PASSWORD", "GITHUB_WEBHOOK_SECRET", "SLACK_MCP_TOKEN"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("SecretEnvNames = %s, missing %s", got, want)
+		}
+	}
+	if strings.Contains(got, "plain") {
+		t.Fatalf("literal header value listed: %s", got)
+	}
+}
+
+func TestSourcesTimeoutWithinJobTimeout(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "examples", "config.local.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Sources.Timeout = Duration(time.Hour)
+	cfg.Sources.JobTimeout = Duration(time.Minute)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "sources.timeout") {
+		t.Fatalf("err = %v", err)
+	}
+}

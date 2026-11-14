@@ -26,6 +26,7 @@ import (
 type frontmatter struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
+	Scope       string `yaml:"scope"`
 }
 
 func (l *skillLoader) loadDir(dir string) error {
@@ -85,10 +86,15 @@ func parseSkill(raw []byte, nameHint, origin string) (sessioncfg.Skill, error) {
 	if strings.TrimSpace(body) == "" {
 		return sessioncfg.Skill{}, fmt.Errorf("%s: skill body is empty", origin)
 	}
+	scope, err := parseScope(meta.Scope)
+	if err != nil {
+		return sessioncfg.Skill{}, fmt.Errorf("%s: %w", origin, err)
+	}
 	return sessioncfg.Skill{
 		Name:        meta.Name,
 		Description: meta.Description,
 		Body:        strings.TrimSpace(body),
+		Scope:       scope,
 	}, nil
 }
 
@@ -120,4 +126,17 @@ func splitFrontmatter(raw []byte) (frontmatter, string, error) {
 		offset = lineEnd
 	}
 	return meta, "", errors.New("unterminated frontmatter")
+}
+
+// parseScope accepts the shared scope or one agent-owned scope.
+func parseScope(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	switch {
+	case raw == "", raw == "shared":
+		return "shared", nil
+	case strings.HasPrefix(raw, "agent:") && len(raw) > len("agent:"):
+		return raw, nil
+	default:
+		return "", fmt.Errorf("invalid skill scope %q (use shared or agent:<name>)", raw)
+	}
 }

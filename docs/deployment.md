@@ -18,11 +18,22 @@ The script:
 
 The overlay includes deterministic LLM and MCP stubs and an example agent manifest. Remove the stubs and point `llm.base_url` at a real provider for normal use.
 
-Agent manifests are mounted from the `mayfly-agents` ConfigMap at `/etc/mayfly-agents`. Add files with the same kustomize generator pattern, or patch `agents.dirs`.
+Agent manifests are mounted from the `mayfly-agents` ConfigMap at `/etc/mayfly-agents`. The local overlay generates that ConfigMap from `examples/agents/triage.yaml`, so `make cluster-up` and `make deploy` replace it every time.
+
+Put your own bundles, such as competitor-watch, in the `mayfly-bundles` ConfigMap instead. It is mounted at `/etc/mayfly-bundles`, the second `agents.dirs` entry. No overlay or chart creates it, and the volume is optional, so a redeploy leaves it alone and a cluster without it still starts:
+
+```bash
+kubectl -n mayfly create configmap mayfly-bundles \
+  --from-file=competitor-watch.yaml --from-file=competitor-watch-sources.yaml \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n mayfly rollout restart deployment/mayflyd
+```
+
+Bundles load at startup, so restart mayflyd after you change the ConfigMap. With Helm, the ConfigMap is `<chart fullname>-bundles` by default (`<release>-mayfly-bundles`); set `agents.bundlesConfigMap` to use another name.
 
 To add a harness, build it into the agent image at `/opt/mayfly/harnesses/<name>` and declare `harness: <name>` in the manifest. The image entrypoint is `/usr/local/bin/mayfly-harness`; it falls back to `/usr/local/bin/mayfly-agent` when no harness is selected. No per-agent image is required.
 
-The base overlay does not enable agent directories by default. Add them when you mount manifests. The local overlay enables `/etc/mayfly-agents` and includes one example agent.
+The base config lists `/etc/mayfly-agents` and `/etc/mayfly-bundles` in `agents.dirs`, and both ConfigMap volumes are optional. The local overlay also generates `mayfly-agents` with one example agent.
 
 The k3d config publishes the API on `127.0.0.1:8080` only. The local overlay turns on `allow_shell` and unsigned webhooks, so do not bind it to other interfaces.
 
