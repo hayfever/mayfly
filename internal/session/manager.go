@@ -25,6 +25,7 @@ import (
 	"github.com/hayfever/mayfly/internal/artifact"
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/hub"
+	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/k8s"
 	"github.com/hayfever/mayfly/internal/model"
 	"github.com/hayfever/mayfly/internal/runner"
@@ -49,6 +50,11 @@ const maxPromptBytes = 64 << 10
 const maxMessageBytes = 32 << 10
 const podTerminalGrace = 20 * time.Second
 
+// sequenceBlock is how far ahead the control plane reserves hub sequence
+// numbers. One journal write covers a block of events, so the reservation
+// stays cheap without ever handing out a number twice across a restart.
+const sequenceBlock = int64(1000)
+
 // CreateOptions describes a new session request.
 type CreateOptions struct {
 	Prompt     string
@@ -64,27 +70,44 @@ type CreateOptions struct {
 type instance struct {
 	mu               sync.Mutex
 	sess             model.Session
+	token            string
 	tokenHash        string
 	runtimeCfg       sessioncfg.Config
 	handle           runner.Handle
+	image            string
+	command          []string
+	args             []string
+	env              map[string]string
 	closeReason      string
 	closeRequestedAt time.Time
 	finalized        bool
 	resourcesDeleted bool
 	launchedAt       time.Time
-	podRunningSince  time.Time
+	podNotReadySince time.Time
 	podTerminalSince time.Time
 	podMissingSince  time.Time
+	podDeletingSince time.Time
+	restarts         int
+	restarting       bool
+	stalePods        []string
+	// seqFloor is the highest sequence this control plane durably reserved
+	// for the session. The hub may hand out numbers up to it after a restart
+	// without touching the journal.
+	seqFloor atomic.Int64
+	// journalMu orders AppendJournal's turn check with its write, so two
+	// containers of one session cannot both pass the check.
+	journalMu sync.Mutex
 }
 
 // Manager is the control plane session registry and lifecycle engine.
 type Manager struct {
-	cfg    *config.Config
-	logger *slog.Logger
-	store  artifact.Store
-	hub    *hub.Hub
-	runner runner.Runner
-	kube   *k8s.Client
+	cfg     *config.Config
+	logger  *slog.Logger
+	store   artifact.Store
+	hub     *hub.Hub
+	journal journal.Durable
+	runner  runner.Runner
+	kube    *k8s.Client
 
 	skills       []sessioncfg.Skill
 	skillByName  map[string]sessioncfg.Skill
@@ -103,14 +126,18 @@ type Manager struct {
 	// downloadable after the session record is gone.
 	artifacts map[string]model.ArtifactInfo
 
-	started atomic.Bool
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	started  atomic.Bool
+	stopping bool
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
 }
 
 // New builds a manager. kube may be nil for the local backend.
-func New(cfg *config.Config, store artifact.Store, h *hub.Hub, r runner.Runner, kube *k8s.Client, logger *slog.Logger) (*Manager, error) {
+func New(cfg *config.Config, store artifact.Store, h *hub.Hub, js journal.Durable, r runner.Runner, kube *k8s.Client, logger *slog.Logger) (*Manager, error) {
+	if js == nil {
+		return nil, errors.New("journal store is required")
+	}
 	sources := make([]skills.Source, 0, len(cfg.Skills.Sources))
 	for _, source := range cfg.Skills.Sources {
 		strip := 1
@@ -140,6 +167,7 @@ func New(cfg *config.Config, store artifact.Store, h *hub.Hub, r runner.Runner, 
 		logger:      logger,
 		store:       store,
 		hub:         h,
+		journal:     js,
 		runner:      r,
 		kube:        kube,
 		skills:      loaded,
@@ -186,8 +214,11 @@ func New(cfg *config.Config, store artifact.Store, h *hub.Hub, r runner.Runner, 
 // Start launches maintenance loops and adopts existing Kubernetes pods.
 func (m *Manager) Start(ctx context.Context) error {
 	m.ctx, m.cancel = context.WithCancel(ctx)
+	var replacements []*instance
 	if m.kube != nil {
-		if err := m.adopt(ctx); err != nil {
+		var err error
+		replacements, err = m.adopt(ctx)
+		if err != nil {
 			m.logger.Warn("adopt existing sessions", "error", err)
 		}
 	}
@@ -197,12 +228,20 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.maintenance()
 	}()
 	m.started.Store(true)
+	// A session that lost its pod has nothing for the poller to notice, so
+	// start its replacement once dispatch accepts work.
+	for _, inst := range replacements {
+		m.restartSoon(inst, "pod missing at control-plane start")
+	}
 	return nil
 }
 
 // Shutdown stops maintenance and local agent processes.
 func (m *Manager) Shutdown(ctx context.Context) {
 	m.started.Store(false)
+	m.mu.Lock()
+	m.stopping = true
+	m.mu.Unlock()
 	if m.cancel != nil {
 		m.cancel()
 	}
@@ -217,6 +256,23 @@ func (m *Manager) Shutdown(ctx context.Context) {
 		}
 	}
 	m.wg.Wait()
+}
+
+// dispatch runs work in the background and keeps Shutdown waiting for it. It
+// refuses work once shutdown has started so a WaitGroup Add never races Wait.
+func (m *Manager) dispatch(fn func()) bool {
+	m.mu.Lock()
+	if m.stopping {
+		m.mu.Unlock()
+		return false
+	}
+	m.wg.Add(1)
+	m.mu.Unlock()
+	go func() {
+		defer m.wg.Done()
+		fn()
+	}()
+	return true
 }
 
 // request is a validated session request with its references resolved.
@@ -375,6 +431,10 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		MCPServers:         resolvedMCP,
 		CreatedAt:          now,
 		AgentVersion:       version.Version,
+		// max_restarts: 0 means no replacement will ever start, so a signal
+		// must finalize instead of leaving the turn to one.
+		Resumable: m.cfg.Sessions.MaxRestarts > 0 &&
+			(m.cfg.Runtime.Backend == "local" || config.Bool(m.cfg.Sessions.PersistentWorkspace, true)),
 	}
 
 	inst := &instance{
@@ -396,7 +456,12 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 			LastActivity: now,
 		},
 		tokenHash:  hash,
+		token:      token,
 		runtimeCfg: runtimeCfg,
+		image:      image,
+		command:    append([]string(nil), agent.Runtime.Command...),
+		args:       append([]string(nil), agent.Runtime.Args...),
+		env:        cloneEnv(runtimeEnv),
 		launchedAt: now,
 	}
 
@@ -414,6 +479,16 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		return nil, err
 	}
 	m.mu.Unlock()
+	// The trigger's sequence becomes the first turn key, so reserve it before
+	// the hub assigns it. A failed reservation must not leave the session
+	// registered with unreserved keys.
+	if err := m.reserveSequence(inst); err != nil {
+		m.mu.Lock()
+		delete(m.sessions, id)
+		m.mu.Unlock()
+		m.removeToken(hash)
+		return nil, fmt.Errorf("reserve turn sequence: %w", err)
+	}
 	m.hub.Create(id)
 	m.appendEvent(inst, model.Event{
 		Type:  model.EventUserMessage,
@@ -464,21 +539,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 	m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session container started.", Data: map[string]any{"status": string(model.StatusPending)}})
 
 	if h.Done != nil {
-		m.wg.Add(1)
-		go func() {
-			defer m.wg.Done()
-			select {
-			case <-h.Done:
-				time.Sleep(5 * time.Second)
-				inst.mu.Lock()
-				done := inst.finalized
-				inst.mu.Unlock()
-				if !done {
-					m.fallback(id, "runtime exited without finalizing")
-				}
-			case <-m.ctx.Done():
-			}
-		}()
+		m.watchLocal(inst, h)
 	}
 	snapshot := m.copySession(inst)
 	m.logger.Info("session created", "session", id, "backend", m.cfg.Runtime.Backend, "ttl", ttl.String())
@@ -500,24 +561,31 @@ func (m *Manager) prepare(_ context.Context, inst *instance, podName, token stri
 		return nil, nil
 	}
 
+	cfg.WorkspaceDir = k8s.WorkspaceDir
+	cfg.ArtifactsDir = k8s.ArtifactsDir
+	inst.runtimeCfg = cfg
+	persistent := config.Bool(m.cfg.Sessions.PersistentWorkspace, true)
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return nil, err
 	}
 	port := platformPort(m.cfg.Server.Addr)
 	spec := &k8s.SessionSpec{
-		Namespace:        m.cfg.Sessions.Namespace,
-		SessionID:        id,
-		PodName:          podName,
-		SecretName:       podName,
-		ConfigMapName:    podName,
-		Image:            image,
-		ImagePullPolicy:  m.cfg.Runtime.ImagePullPolicy,
-		ImagePullSecrets: m.cfg.Runtime.ImagePullSecrets,
-		ServiceAccount:   m.cfg.Runtime.ServiceAccount,
-		TTL:              ttl,
-		WorkspaceLimit:   m.cfg.Runtime.WorkspaceLimit,
-		ArtifactLimit:    m.cfg.Runtime.ArtifactLimit,
+		Namespace:           m.cfg.Sessions.Namespace,
+		SessionID:           id,
+		PodName:             podName,
+		SecretName:          podName,
+		ConfigMapName:       podName,
+		Image:               image,
+		ImagePullPolicy:     m.cfg.Runtime.ImagePullPolicy,
+		ImagePullSecrets:    m.cfg.Runtime.ImagePullSecrets,
+		ServiceAccount:      m.cfg.Runtime.ServiceAccount,
+		TTL:                 ttl,
+		WorkspaceLimit:      m.cfg.Runtime.WorkspaceLimit,
+		ArtifactLimit:       m.cfg.Runtime.ArtifactLimit,
+		PersistentWorkspace: persistent,
+		PVCName:             "mayfly-" + id + "-workspace",
+		StorageClass:        m.cfg.Runtime.StorageClass,
 		Resources: k8s.ResourceConfig{
 			Requests: m.cfg.Runtime.Resources.Requests,
 			Limits:   m.cfg.Runtime.Resources.Limits,

@@ -26,6 +26,7 @@ import (
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/httpapi"
 	"github.com/hayfever/mayfly/internal/hub"
+	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/model"
 	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/runner"
@@ -80,7 +81,7 @@ func TestWebhookToArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mgr, err := session.New(cfg, store, hub.New(1000), local, nil, logger)
+	mgr, err := session.New(cfg, store, hub.New(1000), journal.NewMemory(), local, nil, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

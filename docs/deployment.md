@@ -149,10 +149,10 @@ The control plane writes and reads bundles. Session pods never receive storage c
 
 Webhooks are accepted into a queue before a pod exists. Choose the backend by what you already operate:
 
-- `bbolt` (chart default): one file at `/var/lib/mayfly/queue.db`. Enable `persistence` so the file survives pod replacement:
+- `bbolt` (chart default): one file at `/var/lib/mayfly/queue.db`. Control-plane persistence is on by default, so the file survives pod replacement. Turning it off is only reasonable with the `redis` queue and a throwaway control plane:
 
   ```bash
-  helm upgrade mayfly deploy/helm/mayfly --set persistence.enabled=true --set persistence.size=2Gi
+  helm upgrade mayfly deploy/helm/mayfly --set persistence.enabled=false
   ```
 
   One replica only: bbolt locks the file.
@@ -160,11 +160,13 @@ Webhooks are accepted into a queue before a pod exists. Choose the backend by wh
 
 The `memory` backend loses accepted work on restart. Use it only for development.
 
+The turn journal (`journal.bbolt.path`, default `/var/lib/mayfly/journal.db`) shares the control-plane volume, so it survives a restart with the same default persistence. Disabling `persistence` loses the journal on every control-plane restart. A runtime that is mid-turn still finishes its turn, but the thread history from before the restart is gone, and the session's new messages are numbered from the restart time in microseconds so none reuses the in-flight turn's key. The kustomize base (`deploy/k8s/base`) mounts the same state directory from the `mayfly-state` claim.
+
 A job that exhausts `queue.max_attempts` is buried. List it with `GET /api/v1/queue/dead`, inspect it with `GET /api/v1/queue/jobs/{id}`, then retry (`POST /api/v1/queue/dead/{id}/retry`) or delete it. Buried jobs are kept until you act; size the queue volume or cache for that. Completed jobs keep a session link for `queue.tombstone_ttl`.
 
 ## Operating notes
 
-- Run one control-plane replica. Session records, thread history, the token index, and the artifact index are in memory. Pod adoption after a restart works from ConfigMap and Secret, but pre-restart events are not replayed. Finalized sessions are removed from memory after `sessions.retention`; artifact metadata is kept until restart, so downloads keep working. Accepted webhook work is the exception: with `bbolt` or `redis` it survives a restart, and the worker resumes the backlog.
+- Run one control-plane replica. Session records, thread history, the token index, and the artifact index are in memory. Pod adoption after a restart works from ConfigMap and Secret, and the last journaled turn is replayed into the new thread. Finalized sessions are removed from memory after `sessions.retention`; artifact metadata is kept until restart, so downloads keep working. Accepted webhook work and the in-flight turn's step journal survive with `bbolt` or `redis` (queue) and `journal.backend: bbolt`.
 - Remote skill archives require outbound network access from the control plane at startup. If you prefer GitOps, sync the skill repository to a volume and use `skills.dirs` instead; the platform then needs no fetch capability.
 
 For multiple model providers, deploy LiteLLM and point `llm.base_url` at its Service. A starting manifest is in [examples/litellm/deployment.yaml](../examples/litellm/deployment.yaml); see [providers.md](providers.md) for keys, IRSA, and model aliases.

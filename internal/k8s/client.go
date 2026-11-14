@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -103,7 +104,16 @@ func (c *Client) CreateSession(ctx context.Context, spec *SessionSpec) error {
 			return fmt.Errorf("create session network policy: %w", err)
 		}
 		created = append(created, func(ctx context.Context) error {
-			return c.cs.NetworkingV1().NetworkPolicies(spec.Namespace).Delete(ctx, spec.PodName, metav1.DeleteOptions{})
+			return c.cs.NetworkingV1().NetworkPolicies(spec.Namespace).Delete(ctx, spec.NetworkPolicyName, metav1.DeleteOptions{})
+		})
+	}
+	if spec.PersistentWorkspace {
+		if _, err := c.cs.CoreV1().PersistentVolumeClaims(spec.Namespace).Create(ctx, spec.PersistentVolumeClaim(), metav1.CreateOptions{}); err != nil {
+			rollback()
+			return fmt.Errorf("create session workspace claim: %w", err)
+		}
+		created = append(created, func(ctx context.Context) error {
+			return c.cs.CoreV1().PersistentVolumeClaims(spec.Namespace).Delete(ctx, spec.PVCName, metav1.DeleteOptions{})
 		})
 	}
 	if _, err := c.cs.CoreV1().Pods(spec.Namespace).Create(ctx, spec.Pod(), metav1.CreateOptions{}); err != nil {
@@ -113,26 +123,59 @@ func (c *Client) CreateSession(ctx context.Context, spec *SessionSpec) error {
 	return nil
 }
 
+// CreatePod creates only the pod. A replacement container reuses the existing
+// Secret, ConfigMap, NetworkPolicy, and workspace claim.
+func (c *Client) CreatePod(ctx context.Context, spec *SessionSpec) error {
+	if err := spec.Validate(); err != nil {
+		return err
+	}
+	if _, err := c.cs.CoreV1().Pods(spec.Namespace).Create(ctx, spec.Pod(), metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("create replacement session pod: %w", err)
+	}
+	return nil
+}
+
+// DeletePod removes one pod and ignores an already-absent pod.
+func (c *Client) DeletePod(ctx context.Context, name string, grace time.Duration) error {
+	graceSeconds := int64(grace.Seconds())
+	err := c.cs.CoreV1().Pods(c.namespace).Delete(ctx, name, metav1.DeleteOptions{
+		GracePeriodSeconds: &graceSeconds,
+	})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete pod: %w", err)
+	}
+	return nil
+}
+
 // DeleteSession removes the pod and its supporting objects. Missing objects
 // are ignored.
+//
+// The ConfigMap goes first. Adoption needs it to resume a session, so a
+// control plane that stops partway through this cleanup cannot bring a
+// finalized session back; adoption deletes a pod whose ConfigMap is gone.
 func (c *Client) DeleteSession(ctx context.Context, spec *SessionSpec, grace time.Duration) error {
 	var errs []error
 	graceSeconds := int64(grace.Seconds())
+	if err := c.cs.CoreV1().ConfigMaps(spec.Namespace).Delete(ctx, spec.ConfigMapName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		errs = append(errs, fmt.Errorf("delete configmap: %w", err))
+	}
 	if err := c.cs.CoreV1().Pods(spec.Namespace).Delete(ctx, spec.PodName, metav1.DeleteOptions{
 		GracePeriodSeconds: &graceSeconds,
 	}); err != nil && !apierrors.IsNotFound(err) {
 		errs = append(errs, fmt.Errorf("delete pod: %w", err))
 	}
-	if spec.EnableNetworkPolicy {
-		if err := c.cs.NetworkingV1().NetworkPolicies(spec.Namespace).Delete(ctx, spec.PodName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+	if spec.NetworkPolicyName != "" {
+		if err := c.cs.NetworkingV1().NetworkPolicies(spec.Namespace).Delete(ctx, spec.NetworkPolicyName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 			errs = append(errs, fmt.Errorf("delete network policy: %w", err))
 		}
 	}
-	if err := c.cs.CoreV1().ConfigMaps(spec.Namespace).Delete(ctx, spec.ConfigMapName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		errs = append(errs, fmt.Errorf("delete configmap: %w", err))
-	}
 	if err := c.cs.CoreV1().Secrets(spec.Namespace).Delete(ctx, spec.SecretName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		errs = append(errs, fmt.Errorf("delete secret: %w", err))
+	}
+	if spec.PersistentWorkspace && spec.PVCName != "" {
+		if err := c.cs.CoreV1().PersistentVolumeClaims(spec.Namespace).Delete(ctx, spec.PVCName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("delete workspace claim: %w", err))
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -144,6 +187,141 @@ func (c *Client) SessionPods(ctx context.Context) ([]corev1.Pod, error) {
 		return nil, fmt.Errorf("list session pods: %w", err)
 	}
 	return list.Items, nil
+}
+
+// OrphanObjects holds the supporting object names of one session that has no
+// pod.
+type OrphanObjects struct {
+	ConfigMap string
+	Secret    string
+	PVC       string
+}
+
+// OrphanSessions reports the labelled objects of sessions that have no live
+// pod and are not in live. A session with all three objects can be resumed
+// with a replacement pod; one missing any of them can only be collected.
+func (c *Client) OrphanSessions(ctx context.Context, live map[string]struct{}) (map[string]OrphanObjects, error) {
+	out := map[string]OrphanObjects{}
+	orphan := func(session string) bool {
+		if session == "" {
+			return false
+		}
+		_, ok := live[session]
+		return !ok
+	}
+	configs, err := c.cs.CoreV1().ConfigMaps(c.namespace).List(ctx, metav1.ListOptions{LabelSelector: managedSelector})
+	if err != nil {
+		return nil, fmt.Errorf("list session configmaps: %w", err)
+	}
+	for _, cm := range configs.Items {
+		if !orphan(cm.Labels[LabelSession]) {
+			continue
+		}
+		o := out[cm.Labels[LabelSession]]
+		o.ConfigMap = cm.Name
+		out[cm.Labels[LabelSession]] = o
+	}
+	secrets, err := c.cs.CoreV1().Secrets(c.namespace).List(ctx, metav1.ListOptions{LabelSelector: managedSelector})
+	if err != nil {
+		return nil, fmt.Errorf("list session secrets: %w", err)
+	}
+	for _, secret := range secrets.Items {
+		if !orphan(secret.Labels[LabelSession]) {
+			continue
+		}
+		o := out[secret.Labels[LabelSession]]
+		o.Secret = secret.Name
+		out[secret.Labels[LabelSession]] = o
+	}
+	claims, err := c.cs.CoreV1().PersistentVolumeClaims(c.namespace).List(ctx, metav1.ListOptions{LabelSelector: managedSelector})
+	if err != nil {
+		return nil, fmt.Errorf("list session claims: %w", err)
+	}
+	for _, claim := range claims.Items {
+		if !orphan(claim.Labels[LabelSession]) {
+			continue
+		}
+		o := out[claim.Labels[LabelSession]]
+		o.PVC = claim.Name
+		out[claim.Labels[LabelSession]] = o
+	}
+	return out, nil
+}
+
+// GarbageCollect removes the labelled objects of sessions that no longer have
+// a pod. A session's only live state is its pod and its in-memory record, so
+// once the pod is gone those objects can never be managed again and a claim
+// keeps costing money. It returns the session IDs it cleaned.
+func (c *Client) GarbageCollect(ctx context.Context, live map[string]struct{}) ([]string, error) {
+	orphan := func(session string) bool {
+		if session == "" {
+			return false
+		}
+		_, ok := live[session]
+		return !ok
+	}
+	cleaned := map[string]struct{}{}
+	var errs []error
+
+	configs, err := c.cs.CoreV1().ConfigMaps(c.namespace).List(ctx, metav1.ListOptions{LabelSelector: managedSelector})
+	if err != nil {
+		return nil, fmt.Errorf("list session configmaps: %w", err)
+	}
+	for _, cm := range configs.Items {
+		if !orphan(cm.Labels[LabelSession]) {
+			continue
+		}
+		cleaned[cm.Labels[LabelSession]] = struct{}{}
+		if err := c.cs.CoreV1().ConfigMaps(c.namespace).Delete(ctx, cm.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("delete configmap %s: %w", cm.Name, err))
+		}
+	}
+	secrets, err := c.cs.CoreV1().Secrets(c.namespace).List(ctx, metav1.ListOptions{LabelSelector: managedSelector})
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list session secrets: %w", err))
+	}
+	for _, secret := range secrets.Items {
+		if !orphan(secret.Labels[LabelSession]) {
+			continue
+		}
+		cleaned[secret.Labels[LabelSession]] = struct{}{}
+		if err := c.cs.CoreV1().Secrets(c.namespace).Delete(ctx, secret.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("delete secret %s: %w", secret.Name, err))
+		}
+	}
+	claims, err := c.cs.CoreV1().PersistentVolumeClaims(c.namespace).List(ctx, metav1.ListOptions{LabelSelector: managedSelector})
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list session claims: %w", err))
+	}
+	for _, claim := range claims.Items {
+		if !orphan(claim.Labels[LabelSession]) {
+			continue
+		}
+		cleaned[claim.Labels[LabelSession]] = struct{}{}
+		if err := c.cs.CoreV1().PersistentVolumeClaims(c.namespace).Delete(ctx, claim.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("delete claim %s: %w", claim.Name, err))
+		}
+	}
+	policies, err := c.cs.NetworkingV1().NetworkPolicies(c.namespace).List(ctx, metav1.ListOptions{LabelSelector: managedSelector})
+	if err != nil {
+		errs = append(errs, fmt.Errorf("list session network policies: %w", err))
+	}
+	for _, policy := range policies.Items {
+		if !orphan(policy.Labels[LabelSession]) {
+			continue
+		}
+		cleaned[policy.Labels[LabelSession]] = struct{}{}
+		if err := c.cs.NetworkingV1().NetworkPolicies(c.namespace).Delete(ctx, policy.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("delete network policy %s: %w", policy.Name, err))
+		}
+	}
+
+	out := make([]string, 0, len(cleaned))
+	for session := range cleaned {
+		out = append(out, session)
+	}
+	sort.Strings(out)
+	return out, errors.Join(errs...)
 }
 
 // GetPod returns one pod.

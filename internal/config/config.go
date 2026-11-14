@@ -49,6 +49,7 @@ type Config struct {
 	MCP       MCPConfig       `yaml:"mcp"`
 	Agents    AgentsConfig    `yaml:"agents"`
 	Queue     QueueConfig     `yaml:"queue"`
+	Journal   JournalConfig   `yaml:"journal"`
 	Triggers  []TriggerConfig `yaml:"triggers"`
 
 	// AdminToken is resolved from the environment at load time and never
@@ -79,10 +80,28 @@ type SessionsConfig struct {
 	MaxConcurrent      int      `yaml:"max_concurrent"`
 	Retention          Duration `yaml:"retention"`
 	ConnectTimeout     Duration `yaml:"connect_timeout"`
-	AllowShell         *bool    `yaml:"allow_shell"`
-	ShellTimeout       Duration `yaml:"shell_timeout"`
-	WorkspaceDir       string   `yaml:"workspace_dir"`
-	ArtifactsDir       string   `yaml:"artifacts_dir"`
+	// MaxRestarts bounds replacement containers for a session whose pod
+	// fails while the session is still active. Zero disables replacement.
+	MaxRestarts int `yaml:"max_restarts"`
+	// PersistentWorkspace mounts one per-session PersistentVolumeClaim at the
+	// workspace and artifact paths so a replacement container keeps its files.
+	// Nil means true.
+	PersistentWorkspace *bool    `yaml:"persistent_workspace"`
+	AllowShell          *bool    `yaml:"allow_shell"`
+	ShellTimeout        Duration `yaml:"shell_timeout"`
+	WorkspaceDir        string   `yaml:"workspace_dir"`
+	ArtifactsDir        string   `yaml:"artifacts_dir"`
+}
+
+// JournalConfig selects where agent turn steps are recorded for replay.
+type JournalConfig struct {
+	Backend string            `yaml:"backend"` // memory or bbolt
+	Bolt    BoltJournalConfig `yaml:"bbolt"`
+}
+
+// BoltJournalConfig points at the journal database file.
+type BoltJournalConfig struct {
+	Path string `yaml:"path"`
 }
 
 // RuntimeConfig selects and configures the session execution backend.
@@ -101,10 +120,14 @@ type RuntimeConfig struct {
 	Egress            []EgressRule      `yaml:"egress"`
 	WorkspaceLimit    string            `yaml:"workspace_limit"`
 	ArtifactLimit     string            `yaml:"artifact_volume_limit"`
-	Resources         ResourceConfig    `yaml:"resources"`
-	Env               map[string]string `yaml:"env"`
-	PollInterval      Duration          `yaml:"poll_interval"`
-	PodLabels         map[string]string `yaml:"pod_labels"`
+	// StorageClass names the StorageClass of the per-session workspace claim.
+	// Empty uses the cluster default; a cluster without one leaves the claim
+	// pending until the session times out.
+	StorageClass string            `yaml:"storage_class"`
+	Resources    ResourceConfig    `yaml:"resources"`
+	Env          map[string]string `yaml:"env"`
+	PollInterval Duration          `yaml:"poll_interval"`
+	PodLabels    map[string]string `yaml:"pod_labels"`
 }
 
 // EgressRule permits direct egress from a session pod to a CIDR. HTTP MCP
@@ -279,21 +302,23 @@ func Default() *Config {
 			MaxBodyBytes:    4 << 20,
 		},
 		Sessions: SessionsConfig{
-			Namespace:          "mayfly",
-			DefaultTTL:         Duration(time.Hour),
-			MaxTTL:             Duration(4 * time.Hour),
-			IdleTimeout:        Duration(20 * time.Minute),
-			CloseGrace:         Duration(90 * time.Second),
-			EventBuffer:        5000,
-			MaxSteps:           24,
-			MaxHistoryMessages: 120,
-			MaxConcurrent:      50,
-			Retention:          Duration(30 * time.Minute),
-			ConnectTimeout:     Duration(2 * time.Minute),
-			AllowShell:         new(false),
-			ShellTimeout:       Duration(120 * time.Second),
-			WorkspaceDir:       "/workspace",
-			ArtifactsDir:       "/var/lib/mayfly/artifacts",
+			Namespace:           "mayfly",
+			DefaultTTL:          Duration(time.Hour),
+			MaxTTL:              Duration(4 * time.Hour),
+			IdleTimeout:         Duration(20 * time.Minute),
+			CloseGrace:          Duration(90 * time.Second),
+			EventBuffer:         5000,
+			MaxSteps:            24,
+			MaxHistoryMessages:  120,
+			MaxConcurrent:       50,
+			Retention:           Duration(30 * time.Minute),
+			ConnectTimeout:      Duration(2 * time.Minute),
+			MaxRestarts:         2,
+			PersistentWorkspace: new(true),
+			AllowShell:          new(false),
+			ShellTimeout:        Duration(120 * time.Second),
+			WorkspaceDir:        "/workspace",
+			ArtifactsDir:        "/var/lib/mayfly/artifacts",
 		},
 		Runtime: RuntimeConfig{
 			Backend:           "kubernetes",
@@ -331,6 +356,10 @@ func Default() *Config {
 			TombstoneTTL:      Duration(time.Hour),
 			PollInterval:      Duration(2 * time.Second),
 			Redis:             RedisQueueConfig{KeyPrefix: "mayfly"},
+		},
+		Journal: JournalConfig{
+			Backend: "bbolt",
+			Bolt:    BoltJournalConfig{Path: ".mayfly/journal.db"},
 		},
 	}
 }
@@ -426,6 +455,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Sessions.ArtifactsDir == "" {
 		c.Sessions.ArtifactsDir = "/var/lib/mayfly/artifacts"
+	}
+	if c.Sessions.PersistentWorkspace == nil {
+		c.Sessions.PersistentWorkspace = new(true)
+	}
+	if c.Journal.Backend == "" {
+		c.Journal.Backend = "bbolt"
+	}
+	if c.Journal.Backend == "bbolt" && c.Journal.Bolt.Path == "" {
+		c.Journal.Bolt.Path = ".mayfly/journal.db"
 	}
 	if c.Runtime.WorkspaceLimit == "" {
 		c.Runtime.WorkspaceLimit = "1Gi"
@@ -556,6 +594,9 @@ func (c *Config) Validate() error {
 	if c.Sessions.ConnectTimeout.Std() < 0 {
 		return fmt.Errorf("sessions.connect_timeout must not be negative")
 	}
+	if c.Sessions.MaxRestarts < 0 {
+		return fmt.Errorf("sessions.max_restarts must not be negative")
+	}
 	for name := range c.Runtime.Env {
 		if sessioncfg.IsReservedEnv(name) {
 			return fmt.Errorf("runtime.env must not set %s; the control plane injects it into every session", name)
@@ -613,6 +654,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Queue.TombstoneTTL.Std() < 0 {
 		return fmt.Errorf("queue.tombstone_ttl must not be negative")
+	}
+	switch c.Journal.Backend {
+	case "memory":
+	case "bbolt":
+		if c.Journal.Bolt.Path == "" {
+			return fmt.Errorf("journal.bbolt.path is required")
+		}
+	default:
+		return fmt.Errorf("journal.backend must be memory or bbolt, got %q", c.Journal.Backend)
 	}
 	// A session start can take up to 90s (runner start timeout); a shorter
 	// lease would expire while the first worker is still creating the session.

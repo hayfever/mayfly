@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mayfly-state
+  namespace: mayfly
+  labels:
+    app.kubernetes.io/name: mayflyd
+    app.kubernetes.io/component: control-plane
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi

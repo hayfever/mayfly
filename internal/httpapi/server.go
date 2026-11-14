@@ -165,6 +165,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/sessions/{id}/ws", s.attachWebSocket)
 
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/events", s.internalEvents)
+	mux.HandleFunc("GET /internal/v1/sessions/{id}/journal", s.internalJournal)
+	mux.HandleFunc("POST /internal/v1/sessions/{id}/journal", s.internalJournal)
 	mux.HandleFunc("GET /internal/v1/sessions/{id}/inbox", s.internalInbox)
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/artifacts", s.internalArtifact)
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/finalize", s.internalFinalize)

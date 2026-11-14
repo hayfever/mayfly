@@ -71,6 +71,8 @@ config:
     max_concurrent: 50
     retention: 30m
     connect_timeout: 2m
+    max_restarts: 2
+    persistent_workspace: true
     allow_shell: false
     shell_timeout: 120s
   runtime:
@@ -79,6 +81,7 @@ config:
     dns_namespace: kube-system
     workspace_limit: 1Gi
     artifact_volume_limit: 1Gi
+    storage_class: ""
     poll_interval: 2s
     resources:
       requests:
@@ -119,6 +122,10 @@ config:
       password_env: ""
       key_prefix: mayfly
       cluster: false
+  journal:
+    backend: bbolt
+    bbolt:
+      path: /var/lib/mayfly/journal.db
   mcp:
     servers: []
   triggers: []
@@ -161,10 +168,12 @@ litellm:
       cpu: "1"
       memory: 1Gi
 
-# The queue database and the local artifact store live under /var/lib/mayfly.
-# Enabling persistence keeps accepted webhook work across pod replacement.
+# The queue database, the local artifact store, and the turn journal live
+# under /var/lib/mayfly. Persistence is on by default: without it a
+# control-plane restart loses accepted webhook work and every in-flight
+# turn's journal, so the runtime cannot resume.
 persistence:
-  enabled: false
+  enabled: true
   size: 2Gi
   storageClass: ""
   accessMode: ReadWriteOnce

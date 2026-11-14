@@ -15,6 +15,7 @@ import (
 	"github.com/hayfever/mayfly/internal/artifact"
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/hub"
+	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/ratelimit"
 	"github.com/hayfever/mayfly/internal/session"
@@ -30,7 +31,7 @@ func testManager(t *testing.T, cfg *config.Config) *session.Manager {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mgr, err := session.New(cfg, store, hub.New(10), nil, nil, testLogger())
+	mgr, err := session.New(cfg, store, hub.New(10), journal.NewMemory(), nil, nil, testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +101,7 @@ func TestReadyReflectsManagerState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mgr, err := session.New(cfg, store, hub.New(10), nil, nil, testLogger())
+	mgr, err := session.New(cfg, store, hub.New(10), journal.NewMemory(), nil, nil, testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}

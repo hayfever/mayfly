@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/session"
 )
 
 func (s *Server) internalEvents(w http.ResponseWriter, r *http.Request) {
@@ -31,6 +34,81 @@ func (s *Server) internalEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": stored})
+}
+
+func (s *Server) internalJournal(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.internalSession(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		var e journal.Entry
+		if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&e); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		stored, err := s.mgr.AppendJournal(r.Context(), id, bearerToken(r), e)
+		switch {
+		case errors.Is(err, session.ErrUnauthorized):
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+		case errors.Is(err, session.ErrNotFound):
+			writeError(w, http.StatusNotFound, "session not found")
+		case errors.Is(err, journal.ErrInvalid):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case err != nil:
+			s.logger.Error("append journal entry", "session", id, "error", err)
+			writeError(w, http.StatusInternalServerError, "journal write failed")
+		default:
+			writeJSON(w, http.StatusCreated, stored)
+		}
+	case http.MethodGet:
+		query := r.URL.Query()
+		if raw := query.Get("turn"); raw != "" {
+			turn, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || turn <= 0 {
+				writeError(w, http.StatusBadRequest, "turn must be a positive integer")
+				return
+			}
+			entries, err := s.mgr.JournalTurn(r.Context(), id, bearerToken(r), turn)
+			if err != nil {
+				writeJournalError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"turn": turn, "entries": entries})
+			return
+		}
+		turn, err := s.mgr.JournalLastTurn(r.Context(), id, bearerToken(r))
+		if err != nil {
+			writeJournalError(w, err)
+			return
+		}
+		entries := []journal.Entry{}
+		if turn > 0 {
+			entries, err = s.mgr.JournalTurn(r.Context(), id, bearerToken(r), turn)
+			if err != nil {
+				writeJournalError(w, err)
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"turn": turn, "entries": entries})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func writeJournalError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, session.ErrUnauthorized):
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+	case errors.Is(err, session.ErrNotFound):
+		writeError(w, http.StatusNotFound, "session not found")
+	case errors.Is(err, journal.ErrInvalid):
+		writeError(w, http.StatusBadRequest, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, "journal read failed")
+	}
 }
 
 func (s *Server) internalInbox(w http.ResponseWriter, r *http.Request) {

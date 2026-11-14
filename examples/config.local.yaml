@@ -22,6 +22,11 @@ queue:
   backend: memory        # bbolt or redis survive a restart
   poll_interval: 500ms
 
+journal:
+  backend: bbolt
+  bbolt:
+    path: ./.mayfly/journal.db
+
 runtime:
   backend: local
   agent_binary: ./bin/mayfly-agent
