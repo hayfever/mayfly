@@ -663,6 +663,10 @@ func stepLimit(maxSteps int) int {
 	return 1 + maxSteps*(1+toolCallsPerRound)
 }
 
+// ArgsHash is the argument hash a call token carries. The shim verifies the
+// same hash, so both sides must compute it with this function.
+func ArgsHash(raw json.RawMessage) (string, error) { return argsHash(raw) }
+
 // argsHash hashes the canonical JSON of the arguments. Decoding and
 // re-encoding sorts map keys and keeps number literals, so two encodings of
 // the same arguments hash alike.

@@ -90,7 +90,7 @@ func VerifyToken(key []byte, token string, want TokenScope, now time.Time) (Clai
 	if want.Plugin != "" && c.Plugin != want.Plugin {
 		return zero, fmt.Errorf("%w: token is for another plugin", ErrToken)
 	}
-	if c.Tool != "*" && c.Tool != want.Tool {
+	if want.Tool != "" && c.Tool != "*" && c.Tool != want.Tool {
 		return zero, fmt.Errorf("%w: token is for another tool", ErrToken)
 	}
 	if want.ArgsSHA256 != "" && c.ArgsSHA256 != want.ArgsSHA256 {
