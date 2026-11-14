@@ -1,0 +1,9 @@
+# docs/plugins.md "An MCP server you already run".
+schemaVersion: 1
+name: crm
+placement: service
+service:
+  mcpServer: crm
+tools:
+  - name: find_account
+    idempotent: true

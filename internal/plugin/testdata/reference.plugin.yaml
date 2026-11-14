@@ -1,0 +1,50 @@
+# docs/plugins.md "Manifest reference", copied verbatim. The doc block lists
+# every field of every placement under one `placement: sidecar`, so it cannot
+# validate as one manifest; rule 3 rejects the mismatched blocks.
+schemaVersion: 1
+name: notify
+version: 0.1.0
+description: Post messages to the team channel.
+scope: shared
+placement: sidecar
+image: ghcr.io/acme/mayfly-plugin-notify@sha256:...
+command: bin/notify
+args: []
+local:
+  command: go
+  args: [run, .]
+required: false
+env:
+  NOTIFY_CHANNEL: "#ops"
+secrets:
+  - env: NOTIFY_WEBHOOK_URL
+    secret: mayfly-plugin-notify
+    key: webhook-url
+tools:
+  - name: post
+    idempotent: false
+    timeout: 30s
+  - name: recent
+    idempotent: true
+limits:
+  initTimeout: 30s
+  callTimeout: 120s
+  maxOutputBytes: 65536
+  rate: {requests: 20, interval: 1m, burst: 5}
+inline:
+  workdir: plugin
+  maxRestarts: 2
+  stderrBytes: 1048576
+sidecar:
+  resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 64Mi}}
+  runAsUser: 65532
+  workspace: none
+service:
+  replicas: 1
+  concurrency: 8
+  resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 256Mi}}
+  egress: [{cidr: 203.0.113.0/24, ports: [443]}]
+  transport: stdio
+  port: 8080
+  path: /mcp
+  mcpServer: ""

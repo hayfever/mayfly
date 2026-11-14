@@ -1,0 +1,13 @@
+# docs/plugins.md "Quickstart: an inline plugin in Python".
+schemaVersion: 1
+name: word-stats
+version: 0.1.0
+placement: inline
+image: ghcr.io/acme/mayfly-plugin-word-stats:0.1.0
+command: server/server
+local:
+  command: python3
+  args: [server.py]
+tools:
+  - name: count_words
+    idempotent: true
