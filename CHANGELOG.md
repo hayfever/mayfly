@@ -94,6 +94,7 @@ First public release.
 - `runtime.env` and agent `runtime.env` cannot set `MAYFLY_CONFIG` or `MAYFLY_SESSION_TOKEN`; startup fails and the pod builder drops them.
 - GitHub triggers no longer accept the static `X-Mayfly-Token` header, which could be replayed.
 - `mayflyd -check` now builds the session manager as startup does, so a missing model, a model outside `llm.allow_models`, or an unknown MCP server fails the check instead of the first run.
+- `read_artifact` checks the declared SHA-256 and never splits a UTF-8 character at a window edge.
 - The `local` runtime starts the agent with a minimal environment instead of mayflyd's.
 - Fanout dedupes identical requests, fails fast on `401` and `403`, and drops filtered-out responses. `maxItems` counts items after `filter`. A `removed` page without a diff counts as changed. `sources.timeout` is enforced.
 - A private definition can no longer extend another agent's private definition.

@@ -10,16 +10,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
+	"io"
 	"log/slog"
 	"net"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hayfever/mayfly/internal/agents"
 	"github.com/hayfever/mayfly/internal/artifact"
@@ -66,6 +70,17 @@ type CreateOptions struct {
 	MCPServers []string
 	Agent      string
 	Trigger    model.TriggerInfo
+	// Artifacts are inputs the caller already stored. The control plane never
+	// fetches them; it only checks the reference and lets the session read it.
+	Artifacts []ArtifactRef
+}
+
+// ArtifactRef is one stored input a session may read.
+type ArtifactRef struct {
+	Key         string
+	SHA256      string
+	Bytes       int64
+	ContentType string
 }
 
 type instance struct {
@@ -90,7 +105,13 @@ type instance struct {
 	podDeletingSince time.Time
 	restarts         int
 	restarting       bool
-	stalePods        []string
+	// artifacts are the inputs this session may read; the map keys are the
+	// only keys the internal artifact endpoint serves for this session.
+	artifacts map[string]sessioncfg.Artifact
+	// verifiedArtifacts records the artifact keys whose stored bytes already
+	// matched their declared SHA-256.
+	verifiedArtifacts map[string]bool
+	stalePods         []string
 	// seqFloor is the highest sequence this control plane durably reserved
 	// for the session. The hub may hand out numbers up to it after a restart
 	// without touching the journal.
@@ -288,6 +309,7 @@ type request struct {
 	skillNames []string
 	mcp        []sessioncfg.MCPServer
 	mcpNames   []string
+	artifacts  []sessioncfg.Artifact
 }
 
 // resolveRequest checks opts and resolves every reference it names. It has no
@@ -337,6 +359,10 @@ func (m *Manager) resolveRequest(opts CreateOptions) (request, error) {
 	if err != nil {
 		return request{}, err
 	}
+	artifacts, err := m.resolveArtifacts(opts.Artifacts)
+	if err != nil {
+		return request{}, err
+	}
 	return request{
 		prompt:     prompt,
 		ttl:        ttl,
@@ -346,6 +372,7 @@ func (m *Manager) resolveRequest(opts CreateOptions) (request, error) {
 		skillNames: skillNames,
 		mcp:        resolvedMCP,
 		mcpNames:   mcpNames,
+		artifacts:  artifacts,
 	}, nil
 }
 
@@ -432,6 +459,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		ArtifactMaxBytes:   m.cfg.Artifacts.MaxBytes,
 		Skills:             resolvedSkills,
 		MCPServers:         resolvedMCP,
+		Artifacts:          req.artifacts,
 		CreatedAt:          now,
 		AgentVersion:       version.Version,
 		// max_restarts: 0 means no replacement will ever start, so a signal
@@ -460,6 +488,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		},
 		tokenHash:  hash,
 		token:      token,
+		artifacts:  artifactMap(req.artifacts),
 		runtimeCfg: runtimeCfg,
 		image:      image,
 		command:    append([]string(nil), agent.Runtime.Command...),
@@ -616,6 +645,22 @@ func (m *Manager) prepare(_ context.Context, inst *instance, podName, token stri
 
 func (m *Manager) modelAllowed(name string) bool {
 	return m.cfg.LLM.ModelAllowed(name)
+}
+
+// completeRunes returns the length of b without a trailing incomplete UTF-8
+// sequence. A window too short to hold a full sequence is left as is.
+func completeRunes(b []byte) int {
+	n := len(b)
+	for back := 1; back <= utf8.UTFMax && back <= n; back++ {
+		if !utf8.RuneStart(b[n-back]) {
+			continue
+		}
+		if !utf8.FullRune(b[n-back:]) && n-back > 0 {
+			return n - back
+		}
+		return n
+	}
+	return n
 }
 
 // reserveLocked registers a new session and enforces sessions.max_concurrent.
@@ -957,4 +1002,179 @@ func (m *Manager) MCPServerNames() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// MaxSessionArtifacts bounds how many inputs one session may reference.
+const MaxSessionArtifacts = 8
+
+const (
+	maxArtifactKeyBytes  = 200
+	maxArtifactTypeBytes = 100
+)
+
+var (
+	artifactKeyPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+	artifactDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	artifactTypePattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+-]*/[A-Za-z0-9][A-Za-z0-9.+-]*$`)
+)
+
+// resolveArtifacts checks stored artifact references without reading them.
+func (m *Manager) resolveArtifacts(refs []ArtifactRef) ([]sessioncfg.Artifact, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	if len(refs) > MaxSessionArtifacts {
+		return nil, fmt.Errorf("a session accepts at most %d artifacts", MaxSessionArtifacts)
+	}
+	out := make([]sessioncfg.Artifact, 0, len(refs))
+	seen := map[string]bool{}
+	for _, ref := range refs {
+		key := strings.TrimSpace(ref.Key)
+		if len(key) > maxArtifactKeyBytes || !artifactKeyPattern.MatchString(key) || strings.Contains(key, "..") || strings.Contains(key, "//") {
+			return nil, fmt.Errorf("invalid artifact key %q", ref.Key)
+		}
+		if seen[key] {
+			return nil, fmt.Errorf("artifact key %q is repeated", key)
+		}
+		seen[key] = true
+		if !artifactDigestPattern.MatchString(ref.SHA256) {
+			return nil, fmt.Errorf("artifact %q: sha256 must be 64 lowercase hex characters", key)
+		}
+		if ref.Bytes <= 0 {
+			return nil, fmt.Errorf("artifact %q: bytes must be positive", key)
+		}
+		if max := m.cfg.Sources.MaxArtifactBytes; max > 0 && ref.Bytes > max {
+			return nil, fmt.Errorf("artifact %q: %d bytes exceeds sources.max_artifact_bytes", key, ref.Bytes)
+		}
+		contentType := strings.TrimSpace(ref.ContentType)
+		if len(contentType) > maxArtifactTypeBytes || !artifactTypePattern.MatchString(contentType) {
+			return nil, fmt.Errorf("artifact %q: invalid content type %q", key, ref.ContentType)
+		}
+		out = append(out, sessioncfg.Artifact{
+			Key:         key,
+			SHA256:      ref.SHA256,
+			Bytes:       ref.Bytes,
+			ContentType: contentType,
+		})
+	}
+	return out, nil
+}
+
+func artifactMap(artifacts []sessioncfg.Artifact) map[string]sessioncfg.Artifact {
+	if len(artifacts) == 0 {
+		return nil
+	}
+	out := make(map[string]sessioncfg.Artifact, len(artifacts))
+	for _, a := range artifacts {
+		out[a.Key] = a
+	}
+	return out
+}
+
+// ArtifactWindow is one bounded read of a stored session input.
+type ArtifactWindow struct {
+	Key         string `json:"key"`
+	Offset      int64  `json:"offset"`
+	Bytes       int64  `json:"bytes"`
+	Total       int64  `json:"total"`
+	NextOffset  *int64 `json:"next_offset"`
+	ContentType string `json:"content_type"`
+	Content     []byte `json:"-"`
+}
+
+// ReadArtifact returns a window of one artifact the session was granted. The
+// token must belong to the session and the key must be in its grant list.
+func (m *Manager) ReadArtifact(ctx context.Context, id, token, key string, offset, limit int64) (ArtifactWindow, error) {
+	idForToken, ok := m.SessionIDForToken(token)
+	if !ok || idForToken != id {
+		return ArtifactWindow{}, ErrUnauthorized
+	}
+	m.mu.Lock()
+	inst := m.sessions[id]
+	m.mu.Unlock()
+	if inst == nil {
+		return ArtifactWindow{}, ErrNotFound
+	}
+	inst.mu.Lock()
+	ref, ok := inst.artifacts[key]
+	inst.mu.Unlock()
+	if !ok {
+		return ArtifactWindow{}, ErrNotFound
+	}
+	if limit <= 0 {
+		limit = 24 << 10
+	}
+	if limit > 24<<10 {
+		limit = 24 << 10
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= ref.Bytes {
+		return ArtifactWindow{Key: key, Offset: offset, Bytes: 0, Total: ref.Bytes, ContentType: ref.ContentType}, nil
+	}
+	if offset+limit > ref.Bytes {
+		limit = ref.Bytes - offset
+	}
+	body, size, err := m.store.Get(ctx, key)
+	if err != nil {
+		return ArtifactWindow{}, err
+	}
+	defer body.Close()
+	if size != ref.Bytes {
+		return ArtifactWindow{}, fmt.Errorf("artifact %q changed size: %d bytes stored, %d declared", key, size, ref.Bytes)
+	}
+	inst.mu.Lock()
+	verified := inst.verifiedArtifacts[key]
+	inst.mu.Unlock()
+	// The first read of each artifact hashes the whole object against the
+	// declared digest; later windows only check the size, so paging through
+	// a large artifact does not rehash it every time.
+	var hasher hash.Hash
+	var reader io.Reader = body
+	if !verified {
+		hasher = sha256.New()
+		reader = io.TeeReader(body, hasher)
+	}
+	if _, err := io.CopyN(io.Discard, reader, offset); err != nil {
+		return ArtifactWindow{}, err
+	}
+	content := make([]byte, limit)
+	n, err := io.ReadFull(reader, content)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return ArtifactWindow{}, err
+	}
+	if hasher != nil {
+		if _, err := io.Copy(io.Discard, reader); err != nil {
+			return ArtifactWindow{}, err
+		}
+		if got := hex.EncodeToString(hasher.Sum(nil)); got != ref.SHA256 {
+			return ArtifactWindow{}, fmt.Errorf("artifact %q does not match its declared sha256", key)
+		}
+		inst.mu.Lock()
+		if inst.verifiedArtifacts == nil {
+			inst.verifiedArtifacts = map[string]bool{}
+		}
+		inst.verifiedArtifacts[key] = true
+		inst.mu.Unlock()
+	}
+	// The window is sent as text. Ending it inside a UTF-8 sequence would
+	// garble that character, so a window that is not the last one stops at
+	// the sequence start and the next window begins there.
+	if offset+int64(n) < ref.Bytes {
+		n = completeRunes(content[:n])
+	}
+	window := ArtifactWindow{
+		Key:         key,
+		Offset:      offset,
+		Bytes:       int64(n),
+		Total:       ref.Bytes,
+		ContentType: ref.ContentType,
+		Content:     content[:n],
+	}
+	if offset+int64(n) < ref.Bytes {
+		next := offset + int64(n)
+		window.NextOffset = &next
+	}
+	return window, nil
 }
