@@ -21,6 +21,7 @@ import (
 
 	"github.com/hayfever/mayfly/internal/broker"
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/ratelimit"
 	"github.com/hayfever/mayfly/internal/session"
@@ -82,6 +83,7 @@ type Server struct {
 	mgr        *session.Manager
 	queue      queue.Store
 	broker     *broker.Broker
+	gateway    *gateway.Gateway
 	logger     *slog.Logger
 	triggers   map[string]config.TriggerConfig
 	limiters   map[string]*ratelimit.Limiter
@@ -137,6 +139,14 @@ func New(cfg *config.Config, mgr *session.Manager, q queue.Store, logger *slog.L
 	return server
 }
 
+// WithGateway gives the API the tool gateway that the internal tool routes
+// serve. Without it those routes report that the gateway is not configured.
+func WithGateway(g *gateway.Gateway) Option {
+	return func(s *Server) {
+		s.gateway = g
+	}
+}
+
 // Handler returns the fully wired HTTP handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -174,6 +184,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/events", s.internalEvents)
 	mux.HandleFunc("GET /internal/v1/sessions/{id}/journal", s.internalJournal)
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/journal", s.internalJournal)
+	mux.HandleFunc("GET /internal/v1/sessions/{id}/tools", s.internalTools)
+	mux.HandleFunc("POST /internal/v1/sessions/{id}/tools/calls", s.internalToolCall)
+	mux.HandleFunc("POST /internal/v1/sessions/{id}/tools/calls/complete", s.internalToolComplete)
 	mux.HandleFunc("GET /internal/v1/sessions/{id}/inbox", s.internalInbox)
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/artifacts", s.internalArtifact)
 	mux.HandleFunc("GET /internal/v1/sessions/{id}/artifacts", s.internalReadArtifact)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/model"
 	"github.com/hayfever/mayfly/internal/session"
@@ -122,6 +123,100 @@ func writeJournalError(w http.ResponseWriter, err error) {
 	default:
 		writeError(w, http.StatusInternalServerError, "journal read failed")
 	}
+}
+
+// harnessBuiltIn is the only harness the tool gateway serves. An alternate
+// harness keeps reaching MCP servers through the broker's byte proxy and has
+// no plugin tools, so the gateway routes answer 404 for it.
+const harnessBuiltIn = "mayfly"
+
+// toolSession authenticates one runtime request and applies the harness rule.
+// It writes the response and reports false when the handler must stop.
+func (s *Server) toolSession(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id, ok := s.internalSession(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return "", false
+	}
+	sess, ok := s.mgr.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return "", false
+	}
+	if sess.Harness != "" && sess.Harness != harnessBuiltIn {
+		writeError(w, http.StatusNotFound, "the tool gateway serves only the built-in harness")
+		return "", false
+	}
+	if s.gateway == nil {
+		writeError(w, http.StatusServiceUnavailable, "tool gateway is not configured")
+		return "", false
+	}
+	return id, true
+}
+
+func (s *Server) internalTools(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.toolSession(w, r)
+	if !ok {
+		return
+	}
+	discovery, err := s.gateway.Discover(r.Context(), id)
+	if err != nil {
+		s.writeGatewayError(w, id, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, discovery)
+}
+
+func (s *Server) internalToolCall(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.toolSession(w, r)
+	if !ok {
+		return
+	}
+	var req gateway.BeginRequest
+	if err := decodeJSON(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	resp, err := s.gateway.Begin(r.Context(), id, req)
+	if err != nil {
+		s.writeGatewayError(w, id, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) internalToolComplete(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.toolSession(w, r)
+	if !ok {
+		return
+	}
+	var req gateway.CompleteRequest
+	if err := decodeJSON(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := s.gateway.Complete(r.Context(), id, req); err != nil {
+		s.writeGatewayError(w, id, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// writeGatewayError turns a gateway failure into its HTTP status. A rate
+// limit carries Retry-After in whole seconds, rounded up as the runtime
+// expects.
+func (s *Server) writeGatewayError(w http.ResponseWriter, session string, err error) {
+	var gwErr *gateway.Error
+	if !errors.As(err, &gwErr) {
+		s.logger.Error("tool gateway", "session", session, "error", err)
+		writeError(w, http.StatusInternalServerError, "tool gateway failed")
+		return
+	}
+	if gwErr.RetryAfter > 0 {
+		seconds := int64((gwErr.RetryAfter + time.Second - 1) / time.Second)
+		w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	}
+	writeError(w, gwErr.Status, gwErr.Message)
 }
 
 func (s *Server) internalInbox(w http.ResponseWriter, r *http.Request) {
