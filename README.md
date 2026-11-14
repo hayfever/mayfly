@@ -112,7 +112,10 @@ Close and download:
 ```bash
 ./bin/mayfly close <id>
 ./bin/mayfly artifact <id> -o session.tar.gz
+./bin/mayfly transcript <id>
 ```
+
+`transcript` downloads the session bundle and prints the agent prompt and the model's messages in order, including tool calls and their results.
 
 Run the end-to-end suite (its own k3d cluster, no API keys; see [docs/testing.md](docs/testing.md)):
 

@@ -46,6 +46,8 @@ func main() {
 		err = cmdDelete(args)
 	case "artifact":
 		err = cmdArtifact(args)
+	case "transcript":
+		err = cmdTranscript(args)
 	case "version", "--version", "-v":
 		fmt.Println(version.String())
 		return
@@ -81,6 +83,7 @@ Commands:
   close ID [--reason R]
   delete ID [--yes]
   artifact ID [-o FILE]
+  transcript ID
 `)
 }
 
@@ -413,6 +416,20 @@ func cmdDelete(args []string) error {
 	return nil
 }
 
+// openArtifact starts a download of the session bundle. The caller closes it.
+func openArtifact(id string) (io.ReadCloser, error) {
+	resp, err := request(http.MethodGet, "/api/v1/sessions/"+url.PathEscape(id)+"/artifact", nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("%s", strings.TrimSpace(string(raw)))
+	}
+	return resp.Body, nil
+}
+
 func cmdArtifact(args []string) error {
 	fs := flag.NewFlagSet("artifact", flag.ContinueOnError)
 	out := fs.String("o", "", "output file (default stdout)")
@@ -423,17 +440,13 @@ func cmdArtifact(args []string) error {
 	if len(positional) < 1 {
 		return fmt.Errorf("usage: mayfly artifact ID [-o FILE]")
 	}
-	resp, err := request(http.MethodGet, "/api/v1/sessions/"+url.PathEscape(positional[0])+"/artifact", nil)
+	body, err := openArtifact(positional[0])
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("%s", strings.TrimSpace(string(raw)))
-	}
+	defer body.Close()
 	if *out == "" {
-		_, err = io.Copy(os.Stdout, resp.Body)
+		_, err = io.Copy(os.Stdout, body)
 		return err
 	}
 	f, err := os.Create(*out)
@@ -441,7 +454,7 @@ func cmdArtifact(args []string) error {
 		return err
 	}
 	defer f.Close()
-	n, err := io.Copy(f, resp.Body)
+	n, err := io.Copy(f, body)
 	if err != nil {
 		return err
 	}
