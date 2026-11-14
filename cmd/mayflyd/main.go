@@ -50,9 +50,10 @@ func main() {
 		os.Exit(2)
 	}
 	bundle, err := project.Load(cfg.Agents.Dirs, project.Options{
-		Concurrency: cfg.Sources.Concurrency,
-		Timeout:     cfg.Sources.Timeout.Std(),
-		DeniedEnv:   cfg.SecretEnvNames(),
+		Concurrency:        cfg.Sources.Concurrency,
+		Timeout:            cfg.Sources.Timeout.Std(),
+		DeniedEnv:          cfg.SecretEnvNames(),
+		RequirePluginImage: cfg.Runtime.Backend == "kubernetes",
 	})
 	if err != nil {
 		logger.Error("load project bundle", "error", err)

@@ -72,3 +72,30 @@ func TestEmptyPromptRendersEmpty(t *testing.T) {
 		t.Fatalf("prompt = %q", out)
 	}
 }
+
+func TestBuildValidatesPlugins(t *testing.T) {
+	invalid := []string{"notify", "Bad Name"}
+	if _, err := Build(Definition{Name: "writer", Plugins: &invalid}, "agent.yaml"); err == nil || !strings.Contains(err.Error(), `invalid plugin name "Bad Name"`) {
+		t.Fatalf("err = %v", err)
+	}
+	duplicate := []string{"notify", "notify"}
+	if _, err := Build(Definition{Name: "writer", Plugins: &duplicate}, "agent.yaml"); err == nil || !strings.Contains(err.Error(), `lists plugin "notify" twice`) {
+		t.Fatalf("err = %v", err)
+	}
+	none := []string{}
+	agent, err := Build(Definition{Name: "writer", Plugins: &none}, "agent.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := agent.PluginNames(); len(names) != 0 {
+		t.Fatalf("plugins = %v", names)
+	}
+	selected := []string{"notify", "crm"}
+	agent, err = Build(Definition{Name: "writer", Plugins: &selected}, "agent.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := agent.PluginNames(); len(names) != 2 || names[1] != "crm" {
+		t.Fatalf("plugins = %v", names)
+	}
+}
