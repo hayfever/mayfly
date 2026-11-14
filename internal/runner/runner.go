@@ -20,6 +20,11 @@ type Spec struct {
 	Token         string
 	Env           map[string]string
 	Runtime       sessioncfg.Config
+	// PluginSecrets holds the local backend's plugin secret values by plugin
+	// and environment variable. The local runner writes one file per value
+	// before it starts the agent; a Kubernetes session reads its secrets from
+	// projected Secret volumes instead.
+	PluginSecrets map[string]map[string]string
 	// Reuse creates only a replacement pod and updates the existing
 	// ConfigMap. The Secret, NetworkPolicy, and workspace claim stay.
 	Reuse   bool

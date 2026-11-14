@@ -185,6 +185,12 @@ func (m *Manager) restart(inst *instance, reason string) {
 
 	var h runner.Handle
 	err := prepErr
+	var pluginSecrets map[string]map[string]string
+	if err == nil {
+		// A local replacement re-reads the plugin secrets, so an operator's
+		// changed environment reaches the replacement.
+		pluginSecrets, err = m.pluginSecretValues(runtimeCfg.Plugins)
+	}
 	if err == nil {
 		stateDir := old.StateDir
 		if stateDir == "" {
@@ -201,6 +207,7 @@ func (m *Manager) restart(inst *instance, reason string) {
 			Token:         token,
 			Env:           env,
 			Runtime:       runtimeCfg,
+			PluginSecrets: pluginSecrets,
 			Reuse:         old.Backend == "kubernetes",
 			K8sSpec:       k8sSpec,
 		})

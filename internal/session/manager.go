@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -28,10 +29,12 @@ import (
 	"github.com/hayfever/mayfly/internal/agents"
 	"github.com/hayfever/mayfly/internal/artifact"
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/hub"
 	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/k8s"
 	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/plugin"
 	"github.com/hayfever/mayfly/internal/project"
 	"github.com/hayfever/mayfly/internal/runner"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
@@ -119,7 +122,10 @@ type instance struct {
 	// verifiedArtifacts records the artifact keys whose stored bytes already
 	// matched their declared SHA-256.
 	verifiedArtifacts map[string]bool
-	stalePods         []string
+	// sidecarKey signs this session's sidecar call tokens. It is generated at
+	// create, lives in the grant, and never reaches the agent container.
+	sidecarKey []byte
+	stalePods  []string
 	// seqFloor is the highest sequence this control plane durably reserved
 	// for the session. The hub may hand out numbers up to it after a restart
 	// without touching the journal.
@@ -152,6 +158,7 @@ type Manager struct {
 	agentByName  map[string]agents.Agent
 	defaultAgent string
 	stateDir     string
+	gateway      GrantRegistry
 
 	mu         sync.Mutex
 	sessions   map[string]*instance
@@ -166,6 +173,19 @@ type Manager struct {
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 }
+
+// GrantRegistry is the part of the tool gateway the session manager uses:
+// register a grant when a session is created or adopted, drop it at finalize.
+// A nil registry means no tool routes are in use, as in tests without a
+// gateway.
+type GrantRegistry interface {
+	Register(gateway.Grant)
+	Drop(session string)
+}
+
+// SetGateway attaches the tool gateway. Call it before Start so adopted
+// sessions get their grants.
+func (m *Manager) SetGateway(g GrantRegistry) { m.gateway = g }
 
 // New builds a manager. kube may be nil for the local backend.
 func New(cfg *config.Config, bundle *project.Bundle, store artifact.Store, h *hub.Hub, js journal.Durable, r runner.Runner, kube *k8s.Client, logger *slog.Logger) (*Manager, error) {
@@ -320,6 +340,7 @@ type request struct {
 	skillNames []string
 	mcp        []sessioncfg.MCPServer
 	mcpNames   []string
+	plugins    []sessioncfg.Plugin
 	artifacts  []sessioncfg.Artifact
 }
 
@@ -370,6 +391,10 @@ func (m *Manager) resolveRequest(opts CreateOptions) (request, error) {
 	if err != nil {
 		return request{}, err
 	}
+	resolvedPlugins, err := m.resolvePlugins(agent)
+	if err != nil {
+		return request{}, err
+	}
 	artifacts, err := m.resolveArtifacts(opts.Artifacts)
 	if err != nil {
 		return request{}, err
@@ -383,6 +408,7 @@ func (m *Manager) resolveRequest(opts CreateOptions) (request, error) {
 		skillNames: skillNames,
 		mcp:        resolvedMCP,
 		mcpNames:   mcpNames,
+		plugins:    resolvedPlugins,
 		artifacts:  artifacts,
 	}, nil
 }
@@ -470,6 +496,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		ArtifactMaxBytes:   m.cfg.Artifacts.MaxBytes,
 		Skills:             resolvedSkills,
 		MCPServers:         resolvedMCP,
+		Plugins:            req.plugins,
 		Artifacts:          req.artifacts,
 		CreatedAt:          now,
 		AgentVersion:       version.Version,
@@ -491,6 +518,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 			Model:        modelName,
 			Skills:       skillNames,
 			MCPServers:   mcpNames,
+			Plugins:      pluginNames(req.plugins),
 			Trigger:      opts.Trigger,
 			Backend:      m.cfg.Runtime.Backend,
 			TTLSeconds:   int(ttl.Seconds()),
@@ -501,6 +529,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		tokenHash:  hash,
 		token:      token,
 		artifacts:  artifactMap(req.artifacts),
+		sidecarKey: newSidecarKey(req.plugins),
 		runtimeCfg: runtimeCfg,
 		image:      image,
 		command:    append([]string(nil), agent.Runtime.Command...),
@@ -513,6 +542,13 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		m.logger.Warn("agent image is ignored by the local backend", "agent", agent.Name, "image", agent.Runtime.Image)
 	}
 	spec, err := m.prepare(ctx, inst, podName, token, ttl, image, agent.Runtime.Command, agent.Runtime.Args, runtimeEnv)
+	if err != nil {
+		return nil, err
+	}
+	// The local backend writes each plugin secret to a file before the agent
+	// starts. A missing value already failed resolveRequest; re-reading here
+	// keeps the value out of session.json and out of every log line.
+	pluginSecrets, err := m.pluginSecretValues(req.plugins)
 	if err != nil {
 		return nil, err
 	}
@@ -540,6 +576,9 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		m.removeToken(hash)
 		return nil, fmt.Errorf("reserve turn sequence: %w", err)
 	}
+	// The grant is in place before the pod exists, so the runtime's first call
+	// finds its table.
+	m.registerGrant(inst)
 	m.hub.Create(id)
 	m.appendEvent(inst, model.Event{
 		Type:  model.EventUserMessage,
@@ -566,6 +605,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		Token:         token,
 		Env:           runtimeEnv,
 		Runtime:       inst.runtimeCfg,
+		PluginSecrets: pluginSecrets,
 		K8sSpec:       spec,
 	})
 	if err != nil {
@@ -582,6 +622,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		inst.idempotencyKey = ""
 		m.mu.Unlock()
 		m.removeToken(hash)
+		m.dropGrant(id)
 		m.hub.Append(id, model.Event{Type: model.EventError, Actor: "mayfly", Text: "Failed to start session: " + err.Error()})
 		m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session failed.", Data: map[string]any{"status": string(model.StatusFailed)}})
 		snapshot := m.copySession(inst)
@@ -610,6 +651,12 @@ func (m *Manager) prepare(_ context.Context, inst *instance, podName, token stri
 		state := filepath.Join(m.stateDir, "sessions", id)
 		cfg.WorkspaceDir = filepath.Join(state, "workspace")
 		cfg.ArtifactsDir = filepath.Join(state, "artifacts")
+		for i := range cfg.Plugins {
+			if cfg.Plugins[i].Placement != "inline" || len(cfg.Plugins[i].Secrets) == 0 {
+				continue
+			}
+			cfg.Plugins[i].SecretsDir = filepath.Join(state, "plugin-secrets", cfg.Plugins[i].Name)
+		}
 		inst.runtimeCfg = cfg
 		if err := cfg.Validate(); err != nil {
 			return nil, err
@@ -657,6 +704,9 @@ func (m *Manager) prepare(_ context.Context, inst *instance, podName, token stri
 		PlatformPort:        port,
 		SessionJSON:         raw,
 		Token:               token,
+		Plugins:             cfg.Plugins,
+		ToolsImage:          m.cfg.Runtime.Image,
+		PluginVolumeLimit:   m.cfg.Runtime.PluginVolumeLimit,
 	}
 	for _, e := range m.cfg.Runtime.Egress {
 		spec.Egress = append(spec.Egress, k8s.Egress{CIDR: e.CIDR, Ports: e.Ports})
@@ -860,6 +910,266 @@ func (m *Manager) resolveMCP(agent agents.Agent, requested []string) ([]sessionc
 	return out, names, nil
 }
 
+// Defaults the manifest package fills for an inline block. A sidecar manifest
+// carries none, but the local backend runs it inline, so it needs them.
+const (
+	defaultInlineWorkdir     = "plugin"
+	defaultInlineMaxRestarts = 2
+	defaultInlineStderrBytes = 1 << 20
+)
+
+// resolvePlugins turns the agent's plugin selection into the runtime's copy of
+// each manifest. It runs inside resolveRequest, so Validate rejects a session
+// whose local secret is not in the mayflyd environment before anything starts.
+func (m *Manager) resolvePlugins(agent agents.Agent) ([]sessioncfg.Plugin, error) {
+	names := agent.PluginNames()
+	if len(names) == 0 {
+		return nil, nil
+	}
+	manifests := map[string]plugin.Manifest{}
+	if m.bundle != nil {
+		manifests = m.bundle.Plugins
+	}
+	local := m.cfg.Runtime.Backend == "local"
+	out := make([]sessioncfg.Plugin, 0, len(names))
+	for _, name := range names {
+		manifest, ok := manifests[name]
+		if !ok {
+			return nil, fmt.Errorf("unknown plugin %q", name)
+		}
+		if !scopeVisible(manifest.Scope, agent.Name) {
+			return nil, fmt.Errorf("plugin %q is not available to agent %q", name, agent.Name)
+		}
+		resolved, err := m.resolvePlugin(manifest, local)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, resolved)
+	}
+	return out, nil
+}
+
+// resolvePlugin copies one manifest into the runtime's view. Paths and secret
+// references differ by backend; no secret value is ever copied.
+func (m *Manager) resolvePlugin(manifest plugin.Manifest, local bool) (sessioncfg.Plugin, error) {
+	placement := manifest.Placement
+	if placement == "" {
+		placement = plugin.Inline
+	}
+	if local && placement == plugin.Sidecar {
+		placement = plugin.Inline
+	}
+	resolved := sessioncfg.Plugin{
+		Name:               manifest.Name,
+		Placement:          string(placement),
+		Required:           manifest.Required,
+		Env:                cloneEnv(manifest.Env),
+		Tools:              pluginTools(manifest),
+		InitTimeoutSeconds: int(manifest.InitTimeout().Seconds()),
+		MaxOutputBytes:     pluginMaxOutput(manifest),
+	}
+	switch placement {
+	case plugin.Inline:
+		resolved.Command = manifest.Command
+		resolved.Args = append([]string(nil), manifest.Args...)
+		resolved.Workdir, resolved.MaxRestarts, resolved.StderrBytes = inlineSettings(manifest)
+		if local {
+			// The control plane reads the value from its own environment and
+			// the local runner writes it to SecretsDir before the agent starts.
+			resolved.Dir = manifest.Dir
+			resolved.Command = manifest.Local.Command
+			resolved.Args = append([]string(nil), manifest.Local.Args...)
+			resolved.Secrets = pluginSecretList(manifest, false)
+			if err := checkLocalSecrets(manifest); err != nil {
+				return sessioncfg.Plugin{}, err
+			}
+		} else {
+			resolved.Dir = k8s.PluginsDir + "/" + manifest.Name
+			resolved.Image = manifest.Image
+			resolved.Secrets = pluginSecretList(manifest, true)
+			resolved.SecretsDir = k8s.PluginSecretsDir + "/" + manifest.Name
+		}
+	case plugin.Sidecar:
+		if manifest.Sidecar == nil || manifest.Sidecar.RunAsUser == nil {
+			return sessioncfg.Plugin{}, fmt.Errorf("plugin %q: sidecar settings are not resolved", manifest.Name)
+		}
+		resolved.Image = manifest.Image
+		resolved.Command = manifest.Command
+		resolved.Args = append([]string(nil), manifest.Args...)
+		resolved.Socket = k8s.PluginSocketsDir + "/" + manifest.Name + ".sock"
+		resolved.Secrets = pluginSecretList(manifest, true)
+		resolved.Sidecar = &sessioncfg.PluginSidecar{
+			Requests:  manifest.Sidecar.Resources.Requests,
+			Limits:    manifest.Sidecar.Resources.Limits,
+			RunAsUser: *manifest.Sidecar.RunAsUser,
+			Workspace: manifest.Sidecar.Workspace,
+		}
+	case plugin.Service:
+		// A service plugin records only what the grant is rebuilt from.
+	}
+	return resolved, nil
+}
+
+// inlineSettings are the inline controls of a manifest, with the defaults a
+// sidecar manifest never received.
+func inlineSettings(manifest plugin.Manifest) (workdir string, maxRestarts int, stderrBytes int64) {
+	if manifest.Inline == nil {
+		return defaultInlineWorkdir, defaultInlineMaxRestarts, defaultInlineStderrBytes
+	}
+	workdir = manifest.Inline.Workdir
+	if workdir == "" {
+		workdir = defaultInlineWorkdir
+	}
+	stderrBytes = manifest.Inline.StderrBytes
+	if stderrBytes == 0 {
+		stderrBytes = defaultInlineStderrBytes
+	}
+	if manifest.Inline.MaxRestarts != nil {
+		maxRestarts = *manifest.Inline.MaxRestarts
+	} else {
+		maxRestarts = defaultInlineMaxRestarts
+	}
+	return workdir, maxRestarts, stderrBytes
+}
+
+// pluginTools copies the declared tool list and resolves each call timeout.
+func pluginTools(manifest plugin.Manifest) []sessioncfg.PluginTool {
+	out := make([]sessioncfg.PluginTool, 0, len(manifest.Tools))
+	for _, tool := range manifest.Tools {
+		out = append(out, sessioncfg.PluginTool{
+			Name:           tool.Name,
+			Idempotent:     tool.Idempotent,
+			TimeoutSeconds: int(manifest.ToolTimeout(tool.Name).Seconds()),
+		})
+	}
+	return out
+}
+
+// pluginMaxOutput is the plugin's output cap, or the shared default.
+func pluginMaxOutput(manifest plugin.Manifest) int {
+	if manifest.Limits.MaxOutputBytes > 0 {
+		return manifest.Limits.MaxOutputBytes
+	}
+	return plugin.MaxOutputBytes
+}
+
+// pluginSecretList copies the declared secret names. withRefs keeps the
+// Kubernetes Secret name and key; the local backend reads the value itself.
+func pluginSecretList(manifest plugin.Manifest, withRefs bool) []sessioncfg.PluginSecret {
+	if len(manifest.Secrets) == 0 {
+		return nil
+	}
+	out := make([]sessioncfg.PluginSecret, 0, len(manifest.Secrets))
+	for _, secret := range manifest.Secrets {
+		entry := sessioncfg.PluginSecret{Env: secret.Env}
+		if withRefs {
+			entry.Secret = secret.Secret
+			entry.Key = secret.Key
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// checkLocalSecrets requires every plugin secret in the mayflyd environment:
+// the local backend copies the value into a file for the agent's process.
+func checkLocalSecrets(manifest plugin.Manifest) error {
+	for _, secret := range manifest.Secrets {
+		if _, ok := os.LookupEnv(secret.Env); !ok {
+			return fmt.Errorf("plugin %q: environment variable %s is not set", manifest.Name, secret.Env)
+		}
+	}
+	return nil
+}
+
+// pluginSecretValues reads the local backend's plugin secrets from the
+// mayflyd environment. Create calls it once; a local restart calls it again so
+// a changed environment reaches the replacement.
+func (m *Manager) pluginSecretValues(plugins []sessioncfg.Plugin) (map[string]map[string]string, error) {
+	if m.cfg.Runtime.Backend != "local" {
+		return nil, nil
+	}
+	out := map[string]map[string]string{}
+	for _, p := range plugins {
+		if len(p.Secrets) == 0 {
+			continue
+		}
+		values := make(map[string]string, len(p.Secrets))
+		for _, secret := range p.Secrets {
+			value, ok := os.LookupEnv(secret.Env)
+			if !ok {
+				return nil, fmt.Errorf("plugin %q: environment variable %s is not set", p.Name, secret.Env)
+			}
+			values[secret.Env] = value
+		}
+		out[p.Name] = values
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// pluginNames lists the plugin names of a resolved session, in selection
+// order.
+func pluginNames(plugins []sessioncfg.Plugin) []string {
+	if len(plugins) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(plugins))
+	for _, p := range plugins {
+		out = append(out, p.Name)
+	}
+	return out
+}
+
+// newSidecarKey generates the signing key of a session with sidecar plugins,
+// or returns nil when none is placed there.
+func newSidecarKey(plugins []sessioncfg.Plugin) []byte {
+	for _, p := range plugins {
+		if p.Placement != string(plugin.Sidecar) {
+			continue
+		}
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			panic(err)
+		}
+		return key
+	}
+	return nil
+}
+
+// registerGrant installs the session's tool grant. Create and adoption both
+// call it, so a replacement container sees the same table either way.
+func (m *Manager) registerGrant(inst *instance) {
+	if m.gateway == nil {
+		return
+	}
+	grant := gateway.GrantFor(inst.runtimeCfg, inst.sess.Agent, m.mcpDefs(inst.sess.MCPServers))
+	grant.SidecarKey = inst.sidecarKey
+	m.gateway.Register(grant)
+}
+
+// dropGrant forgets the session's grant. A nil registry has nothing to forget.
+func (m *Manager) dropGrant(id string) {
+	if m.gateway == nil {
+		return
+	}
+	m.gateway.Drop(id)
+}
+
+// mcpDefs returns the definitions of the named MCP servers in order, so the
+// grant and the runtime read one resolution.
+func (m *Manager) mcpDefs(names []string) []config.MCPServerConfig {
+	out := make([]config.MCPServerConfig, 0, len(names))
+	for _, name := range names {
+		if def, ok := m.mcpByName[name]; ok {
+			out = append(out, def)
+		}
+	}
+	return out
+}
+
 func (m *Manager) newID() string {
 	for {
 		id := randomHex(5)
@@ -932,6 +1242,7 @@ func (m *Manager) copySession(inst *instance) model.Session {
 	out := inst.sess
 	out.Skills = append([]string(nil), inst.sess.Skills...)
 	out.MCPServers = append([]string(nil), inst.sess.MCPServers...)
+	out.Plugins = append([]string(nil), inst.sess.Plugins...)
 	return out
 }
 

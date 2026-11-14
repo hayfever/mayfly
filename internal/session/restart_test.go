@@ -289,3 +289,45 @@ func TestRestartKeepsStalePodWhenDeleteKeepsFailing(t *testing.T) {
 		t.Fatalf("stale pods = %v, want [mayfly-s1]", stale)
 	}
 }
+
+// TestRestartKeepsPlugins checks a replacement container receives the same
+// plugin section and the grant is not registered twice.
+func TestRestartKeepsPlugins(t *testing.T) {
+	wordCount := parseManifest(t, t.TempDir(), wordCountManifest, false)
+	m := pluginManager(t, wordCount)
+	m.cfg.Runtime.Backend = "local"
+	runner := &fakeRunner{handle: runner.Handle{Backend: "local", SessionID: "s1"}}
+	m.runner = runner
+	m.SetGateway(newFakeGateway())
+	if err := m.loadAgents(); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := m.Create(context.Background(), CreateOptions{Prompt: "hello", Agent: "tester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst, ok := m.instance(session.ID)
+	if !ok {
+		t.Fatal("session is not registered")
+	}
+	m.restart(inst, "container exited")
+
+	starts := runner.specs()
+	if len(starts) != 2 {
+		t.Fatalf("starts = %d, want 2", len(starts))
+	}
+	first, replacement := starts[0].Runtime.Plugins, starts[1].Runtime.Plugins
+	if len(first) != 1 || len(replacement) != 1 {
+		t.Fatalf("plugin sections = %d and %d", len(first), len(replacement))
+	}
+	if first[0].Name != replacement[0].Name || first[0].Placement != replacement[0].Placement {
+		t.Fatalf("plugin section changed: %+v -> %+v", first[0], replacement[0])
+	}
+	if first[0].Dir != replacement[0].Dir || first[0].SecretsDir != replacement[0].SecretsDir {
+		t.Fatalf("plugin paths changed: %+v -> %+v", first[0], replacement[0])
+	}
+	if first[0].Command != "./word-count" {
+		t.Fatalf("local command = %q", first[0].Command)
+	}
+}
