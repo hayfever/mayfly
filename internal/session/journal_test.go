@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -376,5 +377,30 @@ func TestSeedSequenceAdvancesPastJournal(t *testing.T) {
 	}
 	if high, err := m.journal.HighWater(ctx, "s1"); err != nil || high != 2000 {
 		t.Fatalf("reserved floor = %d, %v, want 2000", high, err)
+	}
+}
+
+func TestAppendJournalBoundsStepsAndBytes(t *testing.T) {
+	m := testManager(t)
+	m.journal = journal.NewMemory()
+	inst := journalInstance(t, m)
+	inst.runtimeCfg.MaxSteps = 2
+	ctx := context.Background()
+
+	limit := maxJournalSteps(2)
+	if _, err := m.AppendJournal(ctx, "s1", "token", journal.Entry{Turn: 11, Step: limit - 1, Name: "tool:x"}); err != nil {
+		t.Fatalf("last allowed step: %v", err)
+	}
+	if _, err := m.AppendJournal(ctx, "s1", "token", journal.Entry{Turn: 11, Step: limit, Name: "tool:x"}); !errors.Is(err, journal.ErrInvalid) {
+		t.Fatalf("step past the cap: err = %v, want ErrInvalid", err)
+	}
+
+	m.cfg.Journal.MaxSessionBytes = 64
+	big, _ := json.Marshal(strings.Repeat("x", 40))
+	if _, err := m.AppendJournal(ctx, "s1", "token", journal.Entry{Turn: 11, Step: 1, Name: "llm", Output: big}); err != nil {
+		t.Fatalf("first entry under quota: %v", err)
+	}
+	if _, err := m.AppendJournal(ctx, "s1", "token", journal.Entry{Turn: 11, Step: 2, Name: "llm", Output: big}); !errors.Is(err, journal.ErrInvalid) || !strings.Contains(err.Error(), "max_session_bytes") {
+		t.Fatalf("entry over quota: err = %v", err)
 	}
 }

@@ -60,6 +60,7 @@ First public release.
 - A retried schedule job reuses its run artifact instead of fetching again, and `CreateOptions.IdempotencyKey` keeps a retry from starting a second session.
 - Template `env` allowlist: a template reads only variables declared in `requiredEnv` or `optionalEnv` on its connection, source, or schedule. `MAYFLY_*` and control-plane secrets are never readable.
 - `allowPrivate` on a connection. `allowHTTP` no longer turns off the private-address guard, and NAT64 prefixes are blocked.
+- `journal.max_entry_bytes` and `journal.max_session_bytes`, and a per-turn step bound.
 - An optional `mayfly-bundles` ConfigMap mounted at `/etc/mayfly-bundles` for operator-owned bundles that a redeploy does not replace.
 - `GET /api/v1/schedules` and `POST /api/v1/schedules/{name}/run`. A queued run is polled with `GET /api/v1/queue/jobs/{id}`.
 - `mayflyd -check` loads the config and project bundle, prints the resolved agents, schedules, and source plans, and exits without starting servers.
@@ -126,7 +127,7 @@ First public release.
 - No artifact encryption, image signing, or admission policy is provided by the platform itself.
 - Exactly-once external side effects are not provided. A tool that was executing when the container died can run again; `run_command` in particular may repeat.
 - Streaming assistant deltas are not journaled, so a retried step can show duplicate deltas.
-- The journal keeps every turn of an active session until it finalizes. There is no per-session size cap, so a very long session grows its journal until then.
+- The journal keeps every turn of an active session until it finalizes, up to `journal.max_session_bytes`. A session that reaches the quota can no longer journal steps, so a crash after that point cannot resume the turn.
 
 ### Security
 
