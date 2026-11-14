@@ -137,9 +137,9 @@ func waitFor(t *testing.T, what string, condition func() bool) {
 func waitForHostExit(t *testing.T, host *Host, name string) {
 	t.Helper()
 	host.mu.Lock()
-	rt := host.byPlugin[name]
+	rt, ok := host.byPlugin[name].(*inline)
 	host.mu.Unlock()
-	if rt == nil || rt.client == nil {
+	if !ok || rt == nil || rt.client == nil {
 		t.Fatalf("plugin %q is not running", name)
 	}
 	exited := rt.client.Exited()

@@ -2,7 +2,7 @@ schemaVersion: 1
 name: notify
 version: 0.1.0
 description: Post messages to a team webhook.
-placement: inline
+placement: sidecar
 image: ghcr.io/example/mayfly-plugin-notify:0.1.0
 command: bin/notify
 local:
@@ -18,3 +18,7 @@ tools:
   - name: post
     idempotent: false
     timeout: 30s
+sidecar:
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {memory: 64Mi}

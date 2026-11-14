@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -45,8 +46,11 @@ const (
 	PluginShim = "/usr/local/bin/mayfly-plugin-shim"
 	// PluginImageDir is the directory a plugin image must contain.
 	PluginImageDir = "/mayfly-plugin"
-	// GatewayKeyDir holds the gateway key file of a service plugin.
+	// GatewayKeyDir holds the gateway key file of a sidecar plugin.
 	GatewayKeyDir = "/var/run/mayfly/gateway"
+	// GatewayKeySecretKey is the session Secret key that signs sidecar call
+	// tokens. Only a sidecar mounts it.
+	GatewayKeySecretKey = "gateway-key"
 	// LabelPlugin carries the plugin name on every service plugin object.
 	LabelPlugin = "mayfly.io/plugin"
 	// PluginAppName is the app label of service plugin objects. It differs
@@ -101,14 +105,17 @@ type SessionSpec struct {
 	Args                []string
 	SessionJSON         []byte
 	Token               string
-	// Plugins are the session's plugins. This package renders only the inline
-	// placement; service plugins need no pod objects and sidecars come later.
+	// Plugins are the session's plugins. This package renders the inline and
+	// sidecar placements; a service plugin needs no pod objects.
 	Plugins []sessioncfg.Plugin
 	// ToolsImage is runtime.image. It supplies the shim and never follows the
 	// per-agent image override, so every pod that stages plugins has one.
 	ToolsImage string
 	// PluginVolumeLimit bounds the copied files of all inline plugins.
 	PluginVolumeLimit string
+	// GatewayKey signs the call tokens of this session's sidecars. It is the
+	// session Secret's gateway-key entry and reaches only a sidecar container.
+	GatewayKey []byte
 	// NetworkPolicyName is the policy's own name. It must not follow the pod
 	// name: a replacement pod changes the name, while the policy stays.
 	NetworkPolicyName string
@@ -174,12 +181,47 @@ func (s *SessionSpec) Validate() error {
 	if _, err := resource.ParseQuantity(s.ArtifactLimit); err != nil {
 		return fmt.Errorf("invalid artifact limit: %w", err)
 	}
-	if len(s.inlinePlugins()) > 0 {
+	if len(s.inlinePlugins()) > 0 || len(s.sidecarPlugins()) > 0 {
 		if s.ToolsImage == "" {
-			return fmt.Errorf("tools image is required with inline plugins")
+			return fmt.Errorf("tools image is required with plugin containers")
 		}
+	}
+	if len(s.inlinePlugins()) > 0 {
 		if _, err := resource.ParseQuantity(s.PluginVolumeLimit); err != nil {
 			return fmt.Errorf("invalid plugin volume limit: %w", err)
+		}
+	}
+	if len(s.sidecarPlugins()) > 0 {
+		if len(s.GatewayKey) == 0 {
+			return fmt.Errorf("gateway key is required with sidecar plugins")
+		}
+		for _, p := range s.sidecarPlugins() {
+			if err := validateSidecarPlugin(p); err != nil {
+				return fmt.Errorf("plugin %q: %w", p.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
+// validateSidecarPlugin checks what the pod needs from one sidecar entry.
+// sessioncfg validates the placement itself; these are the rendering
+// invariants.
+func validateSidecarPlugin(p sessioncfg.Plugin) error {
+	if p.Socket == "" {
+		return fmt.Errorf("socket is required")
+	}
+	if p.Command == "" {
+		return fmt.Errorf("command is required")
+	}
+	if p.Sidecar != nil {
+		if p.Sidecar.RunAsUser == 0 {
+			return fmt.Errorf("run_as_user must not be 0")
+		}
+		for _, q := range append(append([]string{}, values(p.Sidecar.Requests)...), values(p.Sidecar.Limits)...) {
+			if _, err := resource.ParseQuantity(q); err != nil {
+				return fmt.Errorf("invalid resource quantity %q: %w", q, err)
+			}
 		}
 	}
 	return nil
@@ -190,6 +232,17 @@ func (s *SessionSpec) inlinePlugins() []sessioncfg.Plugin {
 	var out []sessioncfg.Plugin
 	for _, p := range s.Plugins {
 		if p.Placement == "inline" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// sidecarPlugins returns the plugins that run in their own container.
+func (s *SessionSpec) sidecarPlugins() []sessioncfg.Plugin {
+	var out []sessioncfg.Plugin
+	for _, p := range s.Plugins {
+		if p.Placement == "sidecar" {
 			out = append(out, p)
 		}
 	}
@@ -233,16 +286,22 @@ func (s *SessionSpec) policyName() string {
 	return "mayfly-" + s.SessionID + "-netpol"
 }
 
-// Secret returns the per-session bearer token secret.
+// Secret returns the per-session credentials: the bearer token every internal
+// route authenticates with, and the key that signs sidecar call tokens. The
+// key is raw bytes, so both entries go in Data rather than StringData.
 func (s *SessionSpec) Secret() *corev1.Secret {
+	data := map[string][]byte{"token": []byte(s.Token)}
+	if len(s.GatewayKey) > 0 {
+		data[GatewayKeySecretKey] = append([]byte(nil), s.GatewayKey...)
+	}
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      s.SecretName,
 			Namespace: s.Namespace,
 			Labels:    s.labels(),
 		},
-		Type:       corev1.SecretTypeOpaque,
-		StringData: map[string]string{"token": s.Token},
+		Type: corev1.SecretTypeOpaque,
+		Data: data,
 	}
 }
 
@@ -351,17 +410,25 @@ func (s *SessionSpec) containerSecurityContext() *corev1.SecurityContext {
 	}
 }
 
-// initContainers copies the shim and the inline plugin trees into the pod.
-// A pod without inline plugins has no init containers, so it renders exactly
-// as it did before plugins existed.
+// initContainers copies the shim and the inline plugin trees into the pod,
+// then starts one native sidecar per sidecar plugin. A pod without plugins has
+// no init containers, so it renders exactly as it did before plugins existed.
 func (s *SessionSpec) initContainers() []corev1.Container {
 	inline := s.inlinePlugins()
-	if len(inline) == 0 {
+	sidecars := s.sidecarPlugins()
+	if len(inline) == 0 && len(sidecars) == 0 {
 		return nil
 	}
 	containers := []corev1.Container{s.toolsContainer()}
 	for _, p := range inline {
 		containers = append(containers, s.pluginCopyContainer(p))
+	}
+	// A sidecar is an init container with restartPolicy Always: the kubelet
+	// starts it after the copies finish, waits for its startup probe, and keeps
+	// it running for the pod's lifetime. Starting the copies first keeps a slow
+	// plugin image from delaying the pod.
+	for _, p := range sidecars {
+		containers = append(containers, s.sidecarContainer(p))
 	}
 	return containers
 }
@@ -409,6 +476,131 @@ func (s *SessionSpec) pluginCopyContainer(p sessioncfg.Plugin) corev1.Container 
 	}
 }
 
+// sidecarContainer runs one sidecar plugin behind the shim on the session's
+// socket volume. The shim owns the plugin process, verifies the gateway's call
+// tokens, and answers the startup probe once the plugin lists its tools.
+func (s *SessionSpec) sidecarContainer(p sessioncfg.Plugin) corev1.Container {
+	always := corev1.ContainerRestartPolicyAlways
+	env := []corev1.EnvVar{
+		{Name: "MAYFLY_PLUGIN_NAME", Value: p.Name},
+		{Name: "MAYFLY_PLUGIN_DIR", Value: PluginImageDir},
+		{Name: "MAYFLY_SESSION_ID", Value: s.SessionID},
+	}
+	mounts := []corev1.VolumeMount{
+		{Name: "mayfly-tools", MountPath: ToolsDir, ReadOnly: true},
+		{Name: "plugin-sockets", MountPath: PluginSocketsDir},
+		{Name: "gateway-key", MountPath: GatewayKeyDir, ReadOnly: true},
+		{Name: sidecarTmpVolumeName(p.Name), MountPath: "/tmp"},
+	}
+	workspace := ""
+	if p.Sidecar != nil {
+		workspace = p.Sidecar.Workspace
+	}
+	if workspace == "read" || workspace == "write" {
+		env = append(env, corev1.EnvVar{Name: "MAYFLY_WORKSPACE_DIR", Value: WorkspaceDir})
+		mount := corev1.VolumeMount{Name: "workspace", MountPath: WorkspaceDir, ReadOnly: workspace == "read"}
+		if s.PersistentWorkspace {
+			mount.SubPath = WorkspaceSubPath
+		}
+		mounts = append(mounts, mount)
+	}
+	for _, name := range sortedKeys(p.Env) {
+		env = append(env, corev1.EnvVar{Name: name, Value: p.Env[name]})
+	}
+	for _, secret := range p.Secrets {
+		env = append(env, corev1.EnvVar{
+			Name: secret.Env,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secret.Secret},
+					Key:                  secret.Key,
+				},
+			},
+		})
+	}
+
+	command := []string{
+		ToolsDir + "/mayfly-plugin-shim", "serve",
+		"--listen", "unix:" + p.Socket,
+		"--key-file", GatewayKeyDir + "/" + GatewayKeySecretKey,
+		"--session", s.SessionID,
+		"--init-timeout", sidecarInitTimeout(p).String(),
+		"--", p.Command,
+	}
+	command = append(command, p.Args...)
+
+	var requests, limits corev1.ResourceList
+	if p.Sidecar != nil {
+		requests = quantities(p.Sidecar.Requests)
+		limits = quantities(p.Sidecar.Limits)
+	}
+	return corev1.Container{
+		Name:            plugin.ContainerName(p.Name),
+		Image:           p.Image,
+		ImagePullPolicy: corev1.PullPolicy(s.ImagePullPolicy),
+		Command:         command,
+		// A plugin image keeps its tree in /mayfly-plugin, so a relative
+		// command resolves there whatever the image's WORKDIR is.
+		WorkingDir:      PluginImageDir,
+		RestartPolicy:   &always,
+		Env:             env,
+		SecurityContext: s.sidecarSecurityContext(p),
+		Resources: corev1.ResourceRequirements{
+			Requests: requests,
+			Limits:   limits,
+		},
+		VolumeMounts: mounts,
+		StartupProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: []string{
+					ToolsDir + "/mayfly-plugin-shim", "probe", "--listen", "unix:" + p.Socket,
+				}},
+			},
+			PeriodSeconds:  2,
+			TimeoutSeconds: 5,
+			// The shim's own budget, plus thirty seconds of slack: a slow but
+			// working plugin must not be restarted by the kubelet.
+			FailureThreshold: int32(sidecarInitTimeout(p)/(2*time.Second)) + 15,
+		},
+	}
+}
+
+// sidecarInitTimeout is the budget the shim gives the plugin to start and list
+// its tools. It mirrors the manifest's initTimeout, which the shim cannot read.
+func sidecarInitTimeout(p sessioncfg.Plugin) time.Duration {
+	timeout := time.Duration(p.InitTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	return timeout
+}
+
+// sidecarSecurityContext is the hardened pod identity with the plugin's own
+// non-root UID, so two plugins never share a user.
+func (s *SessionSpec) sidecarSecurityContext(p sessioncfg.Plugin) *corev1.SecurityContext {
+	sc := s.containerSecurityContext()
+	if p.Sidecar != nil {
+		sc.RunAsUser = new(p.Sidecar.RunAsUser)
+	}
+	return sc
+}
+
+// sidecarTmpVolumeName is one sidecar's private scratch directory. Each plugin
+// gets its own, so one plugin cannot read another's temporary files.
+func sidecarTmpVolumeName(name string) string {
+	return dnsName("plugin-tmp-", name)
+}
+
+// sortedKeys returns a map's keys in order, so a rendered pod is stable.
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for key := range m {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // copyRequests and copyLimits size a copy container; the work is a file copy
 // under a 1 GiB backstop, so the pod budget stays small.
 func copyRequests() corev1.ResourceList {
@@ -440,6 +632,11 @@ func (s *SessionSpec) volumeMounts() []corev1.VolumeMount {
 		)
 	}
 	mounts = append(mounts, corev1.VolumeMount{Name: "tmp", MountPath: "/tmp"})
+	if sidecars := s.sidecarPlugins(); len(sidecars) > 0 {
+		// The runtime dials each socket. The volume carries no secret: a call
+		// needs a token the gateway signs, which this container never holds.
+		mounts = append(mounts, corev1.VolumeMount{Name: "plugin-sockets", MountPath: PluginSocketsDir})
+	}
 	if inline := s.inlinePlugins(); len(inline) > 0 {
 		mounts = append(mounts, corev1.VolumeMount{Name: "plugins", MountPath: PluginsDir, ReadOnly: true})
 		for _, p := range inline {
@@ -497,21 +694,23 @@ func (s *SessionSpec) volumes() []corev1.Volume {
 			},
 		},
 	})
-	if inline := s.inlinePlugins(); len(inline) > 0 {
-		volumes = append(volumes,
-			corev1.Volume{
-				Name: "mayfly-tools",
-				VolumeSource: corev1.VolumeSource{
-					EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: quantityPtr("64Mi")},
-				},
+	inline := s.inlinePlugins()
+	sidecars := s.sidecarPlugins()
+	if len(inline) > 0 || len(sidecars) > 0 {
+		volumes = append(volumes, corev1.Volume{
+			Name: "mayfly-tools",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: quantityPtr("64Mi")},
 			},
-			corev1.Volume{
-				Name: "plugins",
-				VolumeSource: corev1.VolumeSource{
-					EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: quantityPtr(s.PluginVolumeLimit)},
-				},
+		})
+	}
+	if len(inline) > 0 {
+		volumes = append(volumes, corev1.Volume{
+			Name: "plugins",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: quantityPtr(s.PluginVolumeLimit)},
 			},
-		)
+		})
 		for _, p := range inline {
 			if len(p.Secrets) == 0 {
 				continue
@@ -519,7 +718,52 @@ func (s *SessionSpec) volumes() []corev1.Volume {
 			volumes = append(volumes, s.pluginSecretVolume(p))
 		}
 	}
+	if len(sidecars) > 0 {
+		volumes = append(volumes,
+			corev1.Volume{
+				Name: "plugin-sockets",
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{
+						Medium:    corev1.StorageMediumMemory,
+						SizeLimit: quantityPtr("1Mi"),
+					},
+				},
+			},
+			s.gatewayKeyVolume(),
+		)
+		for _, p := range sidecars {
+			volumes = append(volumes, corev1.Volume{
+				Name: sidecarTmpVolumeName(p.Name),
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{
+						Medium:    corev1.StorageMediumMemory,
+						SizeLimit: quantityPtr("64Mi"),
+					},
+				},
+			})
+		}
+	}
 	return volumes
+}
+
+// gatewayKeyVolume projects only the session secret's gateway-key entry, so a
+// sidecar cannot read the session token that sits in the same Secret.
+func (s *SessionSpec) gatewayKeyVolume() corev1.Volume {
+	mode := int32(0o400)
+	return corev1.Volume{
+		Name: "gateway-key",
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName:  s.SecretName,
+				DefaultMode: &mode,
+				Items: []corev1.KeyToPath{{
+					Key:  GatewayKeySecretKey,
+					Path: GatewayKeySecretKey,
+					Mode: &mode,
+				}},
+			},
+		},
+	}
 }
 
 // pluginSecretVolume projects one inline plugin's secrets as files. The
