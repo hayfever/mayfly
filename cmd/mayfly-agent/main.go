@@ -30,6 +30,13 @@ func main() {
 	logger := newLogger()
 	slog.SetDefault(logger)
 
+	// Inline plugins run as this UID in this container. Clear the dumpable
+	// flag before the runtime reads its token, so a plugin cannot read
+	// /proc/<pid>/environ and use the token to call the gateway.
+	if err := disableDumpable(); err != nil {
+		logger.Warn("process environment stays readable by same-UID processes", "error", err)
+	}
+
 	if *configPath == "" {
 		logger.Error("no session config path: set --config or MAYFLY_CONFIG")
 		os.Exit(2)

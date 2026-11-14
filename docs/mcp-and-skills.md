@@ -43,24 +43,20 @@ mcp:
         Authorization: "env:GITHUB_MCP_TOKEN"
 ```
 
-At session start, the runtime receives:
-
-```json
-{
-  "name": "github",
-  "transport": "http",
-  "url": "http://mayfly.mayfly.svc.cluster.local:8080/internal/v1/mcp/github"
-}
-```
-
-The runtime adds the session token. The control plane checks that `github` is assigned to the session, connects to the configured upstream URL, injects the configured headers, and streams the response. Header values using `env:NAME` are resolved once at control-plane startup and never written to a ConfigMap or pod spec.
+The gateway checks that `github` is assigned to the session, connects to the
+configured upstream URL, injects the configured headers, and lists the
+server's tools. It adds them to the session's grant. The runtime receives the
+granted tools and never connects to the server itself. Header values using
+`env:NAME` are resolved once at control-plane startup and never written to a
+ConfigMap or pod spec.
 
 Session pods only need network access to the control plane. Upstream MCP credentials and URLs stay outside the container.
 
-The runtime uses that connection to list the server's tools. A `tools/call`
-is a granted tool call: the runtime asks the tool gateway, and the gateway
+A `tools/call` is a granted tool call: the runtime asks the tool gateway, and the gateway
 calls the upstream itself with the resolved headers. The call is recorded in
-the gateway's ledger before the model sees a result. `* /internal/v1/mcp/{server}`
+the gateway's ledger before the model sees a result. When gateway discovery
+fails, the server's tools are absent from the session instead of falling back
+to the proxy, so no call can skip the ledger. `* /internal/v1/mcp/{server}`
 remains for alternate harnesses, which do not use the gateway.
 
 Supported methods on the proxy: `POST`, `GET`, `DELETE`. Request bodies are
@@ -84,6 +80,8 @@ mcp:
 ```
 
 The runtime spawns the process inside the session container, performs `initialize`, then `tools/list`. Each `tools/call` is authorized and recorded by the tool gateway, which returns a dispatch; the runtime calls the process and reports the result back.
+
+The child does not inherit the runtime's environment. It receives `PATH`, `HOME`, `TMPDIR`, `LANG`, `TZ`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and the proxy variables of the container, plus the entry's `env`. It does not receive `MAYFLY_SESSION_TOKEN`, `MAYFLY_CONFIG`, provider keys, or webhook secrets: the session token authorizes the tool gateway, so handing it to a server would let that server dispatch calls of the session.
 
 Environment values using `env:` are rejected: secrets would land in the pod ConfigMap. Use an HTTP MCP server behind the proxy when credentials are required.
 

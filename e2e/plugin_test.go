@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/hayfever/mayfly/internal/plugin"
 )
 
 // The fixture plugin image, its manifests, and the fixture agents are described
@@ -103,21 +106,47 @@ func envVar(container corev1.Container, name string) *corev1.EnvVar {
 	return nil
 }
 
-// tryExec runs a command in a pod and returns kubectl's exit code and output
-// without failing the test, so a poll can survive a pod that is being deleted.
+// tryExec runs a command in the only container of a pod and returns kubectl's
+// exit code and stdout without failing the test, so a poll can survive a pod
+// that is being deleted.
 func tryExec(pod string, command ...string) (int, string) {
+	return tryExecIn(pod, "", command...)
+}
+
+// tryExecIn runs a command in one container of a pod. kubectl writes its own
+// notices, such as "Defaulted container", to stderr, so stdout stays clean and
+// a test can compare a value; the stderr text is appended only when the command
+// fails, for the failure message.
+func tryExecIn(pod, container string, command ...string) (int, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	args := env.kubectlArgs(append([]string{"exec", pod, "--"}, command...)...)
-	out, err := exec.CommandContext(ctx, "kubectl", args...).CombinedOutput()
+	args := []string{"exec", pod}
+	if container != "" {
+		args = append(args, "-c", container)
+	}
+	args = append(args, "--")
+	args = append(args, command...)
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "kubectl", env.kubectlArgs(args...)...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
 	if err == nil {
-		return 0, string(out)
+		return 0, stdout.String()
 	}
+	notice := strings.TrimSpace(stderr.String())
 	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode(), string(out)
+	if !errors.As(err, &exitErr) {
+		return -1, notice
 	}
-	return -1, string(out)
+	out := strings.TrimSpace(stdout.String())
+	if notice != "" {
+		if out != "" {
+			out += "\n"
+		}
+		out += notice
+	}
+	return exitErr.ExitCode(), out
 }
 
 // TestPluginInlineSession runs an inline plugin end to end and checks the pod
@@ -220,7 +249,7 @@ func TestPluginResumeAfterPodDelete(t *testing.T) {
 	// The plugin writes the counter before it sleeps, so the file proves the
 	// call reached the plugin and is still in flight.
 	eventually(t, 90*time.Second, "slow call in flight", func() (bool, string) {
-		code, out := tryExec(pod, "cat", "/workspace/.plugin-calls")
+		code, out := tryExecIn(pod, "agent", "cat", "/workspace/.plugin-calls")
 		return code == 0 && strings.TrimSpace(out) == "1", fmt.Sprintf("exit %d: %q", code, strings.TrimSpace(out))
 	})
 
@@ -250,7 +279,7 @@ func TestPluginResumeAfterPodDelete(t *testing.T) {
 	})
 
 	replacement := "mayfly-" + s.ID + "-r1"
-	code, out := tryExec(replacement, "cat", "/workspace/.plugin-calls")
+	code, out := tryExecIn(replacement, "agent", "cat", "/workspace/.plugin-calls")
 	if code != 0 || strings.TrimSpace(out) != "1" {
 		t.Fatalf("workspace counter after resume = %q (exit %d), want 1; the tool ran again", strings.TrimSpace(out), code)
 	}
@@ -516,20 +545,29 @@ socket.on("error", () => done(false));`, host, port)
 }
 
 // waitPluginService waits until a service plugin's objects exist and its
-// single replica is ready.
+// single replica is ready. The reconciler names the Deployment, Service, and
+// NetworkPolicy after the plugin, and the call-token Secret with the gateway
+// prefix, so a bundle cannot reference it as a plugin secret.
 func waitPluginService(t *testing.T, name string) {
 	t.Helper()
-	object := "mayfly-plugin-" + name
-	for _, kind := range []string{"deployment", "service", "networkpolicy", "secret"} {
-		eventually(t, time.Minute, kind+" "+object+" exists", func() (bool, string) {
-			if _, err := env.kubectl("get", kind, object); err != nil {
+	for _, object := range []struct {
+		kind string
+		name string
+	}{
+		{"deployment", plugin.ObjectName(name)},
+		{"service", plugin.ObjectName(name)},
+		{"networkpolicy", plugin.ObjectName(name)},
+		{"secret", plugin.GatewayKeyName(name)},
+	} {
+		eventually(t, time.Minute, object.kind+" "+object.name+" exists", func() (bool, string) {
+			if _, err := env.kubectl("get", object.kind, object.name); err != nil {
 				return false, err.Error()
 			}
 			return true, ""
 		})
 	}
 	eventually(t, 3*time.Minute, "service plugin "+name+" ready", func() (bool, string) {
-		out, err := env.kubectl("get", "deployment", object,
+		out, err := env.kubectl("get", "deployment", plugin.ObjectName(name),
 			"-o", "jsonpath={.status.readyReplicas}/{.status.replicas}")
 		if err != nil {
 			return false, err.Error()
@@ -583,7 +621,7 @@ func TestPluginSidecarSession(t *testing.T) {
 			}
 		}
 	}
-	if code, out := tryExec("mayfly-"+s.ID, "sh", "-c", `printf '%s' "${E2E_SIDECAR_SECRET:-}"`); code != 0 || strings.TrimSpace(out) != "" {
+	if code, out := tryExecIn("mayfly-"+s.ID, "agent", "sh", "-c", `printf '%s' "${E2E_SIDECAR_SECRET:-}"`); code != 0 || strings.TrimSpace(out) != "" {
 		t.Fatalf("agent container read the sidecar secret: exit %d: %q", code, strings.TrimSpace(out))
 	}
 	env.waitEvent(t, s.ID, "assistant reply", func(ev event) bool {
@@ -604,9 +642,11 @@ func TestPluginSidecarSocketRequiresToken(t *testing.T) {
 	// A completed call proves the socket serves authenticated requests.
 	waitToolResult(t, s.ID, "plugin_sidecar_echo")
 
-	socket := "/run/mayfly/plugin-sockets/sidecar.sock"
+	// Each sidecar has its own socket directory, so one plugin cannot replace
+	// another plugin's socket.
+	socket := "/run/mayfly/plugin-sockets/sidecar/sidecar.sock"
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
-	code, out := tryExec("mayfly-"+s.ID, "curl", "-sS", "-o", "/dev/null",
+	code, out := tryExecIn("mayfly-"+s.ID, "agent", "curl", "-sS", "-o", "/dev/null",
 		"-w", "%{http_code}", "--unix-socket", socket,
 		"-X", "POST", "-H", "Content-Type: application/json",
 		"--data", body, "http://localhost/mcp")

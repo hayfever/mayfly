@@ -124,6 +124,50 @@ func TestShimCopyRejectsEscapingSymlink(t *testing.T) {
 	}
 }
 
+func TestShimCopyRejectsChainedSymlinkEscape(t *testing.T) {
+	src := t.TempDir()
+	writeTestFile(t, filepath.Join(src, "a", "tool"), "x", 0o755)
+	// Each target looks local: ".." cleans to the plugin root, and the chain
+	// through it cleans there too. Together they resolve one level above it.
+	if err := os.Symlink("..", filepath.Join(src, "a", "s")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("a/s/../..", filepath.Join(src, "t")); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "demo")
+	var stderr bytes.Buffer
+	if code := run([]string{"copy", src, dst}, &stderr); code == 0 {
+		t.Fatal("copy accepted a symlink chain that leaves the plugin tree")
+	}
+	if !strings.Contains(stderr.String(), "escapes the plugin directory") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestShimCopyAcceptsInternalSymlinkChain(t *testing.T) {
+	src := t.TempDir()
+	writeTestFile(t, filepath.Join(src, "bin", "tool"), "x", 0o755)
+	if err := os.Symlink("tool", filepath.Join(src, "bin", "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "bin", "alias"), filepath.Join(src, "bin", "again")); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "demo")
+	var stderr bytes.Buffer
+	if code := run([]string{"copy", src, dst}, &stderr); code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	body, err := os.ReadFile(filepath.Join(dst, "bin", "again"))
+	if err != nil {
+		t.Fatalf("chained link does not resolve: %v", err)
+	}
+	if string(body) != "x" {
+		t.Fatalf("chained link reads %q", body)
+	}
+}
+
 func TestShimCopyMissingDirectory(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "absent")
 	var stderr bytes.Buffer

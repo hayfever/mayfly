@@ -55,6 +55,9 @@ type Tool struct {
 	MaxOutput   int
 }
 
+// errHostClosed reports a call, a start, or a restart after the host closed.
+var errHostClosed = errors.New("plugin host is closed")
+
 // Host owns the connected plugins of one session: the inline processes it
 // started, and the sidecar containers it reaches over the socket volume.
 type Host struct {
@@ -87,8 +90,15 @@ type inline struct {
 	opts Options
 	sink *stderrSink
 
-	mu       sync.Mutex
+	// mu serializes the calls, the restarts, and the checks that lead to them.
+	mu sync.Mutex
+
+	// clientMu guards client and closed, separately from mu, so that a
+	// shutdown can end an in-flight call instead of waiting for its timeout.
+	clientMu sync.Mutex
 	client   *mcp.Client
+	closed   bool
+
 	restarts int
 }
 
@@ -141,7 +151,7 @@ func (h *Host) StartSidecars(ctx context.Context, tokens map[string]string) []er
 	defs := append([]sessioncfg.Plugin(nil), h.sidecars...)
 	h.mu.Unlock()
 	if closed {
-		return []error{errors.New("plugin host is closed")}
+		return []error{errHostClosed}
 	}
 	var errs []error
 	for _, def := range defs {
@@ -265,7 +275,7 @@ func (h *Host) Call(ctx context.Context, name string, args json.RawMessage, key,
 	rt := h.byPlugin[tool.Plugin]
 	h.mu.Unlock()
 	if closed {
-		return "", false, errors.New("plugin host is closed")
+		return "", false, errHostClosed
 	}
 	if !ok {
 		return "", false, fmt.Errorf("unknown plugin tool %q", name)
@@ -336,19 +346,63 @@ func (rt *inline) start(ctx context.Context) ([]mcp.Tool, []string, error) {
 		_ = client.Close()
 		return nil, nil, err
 	}
-	rt.client = client
+	if !rt.install(client) {
+		// Close ran while the process was starting: stop it here rather than
+		// leave an unsupervised process behind.
+		_ = client.Close()
+		return nil, nil, errHostClosed
+	}
 	return reported, hidden, nil
 }
 
-// close stops the process and the stderr sink.
+// close stops the process and the stderr sink. It takes no call lock: killing
+// the process ends a call in flight, so a shutdown does not wait for that
+// call's timeout.
 func (rt *inline) close() {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	if rt.client != nil {
-		_ = rt.client.Close()
-		rt.client = nil
+	rt.clientMu.Lock()
+	rt.closed = true
+	client := rt.client
+	rt.client = nil
+	rt.clientMu.Unlock()
+	if client != nil {
+		_ = client.Close()
 	}
 	rt.sink.Close()
+}
+
+// install publishes a new client. It reports false when close already ran, so
+// a restart that raced a shutdown stops its process instead of leaking it.
+func (rt *inline) install(client *mcp.Client) bool {
+	rt.clientMu.Lock()
+	defer rt.clientMu.Unlock()
+	if rt.closed {
+		return false
+	}
+	rt.client = client
+	return true
+}
+
+// current returns the running client, or nil when there is none.
+func (rt *inline) current() *mcp.Client {
+	rt.clientMu.Lock()
+	defer rt.clientMu.Unlock()
+	return rt.client
+}
+
+// takeClient drops the client pointer and returns the client to close.
+func (rt *inline) takeClient() *mcp.Client {
+	rt.clientMu.Lock()
+	defer rt.clientMu.Unlock()
+	client := rt.client
+	rt.client = nil
+	return client
+}
+
+// isClosed reports whether close has run. A closed plugin starts no process.
+func (rt *inline) isClosed() bool {
+	rt.clientMu.Lock()
+	defer rt.clientMu.Unlock()
+	return rt.closed
 }
 
 // call runs one tool under its timeout. The caller holds no lock. An inline
@@ -360,21 +414,25 @@ func (rt *inline) call(ctx context.Context, tool Tool, args json.RawMessage, key
 	if err := rt.ensure(ctx); err != nil {
 		return "", false, err
 	}
+	client := rt.current()
+	if client == nil {
+		return "", false, errHostClosed
+	}
 	meta := map[string]any{
 		"mayfly.io/idempotency-key": key,
 		"mayfly.io/session":         rt.opts.SessionID,
 		"mayfly.io/agent":           rt.opts.Agent,
 	}
-	out, isErr, id, err := rt.dispatch(ctx, tool, args, meta)
+	out, isErr, id, err := rt.dispatch(ctx, client, tool, args, meta)
 	if err == nil {
 		return truncate(out, tool.MaxOutput), isErr, nil
 	}
 	if ctx.Err() != nil {
-		rt.cancel(id, "cancelled")
+		rt.cancel(client, id, "cancelled")
 		return "", false, ctx.Err()
 	}
 	if isTimeout(ctx, err) {
-		rt.cancel(id, "timeout")
+		rt.cancel(client, id, "timeout")
 		return timeoutResult(tool), true, nil
 	}
 	if errors.Is(err, mcp.ErrNotSent) {
@@ -384,16 +442,20 @@ func (rt *inline) call(ctx context.Context, tool Tool, args json.RawMessage, key
 		if restartErr := rt.restart(ctx); restartErr != nil {
 			return "", false, restartErr
 		}
-		out, isErr, id, err = rt.dispatch(ctx, tool, args, meta)
+		client = rt.current()
+		if client == nil {
+			return "", false, errHostClosed
+		}
+		out, isErr, id, err = rt.dispatch(ctx, client, tool, args, meta)
 		if err == nil {
 			return truncate(out, tool.MaxOutput), isErr, nil
 		}
 		if ctx.Err() != nil {
-			rt.cancel(id, "cancelled")
+			rt.cancel(client, id, "cancelled")
 			return "", false, ctx.Err()
 		}
 		if isTimeout(ctx, err) {
-			rt.cancel(id, "timeout")
+			rt.cancel(client, id, "timeout")
 			return timeoutResult(tool), true, nil
 		}
 	}
@@ -409,10 +471,11 @@ func (rt *inline) call(ctx context.Context, tool Tool, args json.RawMessage, key
 
 // exited reports whether the plugin process is gone.
 func (rt *inline) exited() bool {
-	if rt.client == nil {
+	client := rt.current()
+	if client == nil {
 		return true
 	}
-	exited := rt.client.Exited()
+	exited := client.Exited()
 	if exited == nil {
 		return false
 	}
@@ -424,42 +487,42 @@ func (rt *inline) exited() bool {
 	}
 }
 
-// stopClient drops a client whose process is gone.
+// stopClient drops a client whose process is gone, and the process with it.
 func (rt *inline) stopClient() {
-	if rt.client != nil {
-		_ = rt.client.Close()
-		rt.client = nil
+	if client := rt.takeClient(); client != nil {
+		_ = client.Close()
 	}
 }
 
-// dispatch sends one tools/call under the tool's timeout.
-func (rt *inline) dispatch(ctx context.Context, tool Tool, args json.RawMessage, meta map[string]any) (string, bool, int64, error) {
+// dispatch sends one tools/call to client under the tool's timeout.
+func (rt *inline) dispatch(ctx context.Context, client *mcp.Client, tool Tool, args json.RawMessage, meta map[string]any) (string, bool, int64, error) {
 	timeout := tool.Timeout
 	if timeout <= 0 {
 		timeout = time.Minute
 	}
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return rt.client.CallToolMeta(callCtx, tool.Remote, args, meta)
+	return client.CallToolMeta(callCtx, tool.Remote, args, meta)
 }
 
 // cancel tells the plugin that a request will not get a result.
-func (rt *inline) cancel(id int64, reason string) {
-	if rt.client == nil {
+func (rt *inline) cancel(client *mcp.Client, id int64, reason string) {
+	if client == nil {
 		return
 	}
 	ctx, done := context.WithTimeout(context.Background(), 5*time.Second)
 	defer done()
-	_ = rt.client.Cancel(ctx, id, reason)
+	_ = client.Cancel(ctx, id, reason)
 }
 
 // ensure restarts a plugin that exited before the call.
 func (rt *inline) ensure(ctx context.Context) error {
-	if rt.client == nil {
+	client := rt.current()
+	if client == nil {
 		return rt.restart(ctx)
 	}
 	select {
-	case <-rt.client.Exited():
+	case <-client.Exited():
 		rt.stopClient()
 		return rt.restart(ctx)
 	default:
@@ -469,6 +532,9 @@ func (rt *inline) ensure(ctx context.Context) error {
 
 // restart replaces an exited plugin while the budget allows it.
 func (rt *inline) restart(ctx context.Context) error {
+	if rt.isClosed() {
+		return errHostClosed
+	}
 	if rt.restarts >= rt.def.MaxRestarts {
 		tail := strings.TrimSpace(rt.sink.Tail())
 		if tail != "" {

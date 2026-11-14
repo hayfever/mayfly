@@ -620,11 +620,20 @@ It never receives `MAYFLY_SESSION_TOKEN`, `MAYFLY_CONFIG`, the agent's
 `runtime.env`, or a control-plane secret. A service plugin gets the session ID
 per call in `_meta["mayfly.io/session"]` instead.
 
+A stdio `mcp.servers` entry gets the same treatment, plus its own `env`; see
+[mcp-and-skills.md](mcp-and-skills.md#stdio-servers).
+
+Inline plugins share the runtime's container and UID. The runtime clears its
+own dumpable flag at startup, so a plugin cannot read the token from
+`/proc/<pid>/environ`, but one inline plugin can still read another inline
+plugin's secret files. Use `placement: sidecar` when two plugins' secrets must
+stay apart.
+
 Where secrets live:
 
 | Placement | Delivery | Visible to the agent container |
 |---|---|---|
-| `inline` | Files under `/var/run/mayfly/plugin-secrets/<name>/`, mode 0400, read by the runtime and passed to that plugin only | Yes. Hence the `allowShell` rule |
+| `inline` | Files under `/var/run/mayfly/plugin-secrets/<name>/`, mode 0400, read by the runtime and passed to that plugin only | Yes, and to sibling inline plugins. Hence the `allowShell` rule |
 | `sidecar` | Environment of the sidecar container | No |
 | `service` | Environment of the service container | No |
 | `service.mcpServer` | Headers resolved in `mayflyd` from `env:NAME` | No |

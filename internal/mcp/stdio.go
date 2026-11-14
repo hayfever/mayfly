@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
 // ErrNotSent reports a request that never reached the server process, so the
@@ -26,12 +28,16 @@ type stdioTransport struct {
 	stderr  *tailBuffer
 	done    chan struct{}
 	mu      sync.Mutex
-	closed  bool
+	closed  atomic.Bool
 	waitErr error
 }
 
+// newStdioTransport starts a server with the environment a stdio MCP server is
+// allowed to see: PATH, HOME, TMPDIR, the locale, the TLS trust store, and the
+// proxy settings of the runtime, plus env. Nothing else of os.Environ reaches
+// the server.
 func newStdioTransport(ctx context.Context, command string, args []string, env map[string]string) (*stdioTransport, error) {
-	return newStdioTransportExact(ctx, command, args, mergeEnv(env), "", nil)
+	return newStdioTransportExact(ctx, command, args, sessioncfg.StdioEnv(env), "", nil)
 }
 
 // newStdioTransportExact starts the server with a complete environment.
@@ -90,7 +96,7 @@ func (t *stdioTransport) Exited() <-chan struct{} { return t.done }
 func (t *stdioTransport) Do(ctx context.Context, id int64, payload []byte) ([]byte, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.closed {
+	if t.closed.Load() {
 		return nil, fmt.Errorf("mcp stdio transport closed")
 	}
 	if _, err := t.stdin.Write(append(payload, '\n')); err != nil {
@@ -118,7 +124,7 @@ func (t *stdioTransport) Do(ctx context.Context, id int64, payload []byte) ([]by
 func (t *stdioTransport) Notify(_ context.Context, payload []byte) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.closed {
+	if t.closed.Load() {
 		return fmt.Errorf("mcp stdio transport closed")
 	}
 	_, err := t.stdin.Write(append(payload, '\n'))
@@ -127,15 +133,15 @@ func (t *stdioTransport) Notify(_ context.Context, payload []byte) error {
 
 // Close ends the server: stdin first, then SIGTERM to the process group, then
 // SIGKILL. Each step waits two seconds before the next.
+//
+// Close takes no call lock, so it also ends a call that is in flight: closing
+// stdin and killing the process end the response stream, and the waiting call
+// returns. A call lock here would make a shutdown wait for the tool's timeout.
 func (t *stdioTransport) Close() error {
-	t.mu.Lock()
-	if t.closed {
-		t.mu.Unlock()
+	if !t.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	t.closed = true
 	_ = t.stdin.Close()
-	t.mu.Unlock()
 
 	if waitDone(t.done, 2*time.Second) {
 		return nil
@@ -169,27 +175,4 @@ func (t *stdioTransport) exitError(cause error) error {
 		return fmt.Errorf("mcp server exited (%v): %s", cause, stderr)
 	}
 	return fmt.Errorf("mcp server exited: %w", cause)
-}
-
-func mergeEnv(extra map[string]string) []string {
-	merged := map[string]string{}
-	order := []string{}
-	add := func(k, v string) {
-		if _, ok := merged[k]; !ok {
-			order = append(order, k)
-		}
-		merged[k] = v
-	}
-	for _, entry := range os.Environ() {
-		k, v, _ := strings.Cut(entry, "=")
-		add(k, v)
-	}
-	for k, v := range extra {
-		add(k, v)
-	}
-	out := make([]string, 0, len(order))
-	for _, k := range order {
-		out = append(out, k+"="+merged[k])
-	}
-	return out
 }

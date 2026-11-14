@@ -57,23 +57,84 @@ func helperDispatch(method string, params json.RawMessage) (any, map[string]any)
 			"serverInfo":      map[string]any{"name": "helper", "version": "1"},
 		}, nil
 	case "tools/list":
-		return map[string]any{"tools": []map[string]any{{
-			"name":        "echo",
-			"description": "echo",
-			"inputSchema": map[string]any{"type": "object"},
-		}}}, nil
+		return map[string]any{"tools": []map[string]any{
+			{
+				"name":        "echo",
+				"description": "echo",
+				"inputSchema": map[string]any{"type": "object"},
+			},
+			{
+				"name":        "env",
+				"description": "returns the process environment",
+				"inputSchema": map[string]any{"type": "object"},
+			},
+		}}, nil
 	case "tools/call":
 		var call struct {
 			Name      string         `json:"name"`
 			Arguments map[string]any `json:"arguments"`
 		}
 		_ = json.Unmarshal(params, &call)
+		if call.Name == "env" {
+			return map[string]any{
+				"content": []map[string]any{{"type": "text", "text": strings.Join(os.Environ(), "\n")}},
+			}, nil
+		}
 		text, _ := call.Arguments["text"].(string)
 		return map[string]any{
 			"content": []map[string]any{{"type": "text", "text": "echo: " + text}},
 		}, nil
 	default:
 		return nil, map[string]any{"code": -32601, "message": "unknown method"}
+	}
+}
+
+// TestStdioEnvDropsRuntimeSecrets checks what a stdio MCP server inherits: the
+// toolchain and locale variables it needs, and its own env, but not the
+// runtime's token, config path, or provider keys.
+func TestStdioEnvDropsRuntimeSecrets(t *testing.T) {
+	t.Setenv("MAYFLY_SESSION_TOKEN", "session-token")
+	t.Setenv("MAYFLY_CONFIG", "/etc/mayfly/session.json")
+	t.Setenv("OPENAI_API_KEY", "provider-key")
+	t.Setenv("LANG", "C.UTF-8")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	client, err := NewStdio(ctx, "helper", os.Args[0], []string{"-test.run=TestMCPHelperProcess"},
+		map[string]string{"MAYFLY_MCP_HELPER": "1", "SERVER_SETTING": "configured"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if err := client.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	out, isErr, err := client.CallTool(ctx, "env", json.RawMessage(`{}`))
+	if err != nil || isErr {
+		t.Fatalf("env call: error=%v err=%v", isErr, err)
+	}
+	inherited := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		name, value, ok := strings.Cut(line, "=")
+		if ok {
+			inherited[name] = value
+		}
+	}
+	for name, want := range map[string]string{
+		"MAYFLY_MCP_HELPER": "1",
+		"SERVER_SETTING":    "configured",
+		"LANG":              "C.UTF-8",
+	} {
+		if got := inherited[name]; got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if inherited["PATH"] == "" {
+		t.Error("the server has no PATH")
+	}
+	for _, name := range []string{"MAYFLY_SESSION_TOKEN", "MAYFLY_CONFIG", "OPENAI_API_KEY"} {
+		if value, ok := inherited[name]; ok {
+			t.Errorf("%s was inherited: %q", name, value)
+		}
 	}
 }
 
@@ -92,7 +153,7 @@ func TestStdioClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools) != 1 || tools[0].Name != "echo" {
+	if len(tools) != 2 || tools[0].Name != "echo" || tools[1].Name != "env" {
 		t.Fatalf("tools = %+v", tools)
 	}
 	out, isErr, err := client.CallTool(ctx, "echo", json.RawMessage(`{"text":"hello"}`))
