@@ -153,12 +153,18 @@ journal:
   backend: bbolt            # memory or bbolt
   bbolt:
     path: /var/lib/mayfly/journal.db
+  max_entry_bytes: 8388608
+  max_session_bytes: 67108864
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
 | `backend` | `bbolt` in config and chart | `memory` or `bbolt` |
 | `bbolt.path` | `.mayfly/journal.db` in config, `/var/lib/mayfly/journal.db` in the chart | Database file. Put it on the control-plane PersistentVolume; a control-plane restart must be able to read the last turn |
+| `max_entry_bytes` | `8388608` (8 MiB) | Largest journal entry a runtime may send. A larger entry gets `413`. A model step can carry a 4 MiB `write_file` argument, so keep this above that |
+| `max_session_bytes` | `67108864` (64 MiB) | Journal bytes one session may hold. An append past the quota is rejected |
+
+The journal also rejects a step number of `1 + max_steps × 129` or more within a turn: one user step, then one model step and up to 128 tool calls per round. These bounds keep a compromised or prompt-injected runtime from filling the state volume that the queue and the schedule watermark share.
 
 `bbolt` locks its file, so only one control-plane replica can use it. A session's entries are deleted when it finalizes: the artifact bundle is the durable history. The database also holds a per-session sequence reservation, which keeps a restarted control plane from reusing a turn key.
 
