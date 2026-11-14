@@ -13,16 +13,19 @@ type rpcRequest struct {
 	Params  json.RawMessage `json:"params"`
 }
 
-// MCPCounts records tools/call executions by remote tool name. The e2e suite
-// uses it to prove a resumed turn did not repeat a completed tool call.
+// MCPCounts records tools/call executions by remote tool name, and the _meta
+// block of the last call of each tool. The e2e suite uses the counters to prove
+// a resumed turn did not repeat a completed call, and the metadata to prove the
+// gateway attached an idempotency key.
 type MCPCounts struct {
 	mu    sync.Mutex
 	calls map[string]int
+	meta  map[string]map[string]any
 }
 
 // NewMCPCounts returns an empty counter set.
 func NewMCPCounts() *MCPCounts {
-	return &MCPCounts{calls: map[string]int{}}
+	return &MCPCounts{calls: map[string]int{}, meta: map[string]map[string]any{}}
 }
 
 // Add records one call.
@@ -32,11 +35,37 @@ func (c *MCPCounts) Add(name string) {
 	c.calls[name]++
 }
 
-// Reset clears every count.
+// RecordMeta stores the _meta block of the last call of one tool.
+func (c *MCPCounts) RecordMeta(name string, meta map[string]any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(meta) == 0 {
+		return
+	}
+	c.meta[name] = meta
+}
+
+// Meta returns a copy of the last metadata seen per tool.
+func (c *MCPCounts) Meta() map[string]map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]map[string]any, len(c.meta))
+	for name, meta := range c.meta {
+		copied := make(map[string]any, len(meta))
+		for k, v := range meta {
+			copied[k] = v
+		}
+		out[name] = copied
+	}
+	return out
+}
+
+// Reset clears every count and the recorded metadata.
 func (c *MCPCounts) Reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls = map[string]int{}
+	c.meta = map[string]map[string]any{}
 }
 
 // Snapshot returns a copy of the counters.
@@ -55,8 +84,9 @@ func MCPHandler() http.Handler {
 	return MCPHandlerWithCounts(NewMCPCounts())
 }
 
-// MCPHandlerWithCounts returns the MCP server and reports its counters at
-// GET /counts. POST /counts/reset clears them.
+// MCPHandlerWithCounts returns the MCP server, reports its counters at
+// GET /counts and the last call metadata at GET /meta, and clears both at
+// POST /counts/reset.
 func MCPHandlerWithCounts(counts *MCPCounts) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +94,9 @@ func MCPHandlerWithCounts(counts *MCPCounts) http.Handler {
 	})
 	mux.HandleFunc("GET /counts", func(w http.ResponseWriter, r *http.Request) {
 		writeStubJSON(w, map[string]any{"counts": counts.Snapshot()})
+	})
+	mux.HandleFunc("GET /meta", func(w http.ResponseWriter, r *http.Request) {
+		writeStubJSON(w, map[string]any{"meta": counts.Meta()})
 	})
 	mux.HandleFunc("POST /counts/reset", func(w http.ResponseWriter, r *http.Request) {
 		counts.Reset()
@@ -97,10 +130,12 @@ func handleMCP(w http.ResponseWriter, r *http.Request, counts *MCPCounts) {
 	result, rpcErr := dispatchMCP(req)
 	if rpcErr == nil && req.Method == "tools/call" {
 		var params struct {
-			Name string `json:"name"`
+			Name string         `json:"name"`
+			Meta map[string]any `json:"_meta"`
 		}
 		if json.Unmarshal(req.Params, &params) == nil {
 			counts.Add(params.Name)
+			counts.RecordMeta(params.Name, params.Meta)
 		}
 	}
 	if rpcErr != nil {

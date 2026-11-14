@@ -6,9 +6,41 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// toolDirectiveRE matches one scripted call in a prompt:
+//
+//	tool: plugin_inline_echo {"text":"hi"}
+//
+// The e2e suite needs deterministic calls to plugin tools whose names and
+// arguments it chooses, which the automatic MCP flow cannot express.
+var toolDirectiveRE = regexp.MustCompile(`(?m)^[ \t]*tool:[ \t]*(\S+)[ \t]*(.*)$`)
+
+// directive is one scripted tool call from the first user message.
+type directive struct {
+	name string
+	args string
+}
+
+// parseDirectives reads the scripted calls of a prompt in order.
+func parseDirectives(prompt string) []directive {
+	matches := toolDirectiveRE.FindAllStringSubmatch(prompt, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]directive, 0, len(matches))
+	for _, match := range matches {
+		args := strings.TrimSpace(match[2])
+		if args == "" {
+			args = "{}"
+		}
+		out = append(out, directive{name: match[1], args: args})
+	}
+	return out
+}
 
 type llmFunctionCall struct {
 	Name      string `json:"name"`
@@ -89,7 +121,24 @@ func handleLLM(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	directives := parseDirectives(firstUser)
+	answered := 0
+	for _, msg := range req.Messages {
+		if msg.Role == "tool" {
+			answered++
+		}
+	}
 	switch {
+	case len(directives) > 0 && answered < len(directives):
+		next := directives[answered]
+		calls = []llmToolCall{{
+			ID:       fmt.Sprintf("call_stub_plugin_%d", answered),
+			Type:     "function",
+			Function: llmFunctionCall{Name: next.name, Arguments: next.args},
+		}}
+		finish = "tool_calls"
+	case len(directives) > 0:
+		content = "Completed. " + summarize(firstUser)
 	case mcpTool != "":
 		args, _ := json.Marshal(map[string]string{"text": "hello from mayfly"})
 		calls = []llmToolCall{{

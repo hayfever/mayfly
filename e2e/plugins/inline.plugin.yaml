@@ -1,0 +1,20 @@
+schemaVersion: 1
+name: inline
+version: 0.1.0
+description: Deterministic inline plugin for the end-to-end suite.
+placement: inline
+image: PLUGIN_IMAGE
+command: node
+args: [server.js]
+env:
+  E2E_MODE: inline
+  E2E_INLINE_ENV: inline-value
+  E2E_TOOLS: echo,env,slow
+tools:
+  - name: echo
+    idempotent: true
+  - name: env
+    idempotent: true
+  - name: slow
+    idempotent: false
+    timeout: 150s

@@ -47,6 +47,10 @@ config:
       - name: echo
         transport: http
         url: http://mcpstub:9100/mcp
+  plugins:
+    # The service fixture is created at startup; a short interval keeps a
+    # reconciliation delay out of the service tests.
+    reconcile_interval: 10s
   triggers:
     - name: generic
       type: generic

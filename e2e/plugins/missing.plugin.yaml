@@ -1,0 +1,11 @@
+schemaVersion: 1
+name: missing
+version: 0.1.0
+description: An image without /mayfly-plugin, so the copy init container fails.
+placement: inline
+image: PLUGIN_MISSING_IMAGE
+command: node
+args: [server.js]
+tools:
+  - name: echo
+    idempotent: true
