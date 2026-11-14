@@ -135,13 +135,13 @@ func TestShimCopyMissingDirectory(t *testing.T) {
 	}
 }
 
-func TestShimRejectsUnimplementedSubcommands(t *testing.T) {
+func TestShimSubcommandUsage(t *testing.T) {
 	for _, sub := range []string{"serve", "probe"} {
 		var stderr bytes.Buffer
 		if code := run([]string{sub}, &stderr); code != 2 {
 			t.Fatalf("%s exit = %d, want 2", sub, code)
 		}
-		if !strings.Contains(stderr.String(), "not implemented") {
+		if !strings.Contains(stderr.String(), "--listen") {
 			t.Fatalf("%s stderr = %q", sub, stderr.String())
 		}
 	}

@@ -1,6 +1,7 @@
 // Command mayfly-plugin-shim stages plugins into a session pod and adapts a
-// stdio plugin to the transports Mayfly uses. This command implements the
-// file operations; serve and probe arrive with the sidecar transport.
+// stdio plugin to the transports Mayfly uses: it copies plugin trees into the
+// pod, and it serves one stdio plugin over streamable HTTP for the shim's
+// clients.
 package main
 
 import (
@@ -53,11 +54,10 @@ func run(args []string, stderr io.Writer) int {
 			return 1
 		}
 		return 0
-	case "serve", "probe":
-		// WP11 implements both. Until then the command must fail loudly, so a
-		// pod that expects them does not look healthy.
-		fmt.Fprintf(stderr, "mayfly-plugin-shim: %s: not implemented\n", args[0])
-		return 2
+	case "serve":
+		return runServe(args[1:], stderr)
+	case "probe":
+		return runProbe(args[1:], stderr)
 	default:
 		usage(stderr)
 		return 2
@@ -66,7 +66,9 @@ func run(args []string, stderr io.Writer) int {
 
 func usage(w io.Writer) {
 	fmt.Fprint(w, "usage: mayfly-plugin-shim install-self <dst>\n"+
-		"       mayfly-plugin-shim copy <src> <dst>\n")
+		"       mayfly-plugin-shim copy <src> <dst>\n"+
+		"       mayfly-plugin-shim serve --listen unix:PATH|tcp:ADDR --key-file FILE [--session ID] [--max-concurrency N] [--init-timeout D] -- COMMAND [ARG...]\n"+
+		"       mayfly-plugin-shim probe --listen unix:PATH|tcp:ADDR [--timeout D]\n")
 }
 
 // installSelf copies the running executable to dst. The tools image is a
