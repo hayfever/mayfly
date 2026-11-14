@@ -69,8 +69,33 @@ agents:
 | `maxHistoryMessages` | Messages sent to the model |
 | `runtime` | Optional harness image, command, environment, and harness-specific config |
 | `default` | At most one agent across all manifests may be default |
+| `schedules` | Scheduled source runs bound to this agent. See [sources.md](sources.md) |
 
 Unknown fields are rejected. Duplicate agent names are rejected. `default` is reserved for the built-in agent.
+
+## Schedules
+
+A schedule runs a source chain on a cron expression and starts one session when the result is material:
+
+```yaml
+agents:
+  - name: competitor-watch
+    systemPrompt: ...
+    schedules:
+      - name: competitor-watch
+        cron: "0 7 * * *"
+        source: competitor-pages
+        ttl: 30m
+        triggerOn: [changed]
+        optionalEnv: [WATCH_CONTEXT]
+        context: '{{ env "WATCH_CONTEXT" }}'
+        title: "Competitor watch {{ .Date }}"
+        prompt: |
+          {{ range .Changes }}{{ .Name }} {{ .Label }}
+          {{ .Diff }}{{ end }}
+```
+
+A schedule names a source from the same bundle, a five-field cron expression in UTC, and the prompt the session receives. The control plane writes a run artifact for every run and starts a session only when the change totals match `triggerOn`. A schedule template can call `env` only for a variable listed in the schedule's `requiredEnv` or `optionalEnv`; anything else fails at startup. Sources, connections, the environment allowlist, and prompt data are documented in [sources.md](sources.md).
 
 ## Harness selection
 

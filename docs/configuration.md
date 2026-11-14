@@ -179,6 +179,29 @@ agents:
 
 Agent manifests and selection are documented in [agents.md](agents.md). The built-in `default` agent uses the global model, skill, MCP, and limit settings. Manifest agents can select a named in-image `harness`, and can set a `runtime` image, command, args, env, and harness config.
 
+## sources
+
+```yaml
+sources:
+  state_path: /var/lib/mayfly/schedule.db
+  max_artifact_bytes: 16777216
+  concurrency: 4
+  timeout: 15m
+  job_timeout: 30m
+```
+
+| Key | Meaning |
+|---|---|
+| `state_path` | bbolt file that records the last accepted slot for each schedule. Empty keeps it in memory |
+| `max_artifact_bytes` | Cap for one run artifact. Default 16 MiB |
+| `concurrency` | Parallel fanout requests per source. Default `1`; the shipped configs set `4` |
+| `timeout` | Deadline for one source step, every page and fanout request included. Default `15m` |
+| `job_timeout` | Deadline for one schedule job: every source step plus session creation. Default `30m`. Must be at least `timeout` |
+
+Other queue jobs, such as webhook deliveries, have a 5 minute deadline. The worker renews a job's lease every third of `queue.visibility_timeout` while the job runs, so a job longer than the visibility timeout is not handed to a second worker.
+
+Set `state_path` on the control plane's PersistentVolume. Without it a restart loses the slot watermark and the catch-up window. Connection headers and request templates read provider credentials from the control-plane environment, for example through `envFrom` on the Deployment. A template can read only the variables its connection, source, or schedule declares in `requiredEnv` or `optionalEnv`. `MAYFLY_*` variables and every secret this file names (`server.token_env`, `llm.api_key_env`, `env:` headers, S3 keys, the Redis password, trigger secrets) are never readable. See [sources.md](sources.md).
+
 ## skills
 
 | Key | Meaning |
