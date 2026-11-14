@@ -1,7 +1,7 @@
 # Freeze the server into /mayfly-plugin/server, so the plugin image runs on
 # any base. Mayfly never runs the image entrypoint, so the final stage can be
 # FROM scratch.
-FROM python:3.12-slim-bookworm AS build
+FROM python:3.15-slim-bookworm AS build
 WORKDIR /src
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt pyinstaller
