@@ -254,6 +254,28 @@ func (s *boltStore) Release(_ context.Context, lease Lease, after time.Duration)
 	})
 }
 
+func (s *boltStore) Extend(_ context.Context, lease Lease, ttl time.Duration) (Lease, error) {
+	deadline := time.Now().UTC().Add(ttl)
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(bucketJobs).Get([]byte(lease.ID)) == nil {
+			return ErrLeaseLost
+		}
+		ready := tx.Bucket(bucketReady)
+		if !holdsLease(ready, lease) {
+			return ErrLeaseLost
+		}
+		if err := ready.Delete(readyKey(lease.Deadline, lease.ID)); err != nil {
+			return err
+		}
+		return ready.Put(readyKey(deadline, lease.ID), nil)
+	})
+	if err != nil {
+		return lease, err
+	}
+	lease.Deadline = deadline
+	return lease, nil
+}
+
 func (s *boltStore) Get(_ context.Context, id string) (Record, bool, error) {
 	now := time.Now().UTC()
 	var record Record

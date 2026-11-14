@@ -24,6 +24,28 @@ type Worker struct {
 	free        func() int
 	poll        time.Duration
 	timeout     time.Duration
+	timeouts    map[Kind]time.Duration
+}
+
+// DefaultJobTimeout bounds one handler call when no per-kind timeout is set.
+const DefaultJobTimeout = 5 * time.Minute
+
+// SetTimeout bounds handler calls for jobs of one kind. Source jobs fetch and
+// diff external pages before they create a session, so they usually need
+// longer than session jobs. A non-positive d restores the default.
+func (w *Worker) SetTimeout(kind Kind, d time.Duration) {
+	if d <= 0 {
+		delete(w.timeouts, kind)
+		return
+	}
+	w.timeouts[kind] = d
+}
+
+func (w *Worker) timeoutFor(job Job) time.Duration {
+	if d, ok := w.timeouts[job.JobKind()]; ok {
+		return d
+	}
+	return w.timeout
 }
 
 // NewWorker builds a worker. free reports how many sessions may start now; nil
@@ -42,7 +64,8 @@ func NewWorker(store Store, handler Handler, concurrency int, free func() int, p
 		concurrency: concurrency,
 		free:        free,
 		poll:        poll,
-		timeout:     5 * time.Minute,
+		timeout:     DefaultJobTimeout,
+		timeouts:    map[Kind]time.Duration{},
 	}
 }
 
@@ -118,9 +141,11 @@ func (w *Worker) Run(ctx context.Context) {
 
 func (w *Worker) handle(ctx context.Context, lease Lease) {
 	// Keep working on shutdown: a half-created session is worse than a slow one.
-	jobCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.timeout)
+	jobCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.timeoutFor(lease.Job))
 	defer cancel()
+	stopHeartbeat := w.heartbeat(jobCtx, lease)
 	result, err := w.handler(jobCtx, lease.Job)
+	lease = stopHeartbeat()
 
 	settleCtx, settleCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer settleCancel()
@@ -139,6 +164,59 @@ func (w *Worker) handle(ctx context.Context, lease Lease) {
 		if nackErr := w.store.Nack(settleCtx, lease, err); nackErr != nil {
 			w.logger.Warn("queue nack failed", "job", lease.ID, "error", nackErr)
 		}
+	}
+}
+
+// heartbeat renews the lease while the handler runs, so a job that takes
+// longer than the visibility timeout is not claimed again mid-flight. The
+// returned stop function ends renewal and hands back the latest lease, which
+// the caller must use to settle the job.
+func (w *Worker) heartbeat(ctx context.Context, lease Lease) func() Lease {
+	ttl := time.Until(lease.Deadline)
+	if ttl <= 0 {
+		return func() Lease { return lease }
+	}
+	interval := ttl / 3
+	var mu sync.Mutex
+	current := lease
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			mu.Lock()
+			held := current
+			mu.Unlock()
+			extendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), interval)
+			renewed, err := w.store.Extend(extendCtx, held, ttl)
+			cancel()
+			if err != nil {
+				w.logger.Warn("queue lease renewal failed", "job", lease.ID, "error", err)
+				if errors.Is(err, ErrLeaseLost) {
+					return
+				}
+				continue
+			}
+			mu.Lock()
+			current = renewed
+			mu.Unlock()
+		}
+	}()
+	return func() Lease {
+		close(stop)
+		<-done
+		mu.Lock()
+		defer mu.Unlock()
+		return current
 	}
 }
 

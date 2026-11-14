@@ -164,6 +164,18 @@ func (s *memoryStore) Release(_ context.Context, lease Lease, after time.Duratio
 	return nil
 }
 
+func (s *memoryStore) Extend(_ context.Context, lease Lease, ttl time.Duration) (Lease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.jobs[lease.ID]
+	if !ok || entry.done || entry.dead || !entry.readyAt.Equal(lease.Deadline) {
+		return lease, ErrLeaseLost
+	}
+	entry.readyAt = time.Now().UTC().Add(ttl)
+	lease.Deadline = entry.readyAt
+	return lease, nil
+}
+
 func (s *memoryStore) Get(_ context.Context, id string) (Record, bool, error) {
 	now := time.Now().UTC()
 	s.mu.Lock()

@@ -611,3 +611,40 @@ func TestStoreExpiresDoneTombstones(t *testing.T) {
 		})
 	}
 }
+
+func TestStoreExtendKeepsLease(t *testing.T) {
+	for name, store := range backends(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			if err := store.Accept(ctx, testJob("extend")); err != nil {
+				t.Fatal(err)
+			}
+			lease := claimOne(t, store)
+			// Renew past the 50ms visibility timeout twice.
+			for i := 0; i < 2; i++ {
+				time.Sleep(30 * time.Millisecond)
+				renewed, err := store.Extend(ctx, lease, 50*time.Millisecond)
+				if err != nil {
+					t.Fatalf("extend %d = %v", i, err)
+				}
+				lease = renewed
+			}
+			time.Sleep(30 * time.Millisecond)
+			if leases, _ := store.Claim(ctx, 10); len(leases) != 0 {
+				t.Fatalf("renewed job was claimed again: %+v", leases)
+			}
+			if err := store.Release(ctx, lease, 0); err != nil {
+				t.Fatalf("release with renewed lease = %v", err)
+			}
+			stale := claimOne(t, store)
+			time.Sleep(80 * time.Millisecond)
+			current := claimOne(t, store)
+			if _, err := store.Extend(ctx, stale, time.Second); !errors.Is(err, ErrLeaseLost) {
+				t.Fatalf("stale extend = %v, want ErrLeaseLost", err)
+			}
+			if err := store.Ack(ctx, current, Result{}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

@@ -58,7 +58,7 @@ Properties:
 - Correlation: the job id is stored on the session (`trigger.job_id`), and the queue keeps a completed record for `queue.tombstone_ttl`, so either side can be found from the other.
 - Dead letters: a job that exhausts `queue.max_attempts` is buried with its last error. `GET /api/v1/queue/dead` lists buried jobs; the admin API can retry or delete them.
 - Crash safety: `bbolt` and `redis` survive a control-plane restart. The `memory` backend does not.
-- Deferred: lease renewal. `queue.visibility_timeout` is still a duration guess; a heartbeat on the store would turn it into a crash detector and is required before running more than one replica against a shared Redis. It is not implemented in 0.1.
+- Lease renewal: while a handler runs, the worker extends its lease every third of `queue.visibility_timeout` (`Store.Extend`), so `visibility_timeout` detects a crashed worker instead of bounding job length. Each handler has its own deadline: `sources.job_timeout` for schedule jobs, 5 minutes for other kinds. A renewal that fails leaves the old lease to expire, and settling with a lease another worker now holds is rejected.
 
 ## Lifecycle
 
