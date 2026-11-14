@@ -130,6 +130,46 @@ func TestHTTPClientAndAuth(t *testing.T) {
 	}
 }
 
+func TestHTTPWithClientHeaders(t *testing.T) {
+	var got http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		stub.MCPHandler().ServeHTTP(w, r)
+	}))
+	defer server.Close()
+
+	transport := &headerTransport{base: http.DefaultTransport}
+	client := NewHTTPWithClient("remote", server.URL+"/mcp",
+		map[string]string{"X-Plugin": "a"}, &http.Client{Transport: transport},
+		func(r *http.Request) { r.Header.Set("X-Hook", "b") })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got.Get("X-Plugin") != "a" {
+		t.Fatalf("X-Plugin = %q", got.Get("X-Plugin"))
+	}
+	if got.Get("X-Hook") != "b" {
+		t.Fatalf("X-Hook = %q", got.Get("X-Hook"))
+	}
+	if got.Get("X-Client") != "custom" {
+		t.Fatalf("given client was not used: X-Client = %q", got.Get("X-Client"))
+	}
+	if got.Get("Authorization") != "" {
+		t.Fatalf("Authorization = %q, want none", got.Get("Authorization"))
+	}
+}
+
+// headerTransport marks every request so a test can see that the client it
+// built was the one that ran.
+type headerTransport struct{ base http.RoundTripper }
+
+func (t *headerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r.Header.Set("X-Client", "custom")
+	return t.base.RoundTrip(r)
+}
+
 func TestDecodeSSE(t *testing.T) {
 	stream := "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n"
 	raw, err := decodeSSE(strings.NewReader(stream), 1)

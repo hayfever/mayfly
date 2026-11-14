@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -69,7 +70,8 @@ type Tool struct {
 	RemoteName  string          `json:"-"`
 }
 
-// NewStdio starts and returns an uninitialized stdio client.
+// NewStdio starts and returns an uninitialized stdio client. The server
+// inherits the agent's environment, with env applied on top.
 func NewStdio(ctx context.Context, name, command string, args []string, env map[string]string) (*Client, error) {
 	t, err := newStdioTransport(ctx, command, args, env)
 	if err != nil {
@@ -78,9 +80,32 @@ func NewStdio(ctx context.Context, name, command string, args []string, env map[
 	return &Client{name: name, transport: t}, nil
 }
 
+// NewStdioExact is NewStdio with a complete environment: env is the whole
+// process environment, and dir is the working directory.
+func NewStdioExact(ctx context.Context, name, command string, args, env []string, dir string, stderr io.Writer) (*Client, error) {
+	t, err := newStdioTransportExact(ctx, command, args, env, dir, stderr)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{name: name, transport: t}, nil
+}
+
 // NewHTTP returns an uninitialized Streamable HTTP client.
 func NewHTTP(name, url, token string, headers map[string]string) *Client {
-	return &Client{name: name, transport: newHTTPTransport(url, token, headers)}
+	var perRequest func(*http.Request)
+	if token != "" {
+		perRequest = func(r *http.Request) {
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
+	return NewHTTPWithClient(name, url, headers, defaultHTTPClient(), perRequest)
+}
+
+// NewHTTPWithClient returns an uninitialized Streamable HTTP client that uses
+// client for every request. perRequest can change each request, for example to
+// add a credential the client's transport does not know.
+func NewHTTPWithClient(name, url string, headers map[string]string, client *http.Client, perRequest func(*http.Request)) *Client {
+	return &Client{name: name, transport: newHTTPTransport(url, headers, client, perRequest)}
 }
 
 // Initialize performs the MCP handshake.
@@ -93,7 +118,7 @@ func (c *Client) Initialize(ctx context.Context) error {
 			"version": version.Version,
 		},
 	}
-	if _, err := c.call(ctx, "initialize", params); err != nil {
+	if _, _, err := c.call(ctx, "initialize", params); err != nil {
 		return fmt.Errorf("%s: initialize: %w", c.name, err)
 	}
 	notify, err := json.Marshal(rpcRequest{JSONRPC: "2.0", Method: "notifications/initialized"})
@@ -115,7 +140,7 @@ func (c *Client) ListTools(ctx context.Context) ([]Tool, error) {
 		if cursor != "" {
 			params["cursor"] = cursor
 		}
-		raw, err := c.call(ctx, "tools/list", params)
+		raw, _, err := c.call(ctx, "tools/list", params)
 		if err != nil {
 			return nil, err
 		}
@@ -140,15 +165,27 @@ func (c *Client) ListTools(ctx context.Context) ([]Tool, error) {
 
 // CallTool invokes a tool and flattens its content into text.
 func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage) (string, bool, error) {
+	out, isErr, _, err := c.CallToolMeta(ctx, name, args, nil)
+	return out, isErr, err
+}
+
+// CallToolMeta is CallTool with request metadata. The _meta field is omitted
+// when meta is nil. The returned id is the JSON-RPC id of the request, which
+// Cancel accepts.
+func (c *Client) CallToolMeta(ctx context.Context, name string, args json.RawMessage, meta map[string]any) (string, bool, int64, error) {
 	if len(args) == 0 {
 		args = json.RawMessage(`{}`)
 	}
-	raw, err := c.call(ctx, "tools/call", map[string]any{
+	params := map[string]any{
 		"name":      name,
 		"arguments": args,
-	})
+	}
+	if meta != nil {
+		params["_meta"] = meta
+	}
+	raw, id, err := c.call(ctx, "tools/call", params)
 	if err != nil {
-		return "", false, err
+		return "", false, id, err
 	}
 	var result struct {
 		Content           []json.RawMessage `json:"content"`
@@ -156,7 +193,7 @@ func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage
 		IsError           bool              `json:"isError"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return "", false, fmt.Errorf("%s: decode tools/call: %w", c.name, err)
+		return "", false, id, fmt.Errorf("%s: decode tools/call: %w", c.name, err)
 	}
 	var parts []string
 	for _, item := range result.Content {
@@ -185,13 +222,39 @@ func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage
 	if len(parts) == 0 {
 		parts = append(parts, string(raw))
 	}
-	return strings.Join(parts, "\n"), result.IsError, nil
+	return strings.Join(parts, "\n"), result.IsError, id, nil
+}
+
+// Cancel tells the server that it will not receive a result for the request
+// with the given id.
+func (c *Client) Cancel(ctx context.Context, id int64, reason string) error {
+	if id == 0 {
+		return nil
+	}
+	payload, err := json.Marshal(rpcRequest{
+		JSONRPC: "2.0",
+		Method:  "notifications/cancelled",
+		Params:  map[string]any{"requestId": id, "reason": reason},
+	})
+	if err != nil {
+		return err
+	}
+	return c.transport.Notify(ctx, payload)
+}
+
+// Exited reports the end of a stdio server process. It is nil for clients
+// whose server is not a process this client started.
+func (c *Client) Exited() <-chan struct{} {
+	if w, ok := c.transport.(interface{ Exited() <-chan struct{} }); ok {
+		return w.Exited()
+	}
+	return nil
 }
 
 // Close shuts down the transport.
 func (c *Client) Close() error { return c.transport.Close() }
 
-func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, int64, error) {
 	c.mu.Lock()
 	c.nextID++
 	id := c.nextID
@@ -199,23 +262,23 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 
 	payload, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params})
 	if err != nil {
-		return nil, err
+		return nil, id, err
 	}
 	raw, err := c.transport.Do(ctx, id, payload)
 	if err != nil {
-		return nil, err
+		return nil, id, err
 	}
 	var resp rpcResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+		return nil, id, fmt.Errorf("decode response: %w", err)
 	}
 	if resp.Error != nil {
-		return nil, resp.Error
+		return nil, id, resp.Error
 	}
 	if len(resp.Result) == 0 {
-		return nil, errors.New("response has no result")
+		return nil, id, errors.New("response has no result")
 	}
-	return resp.Result, nil
+	return resp.Result, id, nil
 }
 
 // tailBuffer keeps the last bytes written to it.
