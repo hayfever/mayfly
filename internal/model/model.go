@@ -84,6 +84,7 @@ const (
 type Event struct {
 	Seq       int64          `json:"seq"`
 	SessionID string         `json:"session_id,omitempty"`
+	StepKey   string         `json:"step_key,omitempty"`
 	Time      time.Time      `json:"time"`
 	Type      EventType      `json:"type"`
 	Actor     string         `json:"actor,omitempty"`
