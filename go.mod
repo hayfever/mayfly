@@ -11,6 +11,7 @@ require (
 	github.com/aws/smithy-go v1.28.9
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/redis/go-redis/v9 v9.23.0
+	github.com/robfig/cron/v3 v3.0.1
 	go.etcd.io/bbolt v1.5.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.37.2

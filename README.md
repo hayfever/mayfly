@@ -211,7 +211,7 @@ Read [docs/security.md](docs/security.md) before exposing the platform beyond lo
 
 ## Extending
 
-- **Agent:** add a manifest under `agents.dirs`; see [docs/agents.md](docs/agents.md). Use a custom image only for a different harness.
+- **Agent:** add a manifest under `agents.dirs`; see [docs/agents.md](docs/agents.md). Use a custom image only for a different harness. On Kubernetes, put your own bundles in the `mayfly-bundles` ConfigMap: `make cluster-up` and `make deploy` regenerate `mayfly-agents` and would drop them. See [docs/deployment.md](docs/deployment.md).
 - **Artifact store:** implement `artifact.Store` in [internal/artifact](internal/artifact). Local and S3-compatible are included. GCS native API and Artifact Registry are not implemented.
 - **Execution backend:** implement `runner.Runner` in [internal/runner](internal/runner).
 - **Trigger:** add a verifier and prompt builder in [internal/triggers](internal/triggers).

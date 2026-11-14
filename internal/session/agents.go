@@ -2,13 +2,19 @@ package session
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
 	"path"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/hayfever/mayfly/internal/agents"
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/hub"
+	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/project"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
@@ -47,25 +53,36 @@ func (m *Manager) loadAgents() error {
 	m.agentByName = map[string]agents.Agent{"default": builtin}
 	m.defaultAgent = "default"
 
-	loaded, err := agents.LoadDirs(m.cfg.Agents.Dirs)
-	if err != nil {
-		return err
+	if m.bundle == nil {
+		return nil
 	}
-	for _, agent := range loaded {
+	for _, agent := range m.bundle.Agents {
 		if agent.Name == "default" {
 			return fmt.Errorf("%s: agent name %q is reserved for the built-in agent", agent.Source, agent.Name)
 		}
 		if agent.Model != "" && !m.cfg.LLM.ModelAllowed(agent.Model) {
 			return fmt.Errorf("%s: agent %q uses model %q, which is not allowed", agent.Source, agent.Name, agent.Model)
 		}
-		for _, name := range agent.Skills {
-			if _, ok := m.skillByName[name]; !ok {
-				return fmt.Errorf("%s: agent %q references unknown skill %q", agent.Source, agent.Name, name)
+		if agent.Skills != nil {
+			for _, name := range *agent.Skills {
+				skill, ok := m.skillByName[name]
+				if !ok {
+					return fmt.Errorf("%s: agent %q references unknown skill %q", agent.Source, agent.Name, name)
+				}
+				if !scopeVisible(skill.Scope, agent.Name) {
+					return fmt.Errorf("%s: agent %q references skill %q from another scope", agent.Source, agent.Name, name)
+				}
 			}
 		}
-		for _, name := range agent.MCPServers {
-			if _, ok := m.mcpByName[name]; !ok {
-				return fmt.Errorf("%s: agent %q references unknown MCP server %q", agent.Source, agent.Name, name)
+		if agent.MCPServers != nil {
+			for _, name := range *agent.MCPServers {
+				server, ok := m.mcpByName[name]
+				if !ok {
+					return fmt.Errorf("%s: agent %q references unknown MCP server %q", agent.Source, agent.Name, name)
+				}
+				if !scopeVisible(server.Scope, agent.Name) {
+					return fmt.Errorf("%s: agent %q references MCP server %q from another scope", agent.Source, agent.Name, name)
+				}
 			}
 		}
 		if agent.Runtime.Image != "" && !imageAllowed(agent.Runtime.Image, m.cfg.Agents.AllowedImages) {
@@ -76,13 +93,32 @@ func (m *Manager) loadAgents() error {
 				return fmt.Errorf("%s: agent %q runtime.env must not set %s; the control plane injects it into every session", agent.Source, agent.Name, name)
 			}
 		}
-		if agent.Default {
-			m.defaultAgent = agent.Name
-		}
 		m.agentByName[agent.Name] = agent
 		m.agents = append(m.agents, agent)
 	}
+	if m.bundle.Default != "" {
+		m.defaultAgent = m.bundle.Default
+	}
+	for _, skill := range m.skills {
+		if strings.HasPrefix(skill.Scope, "agent:") {
+			owner := strings.TrimPrefix(skill.Scope, "agent:")
+			if _, ok := m.agentByName[owner]; !ok {
+				return fmt.Errorf("skill %q is private to unknown agent %q", skill.Name, owner)
+			}
+		}
+	}
+	for _, name := range m.cfg.Skills.Default {
+		skill := m.skillByName[name]
+		if strings.HasPrefix(skill.Scope, "agent:") {
+			return fmt.Errorf("skills.default names private skill %q", name)
+		}
+	}
 	return nil
+}
+
+// scopeVisible reports whether an agent may use a definition with this scope.
+func scopeVisible(scope, agent string) bool {
+	return scope == "" || scope == "shared" || scope == "agent:"+agent
 }
 
 // Agents returns every selectable agent with effective defaults.
@@ -105,13 +141,13 @@ func (m *Manager) agentInfo(agent agents.Agent) AgentInfo {
 	if modelName == "" {
 		modelName = m.cfg.LLM.Model
 	}
-	skillNames := agent.Skills
-	if len(skillNames) == 0 {
-		skillNames = m.defaultSkill
+	skillNames := m.defaultSkill
+	if agent.Skills != nil {
+		skillNames = *agent.Skills
 	}
-	mcpNames := agent.MCPServers
-	if len(mcpNames) == 0 {
-		mcpNames = m.defaultMCP
+	mcpNames := m.defaultMCP
+	if agent.MCPServers != nil {
+		mcpNames = *agent.MCPServers
 	}
 	image := agent.Runtime.Image
 	if image == "" {
@@ -215,4 +251,25 @@ type promptData struct {
 	Model     string
 	Trigger   model.TriggerInfo
 	Now       time.Time
+}
+
+// Validate runs the startup checks New runs on the configuration and bundle,
+// without starting anything: skills load and resolve, every agent's model is
+// allowed, and every skill, MCP server, image, and runtime.env it names
+// exists and is visible to it. mayflyd -check calls it so a bundle that would
+// stop the control plane fails the check too.
+func Validate(cfg *config.Config, bundle *project.Bundle) error {
+	_, err := New(cfg, bundle, nil, hub.New(1), journal.NewMemory(), nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		return err
+	}
+	if bundle == nil {
+		return nil
+	}
+	for _, schedule := range bundle.Schedules {
+		if _, ok := bundle.Agent(schedule.Agent); !ok {
+			return fmt.Errorf("schedule %q: agent %q is not defined", schedule.Name, schedule.Agent)
+		}
+	}
+	return nil
 }

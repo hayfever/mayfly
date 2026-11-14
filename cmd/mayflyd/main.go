@@ -22,6 +22,7 @@ import (
 	"github.com/hayfever/mayfly/internal/hub"
 	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/k8s"
+	"github.com/hayfever/mayfly/internal/project"
 	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/runner"
 	"github.com/hayfever/mayfly/internal/session"
@@ -31,6 +32,7 @@ import (
 func main() {
 	configPath := flag.String("config", envOr("MAYFLY_CONFIG", "config.yaml"), "path to config.yaml")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	checkBundle := flag.Bool("check", false, "load the config and project bundle, print the resolved plans, and exit")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version.String())
@@ -45,6 +47,26 @@ func main() {
 		logger.Error("load config", "error", err)
 		os.Exit(2)
 	}
+	bundle, err := project.Load(cfg.Agents.Dirs, project.Options{
+		Concurrency: cfg.Sources.Concurrency,
+		Timeout:     cfg.Sources.Timeout.Std(),
+		DeniedEnv:   cfg.SecretEnvNames(),
+	})
+	if err != nil {
+		logger.Error("load project bundle", "error", err)
+		os.Exit(2)
+	}
+	if *checkBundle {
+		// The same agent, model, skill, and MCP checks the session manager
+		// runs at startup, so a clean check means the control plane starts.
+		if err := session.Validate(cfg, bundle); err != nil {
+			logger.Error("validate agents", "error", err)
+			os.Exit(2)
+		}
+		fmt.Print(bundle.Describe())
+		return
+	}
+
 	if cfg.AdminToken == "" {
 		buf := make([]byte, 24)
 		if _, err := rand.Read(buf); err != nil {
@@ -112,7 +134,7 @@ func main() {
 	}
 
 	h := hub.New(cfg.Sessions.EventBuffer)
-	mgr, err := session.New(cfg, store, h, journalStore, sessionRunner, kube, logger)
+	mgr, err := session.New(cfg, bundle, store, h, journalStore, sessionRunner, kube, logger)
 	if err != nil {
 		logger.Error("create session manager", "error", err)
 		os.Exit(2)

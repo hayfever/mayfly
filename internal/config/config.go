@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -48,6 +49,7 @@ type Config struct {
 	Skills    SkillsConfig    `yaml:"skills"`
 	MCP       MCPConfig       `yaml:"mcp"`
 	Agents    AgentsConfig    `yaml:"agents"`
+	Sources   SourcesConfig   `yaml:"sources"`
 	Queue     QueueConfig     `yaml:"queue"`
 	Journal   JournalConfig   `yaml:"journal"`
 	Triggers  []TriggerConfig `yaml:"triggers"`
@@ -214,6 +216,28 @@ type AgentsConfig struct {
 	AllowedImages []string `yaml:"allowed_images"`
 }
 
+// SourcesConfig controls scheduled source runs. Project bundles declare the
+// connections and sources; this section only covers process-wide limits and
+// where the schedule watermark is kept.
+type SourcesConfig struct {
+	// StatePath is the bbolt file that stores the last completed schedule
+	// slot. An empty path keeps the watermark in memory.
+	StatePath string `yaml:"state_path"`
+	// MaxArtifactBytes bounds the payload one source run may write.
+	MaxArtifactBytes int64 `yaml:"max_artifact_bytes"`
+	// Concurrency bounds in-flight HTTP requests within one run.
+	Concurrency int `yaml:"concurrency"`
+	// Timeout bounds one source step: every request it sends, with retries.
+	// A fanout step that reaches it keeps the pages it already fetched and
+	// reports the rest as item errors. Each request is also bounded by its
+	// connection's timeout.
+	Timeout Duration `yaml:"timeout"`
+	// JobTimeout bounds one whole source job: every fetch, the run artifact,
+	// and the session it creates. The queue lease is renewed while the job
+	// runs, so this may exceed queue.visibility_timeout.
+	JobTimeout Duration `yaml:"job_timeout"`
+}
+
 // MCPConfig lists MCP servers that sessions can use.
 type MCPConfig struct {
 	Servers []MCPServerConfig `yaml:"servers"`
@@ -232,6 +256,9 @@ type MCPServerConfig struct {
 	Headers     map[string]string `yaml:"headers"`
 	OptIn       bool              `yaml:"opt_in"`
 	InitTimeout Duration          `yaml:"init_timeout"`
+	// Scope is "shared" or "agent:<name>". A private server is available only
+	// to its owner, and never included in defaults.
+	Scope string `yaml:"scope"`
 
 	ResolvedHeaders map[string]string `yaml:"-"`
 }
@@ -346,6 +373,12 @@ func Default() *Config {
 		},
 		Skills: SkillsConfig{},
 		MCP:    MCPConfig{},
+		Sources: SourcesConfig{
+			MaxArtifactBytes: 16 << 20,
+			Concurrency:      4,
+			Timeout:          Duration(15 * time.Minute),
+			JobTimeout:       Duration(30 * time.Minute),
+		},
 		Queue: QueueConfig{
 			Backend:           "memory",
 			MaxJobs:           1000,
@@ -597,6 +630,21 @@ func (c *Config) Validate() error {
 	if c.Sessions.MaxRestarts < 0 {
 		return fmt.Errorf("sessions.max_restarts must not be negative")
 	}
+	if c.Sources.MaxArtifactBytes <= 0 {
+		return fmt.Errorf("sources.max_artifact_bytes must be positive")
+	}
+	if c.Sources.Concurrency <= 0 {
+		return fmt.Errorf("sources.concurrency must be positive")
+	}
+	if c.Sources.Timeout.Std() <= 0 {
+		return fmt.Errorf("sources.timeout must be positive")
+	}
+	if c.Sources.JobTimeout.Std() <= 0 {
+		return fmt.Errorf("sources.job_timeout must be positive")
+	}
+	if c.Sources.Timeout.Std() > c.Sources.JobTimeout.Std() {
+		return fmt.Errorf("sources.timeout must not exceed sources.job_timeout")
+	}
 	for name := range c.Runtime.Env {
 		if sessioncfg.IsReservedEnv(name) {
 			return fmt.Errorf("runtime.env must not set %s; the control plane injects it into every session", name)
@@ -808,4 +856,46 @@ func Bool(p *bool, def bool) bool {
 		return def
 	}
 	return *p
+}
+
+// SecretEnvNames lists the environment variables this configuration reads
+// secrets from: the admin token, the LLM key, artifact store credentials, the
+// queue password, trigger secrets, and env: header references. Project bundle
+// templates may never read them. MAYFLY_* is reserved separately.
+func (c *Config) SecretEnvNames() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	addHeaders := func(headers map[string]string) {
+		for _, value := range headers {
+			if name, ok := strings.CutPrefix(value, "env:"); ok {
+				add(name)
+			}
+		}
+	}
+	add(c.Server.TokenEnv)
+	add(c.LLM.APIKeyEnv)
+	addHeaders(c.LLM.Headers)
+	add(c.Artifacts.S3.AccessKeyEnv)
+	add(c.Artifacts.S3.SecretKeyEnv)
+	add(c.Artifacts.S3.SessionTokenEnv)
+	add(c.Queue.Redis.PasswordEnv)
+	for _, trigger := range c.Triggers {
+		add(trigger.SecretEnv)
+	}
+	for _, source := range c.Skills.Sources {
+		addHeaders(source.Headers)
+	}
+	for _, server := range c.MCP.Servers {
+		addHeaders(server.Headers)
+	}
+	sort.Strings(out)
+	return out
 }

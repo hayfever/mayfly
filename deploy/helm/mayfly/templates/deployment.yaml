@@ -54,6 +54,10 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ $secretName }}
+            {{- with .Values.controlPlane.sourcesSecret }}
+            - secretRef:
+                name: {{ . }}
+            {{- end }}
           env:
             - name: MAYFLY_LOG_LEVEL
               value: {{ default "info" .Values.logLevel | quote }}
@@ -90,6 +94,9 @@ spec:
             - name: agents
               mountPath: /etc/mayfly-agents
               readOnly: true
+            - name: bundles
+              mountPath: /etc/mayfly-bundles
+              readOnly: true
             - name: tmp
               mountPath: /tmp
             - name: state
@@ -104,6 +111,10 @@ spec:
         - name: agents
           configMap:
             name: {{ include "mayfly.agentsConfigMapName" . }}
+        - name: bundles
+          configMap:
+            name: {{ .Values.agents.bundlesConfigMap | default (printf "%s-bundles" (include "mayfly.fullname" .)) }}
+            optional: true
         - name: tmp
           emptyDir:
             sizeLimit: 256Mi
