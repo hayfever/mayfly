@@ -1,0 +1,30 @@
+# docs/plugins.md "Quickstart: a service plugin".
+schemaVersion: 1
+name: tickets
+version: 0.1.0
+placement: service
+image: ghcr.io/acme/mayfly-plugin-tickets:0.3.0
+command: bin/tickets
+env:
+  TICKETS_URL: https://tickets.internal.example.com/api
+  CACHE_TTL: 10m
+secrets:
+  - env: TICKETS_TOKEN
+    secret: mayfly-plugin-tickets
+    key: token
+tools:
+  - name: get_ticket
+    idempotent: true
+  - name: add_comment
+    idempotent: false
+limits:
+  rate: {requests: 30, interval: 1m}
+service:
+  replicas: 2
+  concurrency: 16
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {memory: 256Mi}
+  egress:
+    - cidr: 10.20.0.0/16
+      ports: [443]

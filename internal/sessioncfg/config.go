@@ -6,11 +6,15 @@ package sessioncfg
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
 
 const Version = 1
+
+// envNamePattern is the name rule for a variable a plugin reads.
+var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Environment variables that every session runtime receives from the control
 // plane. Configuration must not set them, so a session cannot be pointed at a
@@ -55,6 +59,63 @@ type MCPServer struct {
 	URL                string            `json:"url,omitempty"`
 	Headers            map[string]string `json:"headers,omitempty"`
 	InitTimeoutSeconds int               `json:"init_timeout_seconds,omitempty"`
+	// Tools is the allowlist of a remote server. An empty list offers every
+	// tool the server reports.
+	Tools []string `json:"tools,omitempty"`
+	// IdempotentTools names the tools that are safe to repeat after a
+	// container restart. Every other tool counts as non-idempotent.
+	IdempotentTools []string `json:"idempotent_tools,omitempty"`
+}
+
+// PluginMaxOutputBytes caps one plugin tool result, as agent.maxToolOutput
+// caps a built-in tool result.
+const PluginMaxOutputBytes = 64 << 10
+
+// Plugin describes one plugin made available to the session. It is the
+// runtime's copy of the manifest: paths, names, and limits, never a secret
+// value. Service plugins carry only the fields a grant can be rebuilt from.
+type Plugin struct {
+	Name               string            `json:"name"`
+	Placement          string            `json:"placement"`         // inline, sidecar, service
+	Image              string            `json:"image,omitempty"`   // pod rebuilds; the runtime ignores it
+	Dir                string            `json:"dir,omitempty"`     // inline
+	Command            string            `json:"command,omitempty"` // inline, sidecar
+	Args               []string          `json:"args,omitempty"`
+	Workdir            string            `json:"workdir,omitempty"` // inline
+	Socket             string            `json:"socket,omitempty"`  // sidecar
+	Required           bool              `json:"required,omitempty"`
+	Env                map[string]string `json:"env,omitempty"`         // inline, sidecar
+	Secrets            []PluginSecret    `json:"secrets,omitempty"`     // inline, sidecar; names only
+	SecretsDir         string            `json:"secrets_dir,omitempty"` // inline
+	Tools              []PluginTool      `json:"tools"`
+	InitTimeoutSeconds int               `json:"init_timeout_seconds"`
+	MaxRestarts        int               `json:"max_restarts,omitempty"` // inline
+	MaxOutputBytes     int               `json:"max_output_bytes"`
+	StderrBytes        int64             `json:"stderr_bytes,omitempty"` // inline
+	Sidecar            *PluginSidecar    `json:"sidecar,omitempty"`      // pod rebuilds
+}
+
+// PluginSidecar is the sidecar container's size and identity.
+type PluginSidecar struct {
+	Requests  map[string]string `json:"requests,omitempty"`
+	Limits    map[string]string `json:"limits,omitempty"`
+	RunAsUser int64             `json:"run_as_user"`
+	Workspace string            `json:"workspace"`
+}
+
+// PluginSecret names the environment variable a plugin reads and where the
+// control plane finds its value. Secret is empty on the local backend.
+type PluginSecret struct {
+	Env    string `json:"env"`
+	Secret string `json:"secret,omitempty"`
+	Key    string `json:"key,omitempty"`
+}
+
+// PluginTool is one tool the grant allows, by its manifest name.
+type PluginTool struct {
+	Name           string `json:"name"` // remote name
+	Idempotent     bool   `json:"idempotent,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
 }
 
 // Config is the full runtime configuration for one session.
@@ -83,6 +144,9 @@ type Config struct {
 	ArtifactMaxBytes   int64          `json:"artifact_max_bytes"`
 	Skills             []Skill        `json:"skills"`
 	MCPServers         []MCPServer    `json:"mcp_servers"`
+	// Plugins are the tools the gateway grants this session. A service plugin
+	// records its manifest so the grant can be rebuilt on adoption.
+	Plugins []Plugin `json:"plugins,omitempty"`
 	// Artifacts are read-only inputs the control plane stored before the
 	// session started. Their keys are the only ones read_artifact accepts.
 	Artifacts    []Artifact `json:"artifacts,omitempty"`
@@ -147,6 +211,96 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("mcp server %q: unsupported transport %q", s.Name, s.Transport)
 		}
+	}
+	return c.validatePlugins()
+}
+
+// validatePlugins checks the plugin grants the runtime trusts. It repeats the
+// manifest rules it depends on instead of importing the manifest package: the
+// runtime must not carry the loader.
+func (c *Config) validatePlugins() error {
+	seen := make(map[string]bool, len(c.Plugins))
+	for i := range c.Plugins {
+		p := &c.Plugins[i]
+		if p.Name == "" {
+			return fmt.Errorf("plugin %d has an empty name", i)
+		}
+		if seen[p.Name] {
+			return fmt.Errorf("duplicate plugin %q", p.Name)
+		}
+		seen[p.Name] = true
+		if err := p.validate(); err != nil {
+			return fmt.Errorf("plugin %q: %w", p.Name, err)
+		}
+	}
+	return nil
+}
+
+// validate checks one plugin entry against its placement.
+func (p *Plugin) validate() error {
+	switch p.Placement {
+	case "inline":
+		if p.Dir == "" {
+			return errors.New("dir is required for an inline plugin")
+		}
+		if p.Command == "" {
+			return errors.New("command is required for an inline plugin")
+		}
+		if p.Workdir == "" {
+			return errors.New("workdir is required for an inline plugin")
+		}
+		if len(p.Secrets) > 0 && p.SecretsDir == "" {
+			return errors.New("secrets_dir is required for an inline plugin with secrets")
+		}
+	case "sidecar":
+		if p.Socket == "" {
+			return errors.New("socket is required for a sidecar plugin")
+		}
+		if p.Command == "" {
+			return errors.New("command is required for a sidecar plugin")
+		}
+		if p.Sidecar == nil {
+			return errors.New("sidecar is required for a sidecar plugin")
+		}
+	case "service":
+		// A service plugin carries only what the grant needs.
+	default:
+		return fmt.Errorf("unsupported placement %q", p.Placement)
+	}
+	if p.InitTimeoutSeconds <= 0 {
+		return errors.New("init_timeout_seconds must be positive")
+	}
+	if p.MaxOutputBytes < 1 || p.MaxOutputBytes > PluginMaxOutputBytes {
+		return fmt.Errorf("max_output_bytes must be in 1..%d", PluginMaxOutputBytes)
+	}
+	if len(p.Tools) == 0 {
+		return errors.New("at least one tool is required")
+	}
+	tools := make(map[string]bool, len(p.Tools))
+	for i, tool := range p.Tools {
+		if tool.Name == "" {
+			return fmt.Errorf("tool %d has an empty name", i)
+		}
+		if tools[tool.Name] {
+			return fmt.Errorf("duplicate tool %q", tool.Name)
+		}
+		tools[tool.Name] = true
+		if tool.TimeoutSeconds <= 0 {
+			return fmt.Errorf("tool %q: timeout_seconds must be positive", tool.Name)
+		}
+	}
+	secrets := make(map[string]bool, len(p.Secrets))
+	for i, secret := range p.Secrets {
+		if IsReservedEnv(secret.Env) {
+			return fmt.Errorf("secret %d: %s is reserved for the control plane", i, secret.Env)
+		}
+		if !envNamePattern.MatchString(secret.Env) {
+			return fmt.Errorf("secret %d: invalid environment variable name %q", i, secret.Env)
+		}
+		if secrets[secret.Env] {
+			return fmt.Errorf("duplicate secret %q", secret.Env)
+		}
+		secrets[secret.Env] = true
 	}
 	return nil
 }

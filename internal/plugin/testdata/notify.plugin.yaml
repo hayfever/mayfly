@@ -1,0 +1,22 @@
+# docs/plugins.md "Quickstart: a sidecar plugin in Go".
+schemaVersion: 1
+name: notify
+version: 0.1.0
+placement: sidecar
+image: ghcr.io/acme/mayfly-plugin-notify:0.1.0
+command: bin/notify
+local:
+  command: go
+  args: [run, .]
+secrets:
+  - env: NOTIFY_WEBHOOK_URL
+    secret: mayfly-plugin-notify
+    key: webhook-url
+tools:
+  - name: post
+    idempotent: false
+    timeout: 30s
+sidecar:
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {memory: 64Mi}
