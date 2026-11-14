@@ -6,7 +6,7 @@
 # missing: the same image without /mayfly-plugin, so the copy init container
 #          fails and the session must fail at start.
 
-FROM node:22-bookworm-slim AS plugin
+FROM node:26-bookworm-slim AS plugin
 COPY server.js /mayfly-plugin/server.js
 RUN chmod 0644 /mayfly-plugin/server.js \
  && chmod 0755 /mayfly-plugin
