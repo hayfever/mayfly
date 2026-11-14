@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/platformclient"
 )
 
@@ -28,7 +29,7 @@ func (f *fakeArtifacts) ReadArtifact(_ context.Context, key string, offset, limi
 
 func artifactToolset(t *testing.T, reader ArtifactReader) *toolset {
 	t.Helper()
-	ts, err := newToolset(t.TempDir(), false, 0, nil, reader)
+	ts, err := newToolset(toolsetConfig{Workspace: t.TempDir(), Artifacts: reader})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,5 +139,54 @@ func TestReadArtifactShrinksToOutputCap(t *testing.T) {
 	}
 	if int64(len(envelope.Content)) != envelope.Bytes || envelope.Bytes == 0 || len(envelope.Content) >= len(body) {
 		t.Fatalf("content = %d bytes, reported %d", len(envelope.Content), envelope.Bytes)
+	}
+}
+
+func TestToolsListGrantedPluginsLast(t *testing.T) {
+	ts, err := newToolset(toolsetConfig{
+		Workspace: t.TempDir(),
+		Grant: map[string]gateway.DiscoveryTool{
+			"plugin_tickets_get_ticket": {
+				Name:      "plugin_tickets_get_ticket",
+				Owner:     "tickets",
+				Placement: gateway.Service,
+			},
+			"plugin_notify_post": {
+				Name:        "plugin_notify_post",
+				Owner:       "notify",
+				Placement:   gateway.Sidecar,
+				Description: "Send a message.",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.Close()
+
+	tools := ts.Tools()
+	if len(tools) == 0 {
+		t.Fatal("no tools")
+	}
+	if got := tools[len(tools)-1].Function.Name; got != "plugin_tickets_get_ticket" {
+		t.Fatalf("last tool = %q, want the sorted plugin tools", got)
+	}
+	var tickets, notify bool
+	for _, tool := range tools {
+		switch tool.Function.Name {
+		case "plugin_tickets_get_ticket":
+			tickets = true
+			want := "Plugin tool plugin_tickets_get_ticket from plugin tickets"
+			if tool.Function.Description != want {
+				t.Fatalf("description = %q, want %q", tool.Function.Description, want)
+			}
+		case "plugin_notify_post":
+			// A sidecar tool with no local process is not offered until the
+			// runtime can reach the sidecar.
+			notify = true
+		}
+	}
+	if !tickets || notify {
+		t.Fatalf("tickets = %v, notify = %v", tickets, notify)
 	}
 }

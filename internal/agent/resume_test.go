@@ -114,7 +114,7 @@ func testRuntime(t *testing.T, dir, llmURL string, store journal.Store) *Runtime
 	if err := os.MkdirAll(workspace, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	tools, err := newToolset(workspace, true, 30*time.Second, nil, nil)
+	tools, err := newToolset(toolsetConfig{Workspace: workspace, AllowShell: true, ShellTimeout: 30 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

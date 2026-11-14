@@ -24,6 +24,7 @@ import (
 
 	"github.com/hayfever/mayfly/internal/artifact"
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/httpapi"
 	"github.com/hayfever/mayfly/internal/hub"
 	"github.com/hayfever/mayfly/internal/journal"
@@ -82,10 +83,15 @@ func TestWebhookToArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mgr, err := session.New(cfg, testBundle(t, cfg), store, hub.New(1000), journal.NewMemory(), local, nil, logger)
+	journalStore := journal.NewMemory()
+	mgr, err := session.New(cfg, testBundle(t, cfg), store, hub.New(1000), journalStore, local, nil, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The runtime sends every granted tool through the gateway, so a session
+	// without one cannot call its tools.
+	toolGateway := gateway.New(gateway.Options{Ledger: journalStore, Logger: logger})
+	mgr.SetGateway(toolGateway)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if !containsString(mgr.SkillNames(), "remote-skill") {
@@ -112,7 +118,7 @@ func TestWebhookToArtifact(t *testing.T) {
 		<-workerDone
 	}()
 
-	ts.Config.Handler = httpapi.New(cfg, mgr, queueStore, logger).Handler()
+	ts.Config.Handler = httpapi.New(cfg, mgr, queueStore, logger, httpapi.WithGateway(toolGateway)).Handler()
 	ts.Start()
 	defer ts.Close()
 

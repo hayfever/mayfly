@@ -186,6 +186,9 @@ func main() {
 		Audit:       audit,
 		Logger:      logger,
 	})
+	// Grant registration happens at session create and adoption, so the
+	// manager needs the gateway before it starts.
+	mgr.SetGateway(toolGateway)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

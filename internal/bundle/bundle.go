@@ -32,6 +32,7 @@ type Manifest struct {
 	AgentVersion string    `json:"agent_version,omitempty"`
 	Skills       []string  `json:"skills,omitempty"`
 	MCPServers   []string  `json:"mcp_servers,omitempty"`
+	Plugins      []string  `json:"plugins,omitempty"`
 	MessageCount int       `json:"message_count"`
 	ToolCalls    int       `json:"tool_calls"`
 	FileCount    int       `json:"file_count"`
