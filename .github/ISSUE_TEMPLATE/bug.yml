@@ -17,7 +17,7 @@ body:
     attributes:
       label: Backend
       options:
-        - Kubernetes with kind
+        - Kubernetes with k3d
         - Kubernetes (other)
         - Local process backend
     validations:

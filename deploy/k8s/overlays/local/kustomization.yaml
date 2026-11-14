@@ -76,6 +76,10 @@ patches:
             backend: bbolt
             bbolt:
               path: /var/lib/mayfly/queue.db
+          journal:
+            backend: bbolt
+            bbolt:
+              path: /var/lib/mayfly/journal.db
           skills:
             dirs: [/etc/mayfly-skills]
           agents:

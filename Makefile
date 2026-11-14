@@ -8,7 +8,7 @@ CLUSTER ?= mayfly
 LDFLAGS := -s -w -X github.com/hayfever/mayfly/internal/version.Version=$(VERSION) -X github.com/hayfever/mayfly/internal/version.Commit=$(COMMIT) -X github.com/hayfever/mayfly/internal/version.Date=$(DATE)
 CMDS := mayflyd mayfly-agent mayfly mayfly-harness llmstub mcpstub
 
-.PHONY: build test vet fmt image kind-create kind-up kind-down deploy e2e e2e-up e2e-test e2e-down run-local clean FORCE
+.PHONY: build test vet fmt image cluster-create cluster-up cluster-down deploy e2e e2e-up e2e-test e2e-down run-local clean FORCE
 
 build: $(addprefix $(BIN)/,$(CMDS))
 
@@ -35,19 +35,20 @@ image:
 	docker build $(IMAGE_ARGS) --target mcpstub -t mayfly-mcpstub:dev .
 	docker build $(IMAGE_ARGS) --target mayfly-agent -t mayfly-agent:dev .
 
-kind-create:
-	kind create cluster --config deploy/kind.yaml
+# Quickstart cluster on k3d; see docs/deployment.md.
+cluster-create:
+	k3d cluster create $(CLUSTER) --config deploy/k3d.yaml --wait --kubeconfig-switch-context=false
 
-kind-up:
-	./hack/kind-up.sh
+cluster-up:
+	./hack/k3d-up.sh
 
-kind-down:
-	kind delete cluster --name $(CLUSTER)
+cluster-down:
+	k3d cluster delete $(CLUSTER)
 
 deploy:
-	kubectl kustomize --load-restrictor=LoadRestrictionsNone deploy/k8s/overlays/kind | kubectl apply -f -
+	kubectl --context k3d-$(CLUSTER) kustomize --load-restrictor=LoadRestrictionsNone deploy/k8s/overlays/local | kubectl --context k3d-$(CLUSTER) apply -f -
 
-# End-to-end suite on kind with Calico; see docs/testing.md.
+# End-to-end suite on k3d; see docs/testing.md.
 e2e:
 	./hack/e2e.sh all
 

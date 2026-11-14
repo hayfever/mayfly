@@ -214,7 +214,7 @@ Set `runtime.image_pull_secrets` to the names of registry Secrets in the session
 
 ## Bundled example
 
-[examples/agents/triage.yaml](../examples/agents/triage.yaml) selects the built-in runtime, the `incident-triage` skill, and a small `runtime.config` block. The kind overlay mounts it at `/etc/mayfly-agents`.
+[examples/agents/triage.yaml](../examples/agents/triage.yaml) selects the built-in runtime, the `incident-triage` skill, and a small `runtime.config` block. The local overlay mounts it at `/etc/mayfly-agents`.
 
 [examples/pi-agent/agent.yaml](../examples/pi-agent/agent.yaml) shows an alternate harness with command, args, env, and config.
 

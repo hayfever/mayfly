@@ -25,7 +25,7 @@ The NetworkPolicy sets:
 - Egress to cluster DNS on UDP/TCP 53.
 - Extra CIDRs only when configured under `runtime.egress`.
 
-The policy is only as good as the CNI that enforces it. The end-to-end suite (`TestNetworkIsolation`, [testing.md](testing.md)) runs on Calico and checks each allowed and blocked path; run it against your cluster to confirm enforcement.
+The policy is only as good as the CNI that enforces it. The end-to-end suite (`TestNetworkIsolation`, [testing.md](testing.md)) runs on k3d, where k3s's kube-router controller enforces it, and checks each allowed and blocked path; run it against your cluster to confirm enforcement.
 
 ## Credential boundary
 
