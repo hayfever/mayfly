@@ -157,7 +157,7 @@ func (l *Local) start(manifest plugin.Manifest) error {
 	}
 	command = append(command, manifest.Local.Args...)
 
-	env, err := localEnv(manifest)
+	env, err := localEnv(manifest, filepath.Join(dir, "tmp"))
 	if err != nil {
 		return fmt.Errorf("plugin %q: %w", manifest.Name, err)
 	}
@@ -282,32 +282,48 @@ func sleepContext(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// localEnv is the shim's environment: the control plane's, the manifest's
-// env, and the secrets read from the mayflyd environment. The shim removes
-// every other MAYFLY_* variable before it starts the plugin.
-func localEnv(manifest plugin.Manifest) ([]string, error) {
-	env := map[string]string{}
-	for _, entry := range os.Environ() {
-		key, value, ok := strings.Cut(entry, "=")
-		if ok {
-			env[key] = value
+// localPassEnv lists the parent variables a service plugin inherits: what a
+// process needs to find its programs, its locale, and a TLS client. Nothing
+// else is inherited, so the control plane's provider keys, webhook secrets,
+// and MAYFLY_* variables never reach the plugin.
+var localPassEnv = []string{
+	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TZ",
+	"LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TERM",
+	"SSL_CERT_FILE", "SSL_CERT_DIR",
+	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+	"http_proxy", "https_proxy", "no_proxy",
+}
+
+// localEnv is the shim's environment: the inherited toolchain variables, a
+// private TMPDIR, the manifest's env, and the secrets read from the mayflyd
+// environment. The shim removes every other MAYFLY_* variable before it
+// starts the plugin.
+func localEnv(manifest plugin.Manifest, tmpDir string) ([]string, error) {
+	values := map[string]string{}
+	for _, name := range localPassEnv {
+		if value, ok := os.LookupEnv(name); ok {
+			values[name] = value
 		}
 	}
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		return nil, fmt.Errorf("plugin %q: create temporary directory: %w", manifest.Name, err)
+	}
+	values["TMPDIR"] = tmpDir
 	for key, value := range manifest.Env {
-		env[key] = value
+		values[key] = value
 	}
 	for _, secret := range manifest.Secrets {
 		value, ok := os.LookupEnv(secret.Env)
 		if !ok {
 			return nil, fmt.Errorf("environment variable %s is not set", secret.Env)
 		}
-		env[secret.Env] = value
+		values[secret.Env] = value
 	}
-	env["MAYFLY_PLUGIN_NAME"] = manifest.Name
-	env["MAYFLY_PLUGIN_DIR"] = manifest.Dir
-	out := make([]string, 0, len(env))
-	for _, key := range sortedKeys(env) {
-		out = append(out, key+"="+env[key])
+	values["MAYFLY_PLUGIN_NAME"] = manifest.Name
+	values["MAYFLY_PLUGIN_DIR"] = manifest.Dir
+	out := make([]string, 0, len(values))
+	for _, key := range sortedKeys(values) {
+		out = append(out, key+"="+values[key])
 	}
 	return out, nil
 }

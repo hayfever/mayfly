@@ -733,8 +733,10 @@ func (m Manifest) Effects() []string {
 	return out
 }
 
-// SpecHash identifies the spec the reconciler rendered, so mayflyd rolls the
-// service only when the spec changed. Paths are not part of it.
+// SpecHash identifies a manifest, so a manifest change updates the service
+// objects that were rendered from it. Paths are not part of it. The service
+// reconciler mixes its RenderConfig and the gateway key into the annotation
+// it stores.
 func (m Manifest) SpecHash() string {
 	spec := m
 	spec.Dir, spec.Origin = "", ""

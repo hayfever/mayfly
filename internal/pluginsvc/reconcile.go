@@ -7,6 +7,9 @@ package pluginsvc
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -150,7 +153,13 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	sort.Strings(names)
 	for _, name := range names {
 		manifest := desired[name]
-		key, err := newGatewayKey()
+		fresh, err := newGatewayKey()
+		if err != nil {
+			failures[name] = err
+			errs = append(errs, fmt.Errorf("plugin %q: %w", name, err))
+			continue
+		}
+		key, err := r.opts.Client.EnsurePluginSecret(ctx, gatewaySecret(manifest, r.opts.Render.Namespace, fresh))
 		if err != nil {
 			failures[name] = err
 			errs = append(errs, fmt.Errorf("plugin %q: %w", name, err))
@@ -162,13 +171,12 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("plugin %q: %w", name, err))
 			continue
 		}
-		stored, err := r.opts.Client.EnsurePluginObjects(ctx, objects)
-		if err != nil {
+		if err := r.opts.Client.ApplyPluginObjects(ctx, objects); err != nil {
 			failures[name] = err
 			errs = append(errs, fmt.Errorf("plugin %q: %w", name, err))
 			continue
 		}
-		keys[name] = stored
+		keys[name] = key
 	}
 
 	if r.opts.Prune {
@@ -186,18 +194,15 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 }
 
 // prune deletes the objects of service plugins that the bundle no longer
-// holds.
+// holds. It lists every kind, because a create that failed partway can leave
+// a Service, a NetworkPolicy, or a Secret with no Deployment.
 func (r *Reconciler) prune(ctx context.Context, desired map[string]plugin.Manifest) error {
-	existing, err := r.opts.Client.PluginDeployments(ctx)
+	existing, err := r.opts.Client.PluginObjectNames(ctx)
 	if err != nil {
 		return err
 	}
 	var errs []error
-	for _, deployment := range existing {
-		name := deployment.Labels[k8s.LabelPlugin]
-		if name == "" {
-			continue
-		}
+	for _, name := range existing {
 		if _, ok := desired[name]; ok {
 			continue
 		}
@@ -211,11 +216,13 @@ func (r *Reconciler) prune(ctx context.Context, desired map[string]plugin.Manife
 }
 
 // ServiceURL returns a service plugin's endpoint and gateway key for the
-// gateway.
+// gateway. It reads the key from the Secret, so a Secret that was deleted and
+// recreated is picked up without a restart. The cached key is the fallback
+// when the cluster cannot be read.
 func (r *Reconciler) ServiceURL(name string) (string, []byte, error) {
 	r.mu.Lock()
 	manifest, ok := r.manifests[name]
-	key := r.keys[name]
+	cached := r.keys[name]
 	r.mu.Unlock()
 	if !ok {
 		manifest, ok = findService(r.opts.Manifests(), name)
@@ -226,14 +233,15 @@ func (r *Reconciler) ServiceURL(name string) (string, []byte, error) {
 	if manifest.Service == nil || manifest.Service.MCPServer != "" {
 		return "", nil, fmt.Errorf("plugin %q is not a service workload", name)
 	}
-	if len(key) == 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), keyReadTimeout)
-		stored, err := r.opts.Client.PluginGatewayKey(ctx, name)
-		cancel()
-		if err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), keyReadTimeout)
+	key, err := r.opts.Client.PluginGatewayKey(ctx, name)
+	cancel()
+	if err != nil {
+		if len(cached) == 0 {
 			return "", nil, err
 		}
-		key = stored
+		key = cached
+	} else {
 		r.mu.Lock()
 		r.keys[name] = key
 		r.mu.Unlock()
@@ -310,27 +318,68 @@ func newGatewayKey() ([]byte, error) {
 	return key, nil
 }
 
-// renderService builds the four objects of one service plugin.
+// gatewaySecret is the Secret that holds one service plugin's gateway key.
+// EnsurePluginSecret creates it only when it is absent.
+func gatewaySecret(manifest plugin.Manifest, namespace string, key []byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      plugin.GatewayKeyName(manifest.Name),
+			Namespace: namespace,
+			Labels:    pluginLabels(manifest.Name),
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{"key": key},
+	}
+}
+
+// renderService builds the three workload objects of one service plugin.
 func renderService(manifest plugin.Manifest, cfg RenderConfig, key []byte) (k8s.PluginObjects, error) {
 	if manifest.Service == nil {
 		return k8s.PluginObjects{}, errors.New("service settings are required")
 	}
-	deployment, err := renderDeployment(manifest, cfg)
+	deployment, err := renderDeployment(manifest, cfg, key)
 	if err != nil {
 		return k8s.PluginObjects{}, err
 	}
 	labels := pluginLabels(manifest.Name)
-	annotations := map[string]string{k8s.AnnotationSpecHash: manifest.SpecHash()}
+	annotations := map[string]string{k8s.AnnotationSpecHash: renderHash(manifest, cfg)}
 	return k8s.PluginObjects{
 		Deployment:    deployment,
 		Service:       renderServiceObject(manifest, cfg, labels, annotations),
 		NetworkPolicy: renderNetworkPolicy(manifest, cfg, labels, annotations),
-		Secret: &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: plugin.GatewayKeyName(manifest.Name), Namespace: cfg.Namespace, Labels: labels},
-			Type:       corev1.SecretTypeOpaque,
-			Data:       map[string][]byte{"key": key},
-		},
 	}, nil
+}
+
+// renderAnnotations identify the rendered Deployment and its pods: the
+// manifest and the RenderConfig, so a changed tools image or command updates
+// the Deployment, and the gateway key, so a recreated Secret rolls the pods.
+func renderAnnotations(manifest plugin.Manifest, cfg RenderConfig, key []byte) map[string]string {
+	return map[string]string{
+		k8s.AnnotationSpecHash:       renderHash(manifest, cfg),
+		k8s.AnnotationGatewayKeyHash: keyHash(key),
+	}
+}
+
+// renderHash identifies the objects that a manifest and a RenderConfig
+// render.
+func renderHash(manifest plugin.Manifest, cfg RenderConfig) string {
+	raw, err := json.Marshal(struct {
+		Manifest string
+		Render   RenderConfig
+	}{manifest.SpecHash(), cfg})
+	if err != nil {
+		// A manifest and a RenderConfig hold only strings and maps of
+		// strings, so encoding cannot fail.
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// keyHash identifies the gateway key a pod was rendered with.
+func keyHash(key []byte) string {
+	sum := sha256.Sum256(key)
+	return hex.EncodeToString(sum[:])
 }
 
 // pluginLabels are the labels of every object and pod of one service plugin.
@@ -354,7 +403,7 @@ func pluginSelector(name string) map[string]string {
 // renderDeployment builds the plugin Deployment. The shim owns the process in
 // stdio mode; an http plugin listens on its own port and gets the gateway key
 // as an environment variable.
-func renderDeployment(manifest plugin.Manifest, cfg RenderConfig) (*appsv1.Deployment, error) {
+func renderDeployment(manifest plugin.Manifest, cfg RenderConfig, key []byte) (*appsv1.Deployment, error) {
 	service := manifest.Service
 	if service == nil {
 		return nil, errors.New("service settings are required")
@@ -463,22 +512,32 @@ func renderDeployment(manifest plugin.Manifest, cfg RenderConfig) (*appsv1.Deplo
 			Name:        plugin.ObjectName(manifest.Name),
 			Namespace:   cfg.Namespace,
 			Labels:      pluginLabels(manifest.Name),
-			Annotations: map[string]string{k8s.AnnotationSpecHash: manifest.SpecHash()},
+			Annotations: renderAnnotations(manifest, cfg, key),
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: pluginSelector(manifest.Name)},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: pluginLabels(manifest.Name)},
+				// The pod template carries the same hashes, so a change to
+				// the rendered objects or to the gateway key rolls the pods.
+				ObjectMeta: metav1.ObjectMeta{
+					Labels:      pluginLabels(manifest.Name),
+					Annotations: renderAnnotations(manifest, cfg, key),
+				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:                corev1.RestartPolicyAlways,
 					AutomountServiceAccountToken: &no,
 					EnableServiceLinks:           &no,
 					ImagePullSecrets:             localObjects(cfg.ImagePullSecrets),
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot:   &yes,
-						RunAsUser:      &uid,
-						RunAsGroup:     &uid,
+						RunAsNonRoot: &yes,
+						RunAsUser:    &uid,
+						RunAsGroup:   &uid,
+						// Kubelet writes a Secret volume as root:root
+						// without a group, and the container cannot read
+						// its key. FSGroup makes the projected files
+						// readable by the plugin's group.
+						FSGroup:        &uid,
 						SeccompProfile: &corev1.SeccompProfile{Type: seccomp},
 					},
 					InitContainers: initContainers,
@@ -526,9 +585,11 @@ func toolsContainer(cfg RenderConfig, uid int64) corev1.Container {
 	}
 }
 
-// gatewayKeyVolume projects only the key of the plugin's gateway Secret.
+// gatewayKeyVolume projects only the key of the plugin's gateway Secret. The
+// mode is group-readable, and the pod sets FSGroup, so the shim reads the key
+// as an unprivileged user.
 func gatewayKeyVolume(name string) corev1.Volume {
-	mode := int32(0o400)
+	mode := int32(0o440)
 	return corev1.Volume{
 		Name: "gateway-key",
 		VolumeSource: corev1.VolumeSource{

@@ -17,10 +17,14 @@
 // FIXTURE_PID_FILE         file that receives the process id
 // FIXTURE_IGNORE_STDIN_EOF keep running after stdin closes
 // FIXTURE_IGNORE_SIGTERM   ignore SIGTERM
+//
+// The "bigline" tool writes one stdout line over the shim's scanner limit and
+// sends no response, which is how a child blocks the pipe it writes to.
 package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -115,6 +119,15 @@ func handleCall(req request) {
 	if os.Getenv("FIXTURE_EXIT_IN_CALL") == "1" {
 		fmt.Fprintln(os.Stderr, "fixture: exiting during call")
 		os.Exit(1)
+	}
+	if params.Name == "bigline" {
+		// One line over the shim's 8 MiB scanner limit, with no response.
+		// The write blocks once the pipe fills, so the child stays alive
+		// until the shim kills it.
+		writeMu.Lock()
+		_, _ = os.Stdout.Write(append(bytes.Repeat([]byte("x"), 9<<20), '\n'))
+		writeMu.Unlock()
+		return
 	}
 	if params.Name == "sleep" {
 		if ms, err := strconv.Atoi(os.Getenv("FIXTURE_SLEEP_MS")); err == nil {
