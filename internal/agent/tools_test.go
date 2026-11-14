@@ -190,3 +190,55 @@ func TestToolsListGrantedPluginsLast(t *testing.T) {
 		t.Fatalf("tickets = %v, notify = %v", tickets, notify)
 	}
 }
+
+// TestToolsDeclareGatewayHTTPMCP covers an HTTP mcp.servers tool: its
+// description and schema come from the gateway grant, and the runtime
+// declares it without holding a server of its own.
+func TestToolsDeclareGatewayHTTPMCP(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)
+	ts, err := newToolset(toolsetConfig{
+		Workspace: t.TempDir(),
+		Grant: map[string]gateway.DiscoveryTool{
+			"mcp_linear_search": {
+				Name:        "mcp_linear_search",
+				Owner:       "linear",
+				Placement:   gateway.MCPHTTP,
+				Description: "Search issues",
+				InputSchema: schema,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.Close()
+
+	for _, tool := range ts.Tools() {
+		if tool.Function.Name != "mcp_linear_search" {
+			continue
+		}
+		if tool.Function.Description != "Search issues" {
+			t.Fatalf("description = %q", tool.Function.Description)
+		}
+		if string(tool.Function.Parameters) != string(schema) {
+			t.Fatalf("schema = %s", tool.Function.Parameters)
+		}
+		return
+	}
+	t.Fatal("the gateway's HTTP MCP tool is not declared")
+}
+
+// TestCallRefusesUngrantedMCP keeps an mcp_* name that discovery did not grant
+// from reaching the broker proxy and skipping the ledger.
+func TestCallRefusesUngrantedMCP(t *testing.T) {
+	ts, err := newToolset(toolsetConfig{Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.Close()
+	if _, _, err := ts.Call(context.Background(), "mcp_linear_search", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("an ungranted MCP tool was called")
+	} else if !strings.Contains(err.Error(), "not granted") {
+		t.Fatalf("error = %v", err)
+	}
+}

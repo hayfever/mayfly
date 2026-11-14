@@ -22,26 +22,23 @@ type Manager struct {
 	closed  bool
 }
 
-// StartServer connects to one configured MCP server and lists its tools.
-func StartServer(ctx context.Context, def sessioncfg.MCPServer, token string, timeout time.Duration, logger *slog.Logger) (*Client, []Tool, error) {
+// StartServer starts one configured stdio MCP server and lists its tools. An
+// HTTP server has no place here: the gateway owns its client.
+func StartServer(ctx context.Context, def sessioncfg.MCPServer, timeout time.Duration, logger *slog.Logger) (*Client, []Tool, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
+	}
+	if def.Transport != "stdio" {
+		// An HTTP server is discovered and called by the gateway, which holds
+		// its endpoint and credentials. The runtime has no client for it.
+		return nil, nil, fmt.Errorf("unsupported transport %q", def.Transport)
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var client *Client
-	switch def.Transport {
-	case "stdio":
-		c, err := NewStdio(ctx, def.Name, def.Command, def.Args, def.Env)
-		if err != nil {
-			return nil, nil, err
-		}
-		client = c
-	case "http":
-		client = NewHTTP(def.Name, def.URL, token, def.Headers)
-	default:
-		return nil, nil, fmt.Errorf("unsupported transport %q", def.Transport)
+	client, err := NewStdio(ctx, def.Name, def.Command, def.Args, def.Env)
+	if err != nil {
+		return nil, nil, err
 	}
 	if err := client.Initialize(ctx); err != nil {
 		_ = client.Close()
@@ -56,20 +53,27 @@ func StartServer(ctx context.Context, def sessioncfg.MCPServer, token string, ti
 	return client, tools, nil
 }
 
-// Start connects all servers sequentially. Individual failures do not abort
-// the session; they are reported through Errors.
-func Start(ctx context.Context, defs []sessioncfg.MCPServer, token string, logger *slog.Logger) *Manager {
+// Start connects all stdio servers sequentially. An HTTP entry is skipped: the
+// gateway holds its client. Individual failures do not abort the session; they
+// are reported through Errors.
+func Start(ctx context.Context, defs []sessioncfg.MCPServer, logger *slog.Logger) *Manager {
 	m := &Manager{
 		clients: map[string]*Client{},
 		byName:  map[string]Tool{},
 	}
 	used := map[string]int{}
 	for _, def := range defs {
+		if def.Transport == "http" {
+			// The gateway discovers and calls an HTTP server. The runtime
+			// never holds a client for it, so a call cannot fall back to the
+			// broker proxy and skip the ledger.
+			continue
+		}
 		timeout := 30 * time.Second
 		if def.InitTimeoutSeconds > 0 {
 			timeout = time.Duration(def.InitTimeoutSeconds) * time.Second
 		}
-		client, tools, err := StartServer(ctx, def, token, timeout, logger)
+		client, tools, err := StartServer(ctx, def, timeout, logger)
 		if err != nil {
 			logger.Warn("mcp server unavailable", "server", def.Name, "error", err)
 			m.errs = append(m.errs, fmt.Errorf("%s: %w", def.Name, err))
@@ -141,9 +145,12 @@ func toolName(server, tool string) string {
 // and the runtime both build call keys from it, so the mapping lives here.
 func ToolName(server, tool string) string { return toolName(server, tool) }
 
+// ToolNamePrefix begins every MCP tool name.
+const ToolNamePrefix = "mcp_"
+
 // ToolPrefix returns the prefix every tool of server has. A caller that only
 // holds a model-visible name can test it against this prefix.
-func ToolPrefix(server string) string { return "mcp_" + sanitize(server) + "_" }
+func ToolPrefix(server string) string { return ToolNamePrefix + sanitize(server) + "_" }
 
 // containsTool reports whether names holds tool.
 func containsTool(names []string, tool string) bool {

@@ -123,7 +123,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 		"plugins", len(r.cfg.Plugins),
 	)
 
-	r.mcp = mcp.Start(ctx, r.cfg.MCPServers, r.token, r.logger)
+	r.mcp = mcp.Start(ctx, r.cfg.MCPServers, r.logger)
 	for _, err := range r.mcp.Errors() {
 		r.events.Emit(ctx, model.EventSystem, "mayfly", "MCP server unavailable: "+err.Error(), nil)
 	}

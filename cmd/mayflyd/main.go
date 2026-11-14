@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/hayfever/mayfly/internal/artifact"
+	"github.com/hayfever/mayfly/internal/broker"
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/httpapi"
@@ -184,6 +185,9 @@ func main() {
 		logger.Error("configure plugin audit log", "error", auditErr)
 		os.Exit(2)
 	}
+	// One broker holds the upstream credentials and the transport policy the
+	// gateway's MCP clients must apply.
+	upstreamBroker := broker.New(cfg.LLM, logger)
 	toolGateway := gateway.New(gateway.Options{
 		Ledger:    ledger,
 		Sequencer: journalStore,
@@ -192,6 +196,7 @@ func main() {
 			server, ok := mcpServers[name]
 			return server, ok
 		},
+		HTTPClient:  upstreamBroker.HTTPClient(),
 		ServiceURL:  serviceURL,
 		MaxInflight: cfg.Plugins.MaxInflightCalls,
 		Audit:       audit,
@@ -243,6 +248,7 @@ func main() {
 	server := &http.Server{
 		Addr: cfg.Server.Addr,
 		Handler: httpapi.New(cfg, mgr, queueStore, logger,
+			httpapi.WithBroker(upstreamBroker),
 			httpapi.WithSchedules(scheduleAPI),
 			httpapi.WithGateway(toolGateway),
 			httpapi.WithReadyCheck(readyCheck),

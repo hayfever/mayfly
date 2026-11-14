@@ -21,10 +21,12 @@ type httpTransport struct {
 	sessionID  string
 }
 
-// defaultHTTPClient is the client for a Streamable HTTP server: one request
-// can wait as long as a tool may run.
+// defaultHTTPClient is the client for a Streamable HTTP server. It sets no
+// client timeout: each request carries its own context deadline, because a
+// tool may run for minutes and a fixed cap would cut it off. Transport-level
+// timeouts still apply.
 func defaultHTTPClient() *http.Client {
-	return &http.Client{Timeout: 5 * time.Minute}
+	return &http.Client{}
 }
 
 func newHTTPTransport(url string, headers map[string]string, client *http.Client, perRequest func(*http.Request)) *httpTransport {
@@ -47,7 +49,6 @@ func newHTTPTransport(url string, headers map[string]string, client *http.Client
 func NewUnixHTTP(name, socket string, perRequest func(*http.Request)) *Client {
 	dialer := &net.Dialer{}
 	client := &http.Client{
-		Timeout: 5 * time.Minute,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return dialer.DialContext(ctx, "unix", socket)

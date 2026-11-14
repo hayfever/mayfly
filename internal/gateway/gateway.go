@@ -82,8 +82,9 @@ type Grant struct {
 	// the bundle. An HTTP entry resolves against the server's tools; a stdio
 	// entry resolves by its tool-name prefix.
 	Wildcards map[string]Placement
-	// SidecarKey signs call and discovery tokens for this session's
-	// sidecars. It is nil when the session has no sidecar plugin.
+	// SidecarKey is the session's signing key. Each sidecar's own key is
+	// derived from it with plugin.SidecarKey, so a token minted for one plugin
+	// does not verify at another. It is nil when the session has no sidecar.
 	SidecarKey []byte
 	// MaxSteps is the session's model step bound. The gateway derives the
 	// turn's journal step range from it, as internal/session does.
@@ -177,6 +178,13 @@ func New(opts Options) *Gateway {
 	}
 }
 
+// sidecarKey returns the call-token key of one sidecar plugin, derived from
+// the session key. A sidecar mounts only its own derived key, so a token it
+// mints for a sibling fails that sibling's signature check.
+func sidecarKey(grant Grant, owner string) []byte {
+	return plugin.SidecarKey(grant.SidecarKey, owner)
+}
+
 // Register installs or replaces one session's grant. A grant registered
 // twice keeps the newer table, which is what adoption does.
 func (g *Gateway) Register(grant Grant) {
@@ -252,7 +260,7 @@ func (g *Gateway) Discover(ctx context.Context, session string) (Discovery, erro
 			TimeoutMS:  tool.Timeout.Milliseconds(),
 		})
 		if tool.Placement == Sidecar && !sidecarSeen[tool.Owner] {
-			token, err := SignToken(grant.SidecarKey, Claims{
+			token, err := SignToken(sidecarKey(grant, tool.Owner), Claims{
 				SessionID: grant.SessionID,
 				Plugin:    tool.Owner,
 				Tool:      "*",
@@ -498,7 +506,7 @@ func (g *Gateway) begin(ctx context.Context, grant Grant, session string, req Be
 	}
 	dispatch := Dispatch{Key: key, TimeoutMS: tool.Timeout.Milliseconds()}
 	if tool.Placement == Sidecar {
-		token, err := SignToken(grant.SidecarKey, Claims{
+		token, err := SignToken(sidecarKey(grant, tool.Owner), Claims{
 			SessionID:  session,
 			Plugin:     tool.Owner,
 			Tool:       tool.Remote,

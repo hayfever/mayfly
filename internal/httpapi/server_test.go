@@ -17,6 +17,7 @@ import (
 
 	"github.com/hayfever/mayfly/internal/agents"
 	"github.com/hayfever/mayfly/internal/artifact"
+	"github.com/hayfever/mayfly/internal/broker"
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/hub"
@@ -135,6 +136,21 @@ func TestReadyReflectsManagerState(t *testing.T) {
 	check(http.StatusOK)
 	mgr.Shutdown(context.Background())
 	check(http.StatusServiceUnavailable)
+}
+
+// TestWithBrokerSharesOneClient keeps the HTTP API and the tool gateway on the
+// same broker instead of building a second upstream client.
+func TestWithBrokerSharesOneClient(t *testing.T) {
+	cfg := config.Default()
+	cfg.Runtime.Image = "example/agent:1"
+	shared := broker.New(cfg.LLM, testLogger())
+	s := New(cfg, testManager(t, cfg), testQueue(t), testLogger(), WithBroker(shared))
+	if s.broker != shared {
+		t.Fatal("the server built its own broker")
+	}
+	if s.broker.HTTPClient() != shared.HTTPClient() {
+		t.Fatal("the brokers do not share one HTTP client")
+	}
 }
 
 func TestWebhookDeduplicatesByDeliveryKey(t *testing.T) {
