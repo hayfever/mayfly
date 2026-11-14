@@ -47,17 +47,16 @@ type Artifact struct {
 	ContentType string `json:"content_type"`
 }
 
-// MCPServer describes one MCP server made available to the session.
-// HTTP servers are always reached through the platform MCP proxy; URL points
-// at the proxy, and credentials stay in the control plane.
+// MCPServer describes one MCP server the session may use. The runtime starts a
+// stdio server itself. An HTTP server carries no endpoint here: the gateway
+// discovers and calls it through the broker, and its tools arrive in the tool
+// grant.
 type MCPServer struct {
 	Name               string            `json:"name"`
 	Transport          string            `json:"transport"` // stdio or http
 	Command            string            `json:"command,omitempty"`
 	Args               []string          `json:"args,omitempty"`
 	Env                map[string]string `json:"env,omitempty"`
-	URL                string            `json:"url,omitempty"`
-	Headers            map[string]string `json:"headers,omitempty"`
 	InitTimeoutSeconds int               `json:"init_timeout_seconds,omitempty"`
 	// Tools is the allowlist of a remote server. An empty list offers every
 	// tool the server reports.
@@ -205,9 +204,8 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("mcp server %q: command is required for stdio", s.Name)
 			}
 		case "http":
-			if s.URL == "" {
-				return fmt.Errorf("mcp server %q: url is required for http", s.Name)
-			}
+			// The gateway holds the endpoint and credentials. The runtime
+			// never dials an HTTP server, so its config carries no URL.
 		default:
 			return fmt.Errorf("mcp server %q: unsupported transport %q", s.Name, s.Transport)
 		}

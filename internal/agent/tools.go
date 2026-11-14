@@ -96,23 +96,40 @@ func (t *toolset) Granted(name string) (gateway.DiscoveryTool, bool) {
 	if ok {
 		return tool, true
 	}
-	if t.mcp == nil || len(t.wildcards) == 0 {
+	local, ok := t.localMCP(name)
+	if !ok {
 		return gateway.DiscoveryTool{}, false
+	}
+	return gateway.DiscoveryTool{
+		Name:      name,
+		Owner:     local.Server,
+		Placement: gateway.MCPStdio,
+	}, true
+}
+
+// localMCP returns the manager's tool when the runtime may call it here: the
+// gateway granted it, or its owner is a wildcard stdio entry. An HTTP server
+// has no client in the manager, so a tool whose discovery failed cannot match.
+func (t *toolset) localMCP(name string) (mcp.Tool, bool) {
+	if t.mcp == nil {
+		return mcp.Tool{}, false
 	}
 	for _, local := range t.mcp.Tools() {
 		if local.Name != name {
 			continue
 		}
-		if t.wildcards[local.Server] != gateway.MCPStdio {
-			return gateway.DiscoveryTool{}, false
+		if tool, ok := t.grant[name]; ok {
+			if tool.Placement == gateway.MCPStdio {
+				return local, true
+			}
+			return mcp.Tool{}, false
 		}
-		return gateway.DiscoveryTool{
-			Name:      name,
-			Owner:     local.Server,
-			Placement: gateway.MCPStdio,
-		}, true
+		if t.wildcards[local.Server] == gateway.MCPStdio {
+			return local, true
+		}
+		return mcp.Tool{}, false
 	}
-	return gateway.DiscoveryTool{}, false
+	return mcp.Tool{}, false
 }
 
 // Tools returns the OpenAI tool declarations the model may call: built-ins,
@@ -182,7 +199,8 @@ func (t *toolset) Tools() []llm.Tool {
 func (t *toolset) pluginTools() []llm.Tool {
 	names := make([]string, 0, len(t.grant))
 	for name, tool := range t.grant {
-		if tool.Placement == gateway.MCPStdio || tool.Placement == gateway.MCPHTTP {
+		// A stdio server's tools are declared from the manager's listing.
+		if tool.Placement == gateway.MCPStdio {
 			continue
 		}
 		names = append(names, name)
@@ -191,15 +209,19 @@ func (t *toolset) pluginTools() []llm.Tool {
 	tools := make([]llm.Tool, 0, len(names))
 	for _, name := range names {
 		tool := t.grant[name]
-		var desc string
+		desc := tool.Description
 		schema := tool.InputSchema
 		if local, ok := t.localTool(name); ok {
 			desc, schema = local.Description, local.InputSchema
-		} else if tool.Placement != gateway.Service {
+		} else if tool.Placement != gateway.Service && tool.Placement != gateway.MCPHTTP {
+			// A local placement with no process is not offered.
 			continue
 		}
 		if desc == "" {
 			desc = "Plugin tool " + name + " from plugin " + tool.Owner
+			if tool.Placement == gateway.MCPHTTP {
+				desc = "MCP tool " + name + " from server " + tool.Owner
+			}
 		}
 		if len(schema) == 0 || string(schema) == "null" {
 			schema = json.RawMessage(`{"type":"object","properties":{}}`)
@@ -236,7 +258,13 @@ func (t *toolset) Call(ctx context.Context, name string, args json.RawMessage) (
 	case "read_artifact":
 		return t.readArtifact(ctx, args)
 	}
-	if t.mcp != nil {
+	if strings.HasPrefix(name, mcp.ToolNamePrefix) {
+		// A local stdio tool the gateway grants by name or by wildcard prefix
+		// is dispatched from here. Anything else is refused: an MCP tool that
+		// discovery did not grant must not slip through to the broker proxy.
+		if _, ok := t.localMCP(name); !ok {
+			return "", false, fmt.Errorf("MCP tool %q is not granted to this session", name)
+		}
 		callCtx, cancel := context.WithTimeout(ctx, mcpCallTimeout)
 		defer cancel()
 		out, isErr, err := t.mcp.Call(callCtx, name, args)

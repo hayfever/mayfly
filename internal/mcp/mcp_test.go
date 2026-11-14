@@ -254,21 +254,21 @@ func TestDecodeSSE(t *testing.T) {
 }
 
 func TestManagerNamesTools(t *testing.T) {
-	server := httptest.NewServer(stub.MCPHandler())
-	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	manager := Start(ctx, []sessioncfg.MCPServer{{
 		Name:      "my server",
-		Transport: "http",
-		URL:       server.URL + "/mcp",
-	}}, "tok", testLogger())
+		Transport: "stdio",
+		Command:   os.Args[0],
+		Args:      []string{"-test.run=TestMCPHelperProcess"},
+		Env:       map[string]string{"MAYFLY_MCP_HELPER": "1"},
+	}}, testLogger())
 	defer manager.Close()
 	if errs := manager.Errors(); len(errs) != 0 {
 		t.Fatalf("errors: %v", errs)
 	}
 	tools := manager.Tools()
-	if len(tools) != 1 {
+	if len(tools) != 2 {
 		t.Fatalf("tools = %+v", tools)
 	}
 	if tools[0].Name != "mcp_my_server_echo" {
@@ -284,17 +284,17 @@ func TestManagerNamesTools(t *testing.T) {
 }
 
 func TestManagerToolAllowlist(t *testing.T) {
-	server := httptest.NewServer(stub.MCPHandler())
-	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	allowed := Start(ctx, []sessioncfg.MCPServer{{
 		Name:      "search",
-		Transport: "http",
-		URL:       server.URL + "/mcp",
+		Transport: "stdio",
+		Command:   os.Args[0],
+		Args:      []string{"-test.run=TestMCPHelperProcess"},
+		Env:       map[string]string{"MAYFLY_MCP_HELPER": "1"},
 		Tools:     []string{"echo"},
-	}}, "tok", testLogger())
+	}}, testLogger())
 	defer allowed.Close()
 	if errs := allowed.Errors(); len(errs) != 0 {
 		t.Fatalf("errors: %v", errs)
@@ -305,16 +305,53 @@ func TestManagerToolAllowlist(t *testing.T) {
 
 	hidden := Start(ctx, []sessioncfg.MCPServer{{
 		Name:      "search",
-		Transport: "http",
-		URL:       server.URL + "/mcp",
+		Transport: "stdio",
+		Command:   os.Args[0],
+		Args:      []string{"-test.run=TestMCPHelperProcess"},
+		Env:       map[string]string{"MAYFLY_MCP_HELPER": "1"},
 		Tools:     []string{"missing"},
-	}}, "tok", testLogger())
+	}}, testLogger())
 	defer hidden.Close()
 	if errs := hidden.Errors(); len(errs) != 0 {
 		t.Fatalf("errors: %v", errs)
 	}
 	if tools := hidden.Tools(); len(tools) != 0 {
 		t.Fatalf("allowlist did not hide echo: %+v", tools)
+	}
+}
+
+// TestStartSkipsHTTPServers keeps an HTTP mcp.servers entry out of the
+// runtime's manager. The gateway discovers and calls it, so a call whose
+// discovery failed must not reach the broker proxy instead.
+func TestStartSkipsHTTPServers(t *testing.T) {
+	manager := Start(context.Background(), []sessioncfg.MCPServer{{
+		Name:      "remote",
+		Transport: "http",
+	}}, testLogger())
+	defer manager.Close()
+	if errs := manager.Errors(); len(errs) != 0 {
+		t.Fatalf("errors: %v", errs)
+	}
+	if tools := manager.Tools(); len(tools) != 0 {
+		t.Fatalf("tools = %+v", tools)
+	}
+}
+
+// TestUpstreamClientsHaveNoFixedTimeout keeps http.Client.Timeout out of the
+// default and Unix clients: a tool bounds its own call, and a fixed client cap
+// would cut off a call the manifest allows to run longer.
+func TestUpstreamClientsHaveNoFixedTimeout(t *testing.T) {
+	plain := newHTTPTransport("http://127.0.0.1/mcp", nil, nil, nil)
+	if plain.client.Timeout != 0 {
+		t.Fatalf("default client timeout = %s", plain.client.Timeout)
+	}
+	unix := NewUnixHTTP("service", "/tmp/mayfly.sock", nil)
+	transport, ok := unix.transport.(*httpTransport)
+	if !ok {
+		t.Fatalf("Unix client transport = %T", unix.transport)
+	}
+	if transport.client.Timeout != 0 {
+		t.Fatalf("Unix client timeout = %s", transport.client.Timeout)
 	}
 }
 
