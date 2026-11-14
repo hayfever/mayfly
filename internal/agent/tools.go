@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,9 +18,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/llm"
 	"github.com/hayfever/mayfly/internal/mcp"
 	"github.com/hayfever/mayfly/internal/platformclient"
+	"github.com/hayfever/mayfly/internal/pluginhost"
 )
 
 const (
@@ -34,33 +38,57 @@ type ArtifactReader interface {
 	ReadArtifact(ctx context.Context, key string, offset, limit int64) (platformclient.ArtifactWindow, error)
 }
 
+// toolsetConfig is the set of resources one session's tools can reach. The
+// grant is the tool table the gateway reported, keyed by model-visible name.
+type toolsetConfig struct {
+	Workspace    string
+	AllowShell   bool
+	ShellTimeout time.Duration
+	MCP          *mcp.Manager
+	Plugins      *pluginhost.Host
+	Grant        map[string]gateway.DiscoveryTool
+	Artifacts    ArtifactReader
+}
+
 type toolset struct {
 	root         *os.Root
 	rootPath     string
 	allowShell   bool
 	shellTimeout time.Duration
 	mcp          *mcp.Manager
+	plugins      *pluginhost.Host
+	grant        map[string]gateway.DiscoveryTool
 	artifacts    ArtifactReader
 }
 
-func newToolset(workspace string, allowShell bool, shellTimeout time.Duration, manager *mcp.Manager, artifacts ArtifactReader) (*toolset, error) {
-	root, err := os.OpenRoot(workspace)
+func newToolset(cfg toolsetConfig) (*toolset, error) {
+	root, err := os.OpenRoot(cfg.Workspace)
 	if err != nil {
 		return nil, fmt.Errorf("open workspace: %w", err)
 	}
 	return &toolset{
 		root:         root,
-		rootPath:     workspace,
-		allowShell:   allowShell,
-		shellTimeout: shellTimeout,
-		mcp:          manager,
-		artifacts:    artifacts,
+		rootPath:     cfg.Workspace,
+		allowShell:   cfg.AllowShell,
+		shellTimeout: cfg.ShellTimeout,
+		mcp:          cfg.MCP,
+		plugins:      cfg.Plugins,
+		grant:        cfg.Grant,
+		artifacts:    cfg.Artifacts,
 	}, nil
 }
 
 func (t *toolset) Close() error { return t.root.Close() }
 
-// Tools returns the OpenAI tool declarations for built-ins and MCP tools.
+// Granted returns the gateway's grant for one tool.
+func (t *toolset) Granted(name string) (gateway.DiscoveryTool, bool) {
+	tool, ok := t.grant[name]
+	return tool, ok
+}
+
+// Tools returns the OpenAI tool declarations the model may call: built-ins,
+// then the MCP servers this runtime reached directly, then the granted plugin
+// tools.
 func (t *toolset) Tools() []llm.Tool {
 	tools := []llm.Tool{
 		llm.NewTool("read_file", "Read a UTF-8 text file from the workspace.", json.RawMessage(`{
@@ -115,10 +143,54 @@ func (t *toolset) Tools() []llm.Tool {
 			tools = append(tools, llm.NewTool(mt.Name, desc, schema))
 		}
 	}
+	return append(tools, t.pluginTools()...)
+}
+
+// pluginTools declares the granted plugin tools, sorted by name. A local
+// plugin supplies its own description and schema; a service tool carries the
+// gateway's discovery copy. A granted tool with no local process and no remote
+// placement is not offered, because the runtime could not run it.
+func (t *toolset) pluginTools() []llm.Tool {
+	names := make([]string, 0, len(t.grant))
+	for name, tool := range t.grant {
+		if tool.Placement == gateway.MCPStdio || tool.Placement == gateway.MCPHTTP {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	tools := make([]llm.Tool, 0, len(names))
+	for _, name := range names {
+		tool := t.grant[name]
+		var desc string
+		schema := tool.InputSchema
+		if local, ok := t.localTool(name); ok {
+			desc, schema = local.Description, local.InputSchema
+		} else if tool.Placement != gateway.Service {
+			continue
+		}
+		if desc == "" {
+			desc = "Plugin tool " + name + " from plugin " + tool.Owner
+		}
+		if len(schema) == 0 || string(schema) == "null" {
+			schema = json.RawMessage(`{"type":"object","properties":{}}`)
+		}
+		tools = append(tools, llm.NewTool(name, desc, schema))
+	}
 	return tools
 }
 
-// Call executes a built-in or MCP tool.
+// localTool returns the plugin host's view of one tool.
+func (t *toolset) localTool(name string) (pluginhost.Tool, bool) {
+	if t.plugins == nil {
+		return pluginhost.Tool{}, false
+	}
+	return t.plugins.Tool(name)
+}
+
+// Call executes a built-in tool or reaches an MCP server the gateway does not
+// grant. A granted tool goes through Runtime.callGranted instead, so the
+// gateway sees it before and after.
 func (t *toolset) Call(ctx context.Context, name string, args json.RawMessage) (string, bool, error) {
 	switch name {
 	case "read_file":
@@ -145,6 +217,238 @@ func (t *toolset) Call(ctx context.Context, name string, args json.RawMessage) (
 		return truncate(out, maxToolOutput), isErr, nil
 	}
 	return "", false, fmt.Errorf("unknown tool %q", name)
+}
+
+// Dispatch runs one tool the gateway authorized. An inline or sidecar plugin
+// runs in the plugin host with the ledger key and call token; a stdio MCP
+// server runs through the manager. The caller bounds ctx by the gateway's
+// timeout.
+func (t *toolset) Dispatch(ctx context.Context, tool gateway.DiscoveryTool, args json.RawMessage, key, token string) (string, bool, error) {
+	switch tool.Placement {
+	case gateway.Inline, gateway.Sidecar:
+		if t.plugins == nil {
+			return "", false, fmt.Errorf("plugin %q is not running", tool.Owner)
+		}
+		return t.plugins.Call(ctx, tool.Name, args, key, token)
+	case gateway.MCPStdio:
+		if t.mcp == nil {
+			return "", false, fmt.Errorf("MCP server %q is not connected", tool.Owner)
+		}
+		out, isErr, err := t.mcp.Call(ctx, tool.Name, args)
+		if err != nil {
+			return "", false, err
+		}
+		return truncate(out, maxToolOutput), isErr, nil
+	}
+	return "", false, fmt.Errorf("tool %q runs at the gateway, not in this runtime", tool.Name)
+}
+
+// toolGateway is the part of the platform client the runtime uses to
+// authorize and record tool calls. *platformclient.Client implements it.
+type toolGateway interface {
+	Tools(ctx context.Context) (gateway.Discovery, error)
+	BeginCall(ctx context.Context, req gateway.BeginRequest) (gateway.BeginResponse, error)
+	CompleteCall(ctx context.Context, req gateway.CompleteRequest) error
+}
+
+// localDispatch performs the local half of a tool call the gateway
+// authorized.
+type localDispatch func(ctx context.Context, tool gateway.DiscoveryTool, args json.RawMessage, key, token string) (string, bool, error)
+
+// toolResult is what one tool call produced for its journal step.
+type toolResult struct {
+	Content string
+	IsError bool
+	// Executed reports that this runtime ran the tool now.
+	Executed bool
+	// Replayed reports a result the gateway's ledger already held.
+	Replayed bool
+	// Interrupted reports a non-idempotent call a restart cut short. The
+	// gateway did not run it again.
+	Interrupted bool
+}
+
+// gatewayRetryBudget bounds one gateway request across its attempts, as
+// modelRetryBudget bounds a model step. It covers a control-plane restart; a
+// partition that outlasts it ends the process so a replacement resumes.
+var gatewayRetryBudget = 5 * time.Minute
+
+// gatewayAttemptTimeout bounds one attempt so a hung request cannot consume
+// the whole budget.
+const gatewayAttemptTimeout = 15 * time.Second
+
+// gatewayRetryBackoff is the first wait between attempts. It doubles up to
+// five seconds so a long outage does not hammer the control plane.
+var gatewayRetryBackoff = 500 * time.Millisecond
+
+// callTool runs one tool. A granted tool goes through the gateway; every other
+// tool runs in the local toolset.
+func (r *Runtime) callTool(ctx context.Context, turn int64, step int, call llm.ToolCall) (toolResult, error) {
+	args := call.Function.Arguments
+	if args == "" {
+		args = "{}"
+	}
+	if tool, ok := r.tools.Granted(call.Function.Name); ok {
+		return r.callGranted(ctx, turn, step, call, tool)
+	}
+	out, isErr, err := r.tools.Call(ctx, call.Function.Name, json.RawMessage(args))
+	if err != nil {
+		return toolResult{Content: "ERROR: " + err.Error(), IsError: true, Executed: true}, nil
+	}
+	return toolResult{Content: out, IsError: isErr, Executed: true}, nil
+}
+
+// callGranted asks the gateway to authorize one call, then either uses the
+// result it already holds or runs the tool locally and reports the result
+// back. The gateway records the call before the step reaches the journal, so a
+// replacement container can answer the same step without running the tool
+// again.
+func (r *Runtime) callGranted(ctx context.Context, turn int64, step int, call llm.ToolCall, tool gateway.DiscoveryTool) (toolResult, error) {
+	args := json.RawMessage(call.Function.Arguments)
+	if len(bytes.TrimSpace(args)) == 0 {
+		args = json.RawMessage(`{}`)
+	}
+	resp, err := r.beginCall(ctx, gateway.BeginRequest{
+		Turn:      turn,
+		Step:      step,
+		CallID:    call.ID,
+		Tool:      tool.Name,
+		Arguments: args,
+	})
+	switch {
+	case err == nil:
+	case errors.Is(err, platformclient.ErrToolNotGranted), errors.Is(err, platformclient.ErrToolRateLimited):
+		// The gateway refused this call; the model gets the server's message
+		// as an error result. A rate limit is never retried here: waiting is
+		// what the limit exists to prevent.
+		return toolResult{Content: err.Error(), IsError: true}, nil
+	default:
+		// A conflicting key, an unreserved turn, or a gateway that stayed
+		// unreachable for the whole budget cannot be repaired in place.
+		return toolResult{}, fatal(err)
+	}
+	if resp.Result != nil {
+		return toolResult{
+			Content:     resp.Result.Content,
+			IsError:     resp.Result.IsError,
+			Replayed:    resp.Result.Replayed,
+			Interrupted: resp.Result.Interrupted,
+		}, nil
+	}
+	if resp.Dispatch == nil {
+		return toolResult{}, fatal(fmt.Errorf("gateway returned neither a result nor a dispatch for %q", tool.Name))
+	}
+	dispatch := resp.Dispatch
+	timeout := time.Duration(dispatch.TimeoutMS) * time.Millisecond
+	if timeout <= 0 {
+		timeout = mcpCallTimeout
+	}
+	if r.dispatch == nil {
+		return toolResult{}, fatal(fmt.Errorf("no local dispatcher for tool %q", tool.Name))
+	}
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	out, isErr, callErr := r.dispatch(callCtx, tool, args, dispatch.Key, dispatch.Token)
+	cancel()
+	if callErr != nil {
+		out = "ERROR: " + callErr.Error()
+		isErr = true
+	}
+	out = truncate(out, maxToolOutput)
+	if err := r.completeCall(ctx, gateway.CompleteRequest{
+		Key:     dispatch.Key,
+		Content: out,
+		IsError: isErr,
+	}); err != nil {
+		return toolResult{}, err
+	}
+	return toolResult{Content: out, IsError: isErr, Executed: true}, nil
+}
+
+// beginCall authorizes one call, retrying while the gateway is unreachable.
+func (r *Runtime) beginCall(ctx context.Context, req gateway.BeginRequest) (gateway.BeginResponse, error) {
+	return retryGateway(ctx, r.logger, "begin tool call "+req.Tool,
+		func(ctx context.Context) (gateway.BeginResponse, error) {
+			return r.gateway.BeginCall(ctx, req)
+		})
+}
+
+// completeCall records the result of a local dispatch, retrying while the
+// gateway is unreachable. A call that ran must not be journaled without its
+// record, or a replacement would run it again.
+func (r *Runtime) completeCall(ctx context.Context, req gateway.CompleteRequest) error {
+	_, err := retryGateway(ctx, r.logger, "complete tool call "+req.Key,
+		func(ctx context.Context) (struct{}, error) {
+			return struct{}{}, r.gateway.CompleteCall(ctx, req)
+		})
+	if err != nil {
+		return fatal(err)
+	}
+	return nil
+}
+
+// retryGateway runs one idempotent gateway request until it succeeds, is
+// rejected permanently, or the retry budget ends. A repeated request is safe:
+// the gateway answers a call key from its ledger.
+func retryGateway[T any](ctx context.Context, logger *slog.Logger, op string, fn func(context.Context) (T, error)) (T, error) {
+	ctx, cancel := context.WithTimeout(ctx, gatewayRetryBudget)
+	defer cancel()
+	backoff := gatewayRetryBackoff
+	for {
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, gatewayAttemptTimeout)
+		result, err := fn(attemptCtx)
+		attemptCancel()
+		if err == nil {
+			return result, nil
+		}
+		// One attempt can time out while the budget still has room, which is
+		// exactly the case a retry is for.
+		if !retryableGatewayError(err) && !(errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil) {
+			var zero T
+			return zero, err
+		}
+		logger.Warn("tool gateway request failed; retrying", "request", op, "error", err)
+		select {
+		case <-ctx.Done():
+			var zero T
+			return zero, fmt.Errorf("%s: %w", op, err)
+		case <-time.After(backoff):
+		}
+		if backoff < 5*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
+// retryableGatewayError reports whether a gateway request can be repeated. A
+// repeated begin answers from the ledger, so retrying is always safe; the
+// statuses that cannot change are the ones the gateway uses to report a
+// decision.
+func retryableGatewayError(err error) bool {
+	var tool *platformclient.ToolError
+	if errors.As(err, &tool) {
+		switch tool.Status {
+		case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound,
+			http.StatusConflict, http.StatusTooManyRequests:
+			return false
+		}
+		return tool.Status >= 500 || tool.Status == http.StatusRequestTimeout
+	}
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+// permanentGatewayError reports a gateway answer that another attempt cannot
+// change, such as a session the gateway does not know. Everything else, an
+// unreachable control plane included, is worth a replacement runtime.
+func permanentGatewayError(err error) bool {
+	var tool *platformclient.ToolError
+	if !errors.As(err, &tool) {
+		return false
+	}
+	switch tool.Status {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict:
+		return true
+	}
+	return false
 }
 
 func (t *toolset) readFile(args json.RawMessage) (string, bool, error) {

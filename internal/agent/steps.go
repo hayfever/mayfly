@@ -40,11 +40,17 @@ type toolStepInput struct {
 	Arguments string `json:"arguments"`
 }
 
+// toolStepOutput is one journaled tool step. Replayed marks a result the
+// gateway's ledger already held, which the runtime did not call again.
+// Interrupted marks a non-idempotent call a container restart cut short,
+// which the gateway refused to repeat.
 type toolStepOutput struct {
-	Message  llm.Message         `json:"message"`
-	IsError  bool                `json:"is_error,omitempty"`
-	Executed bool                `json:"executed"`
-	Events   []journal.StepEvent `json:"events,omitempty"`
+	Message     llm.Message         `json:"message"`
+	IsError     bool                `json:"is_error,omitempty"`
+	Executed    bool                `json:"executed"`
+	Replayed    bool                `json:"replayed,omitempty"`
+	Interrupted bool                `json:"interrupted,omitempty"`
+	Events      []journal.StepEvent `json:"events,omitempty"`
 }
 
 // fatalError marks a failure the runtime cannot recover from in place. The

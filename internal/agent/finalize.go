@@ -74,6 +74,9 @@ func (r *Runtime) doFinalize(ctx context.Context, reason string, runErr error) e
 	for _, s := range r.cfg.MCPServers {
 		manifest.MCPServers = append(manifest.MCPServers, s.Name)
 	}
+	for _, p := range r.cfg.Plugins {
+		manifest.Plugins = append(manifest.Plugins, p.Name)
+	}
 
 	cfgJSON, err := json.MarshalIndent(r.cfg, "", "  ")
 	if err != nil {
@@ -97,6 +100,21 @@ func (r *Runtime) doFinalize(ctx context.Context, reason string, runErr error) e
 			data, err := readFileIfExists(filepath.Join(r.cfg.ArtifactsDir, name))
 			if err != nil {
 				return err
+			}
+			if err := bw.AddBytes(name, data); err != nil {
+				return err
+			}
+		}
+		// A plugin's stderr is the only place a crashing interpreter explains
+		// itself, so it travels with the session.
+		for _, p := range r.cfg.Plugins {
+			name := "plugins/" + p.Name + ".stderr.log"
+			data, err := readFileIfExists(filepath.Join(r.cfg.ArtifactsDir, "plugins", p.Name+".stderr.log"))
+			if err != nil {
+				return err
+			}
+			if data == nil {
+				continue
 			}
 			if err := bw.AddBytes(name, data); err != nil {
 				return err
