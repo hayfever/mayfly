@@ -496,7 +496,7 @@ func (c *Client) DeletePluginObjects(ctx context.Context, name string) error {
 	if err := c.cs.NetworkingV1().NetworkPolicies(c.namespace).Delete(ctx, object, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		errs = append(errs, fmt.Errorf("delete plugin network policy: %w", err))
 	}
-	if err := c.cs.CoreV1().Secrets(c.namespace).Delete(ctx, object, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+	if err := c.cs.CoreV1().Secrets(c.namespace).Delete(ctx, plugin.GatewayKeyName(name), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		errs = append(errs, fmt.Errorf("delete plugin secret: %w", err))
 	}
 	return errors.Join(errs...)
@@ -514,7 +514,7 @@ func (c *Client) PluginDeployments(ctx context.Context) ([]appsv1.Deployment, er
 
 // PluginGatewayKey reads the gateway key of one service plugin.
 func (c *Client) PluginGatewayKey(ctx context.Context, name string) ([]byte, error) {
-	return c.pluginKey(ctx, plugin.ObjectName(name))
+	return c.pluginKey(ctx, plugin.GatewayKeyName(name))
 }
 
 // pluginKey reads one gateway key Secret by object name.

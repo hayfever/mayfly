@@ -4,9 +4,18 @@ Mayfly has three test layers. The first two run in seconds without a cluster; th
 
 | Layer | Command | What it proves |
 |---|---|---|
-| Unit | `make test` | Package behavior: config, triggers, queue stores (memory, bbolt, Redis), journal stores and sequence reservation (memory, bbolt), turn identity and replay checks, pod spec, claim sizing and garbage collection, pod failure handling, restart budget, retry budgets, broker, bundle, conversation replay |
+| Unit | `make test` | Package behavior: config, triggers, queue stores (memory, bbolt, Redis), journal stores and sequence reservation (memory, bbolt), turn identity and replay checks, pod spec, claim sizing and garbage collection, pod failure handling, restart budget, retry budgets, broker, bundle, conversation replay, plugin manifests and names, the tool gateway resume table and ledger, the inline plugin host, the shim, and service reconcile |
 | Integration | `go test ./test/integration` | Webhook → queue → worker → real `mayfly-agent` process → MCP → WebSocket → close → artifact, in one process; plus a SIGKILL/resume test on the local backend |
 | End-to-end | `make e2e` | The released images and Helm chart on a real Kubernetes cluster with an enforcing CNI |
+
+Plugin behavior is covered in the first two layers:
+
+- `internal/plugin` checks every manifest in [plugins.md](plugins.md), the defaults, the placement blocks, the names, and the loader paths.
+- `internal/gateway` checks the resume table, key reuse, rate limits, the in-flight cap, turn and step bounds, the grant, the audit fields, call tokens, and remote dispatch against an in-process MCP server.
+- `internal/pluginhost` runs a fixture plugin through start, verification, restart, crash, timeout, `_meta`, stderr capping, truncation, and close. The sidecar client is checked against a streamable HTTP server.
+- `internal/pluginsvc` checks the rendered Deployment, Service, NetworkPolicy, key Secret, prune, the HTTP transport, and a local shim child against a fake clientset.
+- `cmd/mayfly-plugin-shim` checks `install-self`, `copy`, `serve` (discovery and call tokens, replay dedupe, multiplexing, child restart, environment), and `probe`.
+- `test/integration` drives a local plugin session, a non-idempotent resume (not repeated), an idempotent resume (repeated with the same key), a completed call (replayed), and a stdio MCP server through the gateway.
 
 ## End-to-end suite
 

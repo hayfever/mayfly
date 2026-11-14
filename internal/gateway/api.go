@@ -56,9 +56,13 @@ type BeginResponse struct {
 
 // Discovery is the tool grant as the runtime sees it.
 type Discovery struct {
-	Tools    []DiscoveryTool         `json:"tools"`
-	Sidecars map[string]SidecarToken `json:"sidecars,omitempty"`
-	Errors   []DiscoveryError        `json:"errors,omitempty"`
+	Tools []DiscoveryTool `json:"tools"`
+	// Wildcards names the mcp.servers owners whose tool list the grant does
+	// not fix. The runtime resolves a local stdio tool against its own list;
+	// the gateway resolves the rest when the call begins.
+	Wildcards map[string]Placement    `json:"wildcards,omitempty"`
+	Sidecars  map[string]SidecarToken `json:"sidecars,omitempty"`
+	Errors    []DiscoveryError        `json:"errors,omitempty"`
 }
 
 // DiscoveryTool is one tool the session may call. Remote tools carry the

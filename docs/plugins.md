@@ -1,10 +1,5 @@
 # Plugins
 
-Status: planned. Nothing on this page is implemented in v0.1. The
-implementation spec is [specs/plugins.md](specs/plugins.md). Until it ships,
-custom tools are MCP servers configured under `mcp.servers`
-([mcp-and-skills.md](mcp-and-skills.md)).
-
 A plugin adds custom tools to a session. It is an MCP server, written in any
 language, declared in the project bundle. Mayfly speaks plain MCP to it. There
 is no plugin SDK and no Mayfly-specific protocol: a stdio server written for
@@ -39,7 +34,7 @@ agent only needs instructions.
 | CPU and memory | Shares the agent container's limits | Its own requests and limits | Its own requests, limits, and replicas |
 | Network | Session pod policy (`runtime.egress`) | Session pod policy (`runtime.egress`) | Its own NetworkPolicy and egress allowlist |
 | Workspace access | Yes | Optional mount | No |
-| Local backend | Yes | Runs as `inline`, with a warning | Child process of `mayflyd` |
+| Local backend | Yes | Runs as `inline`, so its secrets move into the agent process | Child process of `mayflyd` |
 
 Choose:
 
@@ -83,34 +78,42 @@ Scaffold a plugin inside the bundle directory:
 mayfly plugin init --lang python plugins/word-stats
 ```
 
-That writes `plugin.yaml`, `server.py`, `requirements.txt`, and a `Dockerfile`.
-The server uses the official MCP Python SDK:
+That writes `plugin.yaml`, `server.py`, `requirements.txt`, a `Dockerfile`, and
+a `.dockerignore`. The server uses only the Python standard library, so
+`requirements.txt` stays empty. Stdout carries the protocol; write logs to
+stderr.
+
+The scaffold exposes one `send` tool. To count words instead, replace the
+scaffold's `send` entry in `HANDLERS` with this handler:
 
 ```python
 # plugins/word-stats/server.py
 import os
 import pathlib
 
-from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("word-stats")
-
-
-@mcp.tool()
-def count_words(path: str) -> str:
-    """Count words in a workspace file."""
+def count_words(arguments, meta):
+    """Count the words in a workspace file."""
     root = pathlib.Path(os.environ["MAYFLY_WORKSPACE_DIR"]).resolve()
-    target = (root / path).resolve()
+    target = (root / arguments["path"]).resolve()
     if root not in target.parents:
         raise ValueError("path must stay inside the workspace")
     return str(len(target.read_text().split()))
-
-
-if __name__ == "__main__":
-    mcp.run()  # stdio
 ```
 
-Stdout carries the protocol. Write logs to stderr.
+Declare the same tool in `TOOLS`:
+
+```python
+    {
+        "name": "count_words",
+        "description": "Count words in a workspace file.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+```
 
 ```yaml
 # plugins/word-stats/plugin.yaml
@@ -173,65 +176,46 @@ the agent container.
 mayfly plugin init --lang go plugins/notify
 ```
 
+The scaffold is a standard-library-only stdio server with one `send` tool.
+[examples/plugins/notify](../examples/plugins/notify) is the complete webhook
+plugin; its handler:
+
 ```go
-// plugins/notify/main.go
-package main
-
-import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"log"
-	"net/http"
-	"os"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-)
-
-type PostInput struct {
-	Text string `json:"text" jsonschema:"the message to post"`
-}
-
-type PostOutput struct {
-	Status int `json:"status"`
-}
-
-func post(ctx context.Context, req *mcp.CallToolRequest, in PostInput) (*mcp.CallToolResult, PostOutput, error) {
-	body, err := json.Marshal(map[string]string{"text": in.Text})
-	if err != nil {
-		return nil, PostOutput{}, err
+// plugins/notify/main.go (excerpt)
+func post(text string, meta map[string]any) (string, error) {
+	target := os.Getenv("NOTIFY_WEBHOOK_URL")
+	if target == "" {
+		return "", fmt.Errorf("NOTIFY_WEBHOOK_URL is not set")
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, os.Getenv("NOTIFY_WEBHOOK_URL"), bytes.NewReader(body))
+	key, _ := meta["mayfly.io/idempotency-key"].(string)
+	body, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {
-		return nil, PostOutput{}, err
+		return "", err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if key, _ := req.Params.GetMeta()["mayfly.io/idempotency-key"].(string); key != "" {
-		httpReq.Header.Set("Idempotency-Key", key)
-	}
-	resp, err := http.DefaultClient.Do(httpReq)
+	req, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
-		return nil, PostOutput{}, err
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if key != "" {
+		req.Header.Set("Idempotency-Key", key)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return nil, PostOutput{}, fmt.Errorf("webhook returned %d", resp.StatusCode)
+		return "", fmt.Errorf("webhook returned %d", resp.StatusCode)
 	}
-	return nil, PostOutput{Status: resp.StatusCode}, nil
-}
-
-func main() {
-	server := mcp.NewServer(&mcp.Implementation{Name: "notify", Version: "0.1.0"}, nil)
-	mcp.AddTool(server, &mcp.Tool{Name: "post", Description: "Post a message to the team channel."}, post)
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		log.Fatal(err)
-	}
+	return fmt.Sprintf("posted (status %d)", resp.StatusCode), nil
 }
 ```
 
-The server is still a stdio server. Mayfly runs it behind a small adapter in
-the sidecar, so the same image works in every placement.
+A plugin is a plain stdio MCP server: JSON-RPC on stdin and stdout, logs on
+stderr, with `initialize`, `tools/list`, and `tools/call`. No SDK is required.
+Mayfly runs the process behind a small adapter in the sidecar, so the same
+image works in every placement.
 
 ```yaml
 # plugins/notify/plugin.yaml
@@ -244,6 +228,8 @@ command: bin/notify
 local:
   command: go
   args: [run, .]
+env:
+  NOTIFY_CHANNEL: "#ops"
 secrets:
   - env: NOTIFY_WEBHOOK_URL
     secret: mayfly-plugin-notify
@@ -316,9 +302,10 @@ service:
 
 `mayflyd` creates `Deployment/mayfly-plugin-tickets`,
 `Service/mayfly-plugin-tickets`, and `NetworkPolicy/mayfly-plugin-tickets` in
-`plugins.namespace`. The NetworkPolicy admits traffic only from `mayflyd` and
-allows egress only to DNS and `service.egress`. Session pods never reach the
-service; the gateway calls it.
+`plugins.namespace`, plus `Secret/mayfly-gateway-tickets`, which holds the key
+that signs call tokens for the service. The NetworkPolicy admits traffic only
+from `mayflyd` and allows egress only to DNS and `service.egress`. Session pods
+never reach the service; the gateway calls it.
 
 A service is shared, so per-session data must be keyed on the session ID that
 Mayfly sends with every call (`_meta["mayfly.io/session"]`).
@@ -482,13 +469,13 @@ by Mayfly and cannot be declared. Unknown fields are rejected.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `service.replicas` | `1` | Deployment replicas |
-| `service.concurrency` | `8` | Concurrent calls per replica |
+| `service.replicas` | `1` | Deployment replicas, `0` to `20`. `0` parks the plugin |
+| `service.concurrency` | `8` | Concurrent calls per replica, `1` to `256` |
 | `service.resources` | none | `requests` and `limits` for the plugin container |
 | `service.egress` | `[]` | CIDRs and ports the service may reach, besides DNS |
-| `service.transport` | `stdio` | `stdio`: the plugin is a stdio server and Mayfly's adapter serves it over HTTP. `http`: the plugin serves streamable HTTP MCP itself on `port` and `path` |
+| `service.transport` | `stdio` | `stdio`: the plugin is a stdio server and Mayfly's adapter serves it over HTTP. `http`: the plugin serves streamable HTTP MCP itself on `port` and `path`, and Mayfly sets `MAYFLY_GATEWAY_KEY` so it can verify call tokens |
 | `service.port`, `service.path` | `8080`, `/mcp` | Where an `http` plugin listens |
-| `service.mcpServer` | empty | Name of an `mcp.servers` entry with `transport: http`. Mayfly creates nothing and calls that server; `image`, `command`, `secrets`, and the other `service` fields must be empty |
+| `service.mcpServer` | empty | Name of an `mcp.servers` entry with `transport: http`. Mayfly creates nothing and calls that server; `image`, `command`, `args`, `local`, `env`, `secrets`, and every other `service` field must be empty |
 
 ## Enable a plugin for an agent
 
@@ -514,7 +501,8 @@ agents:
 plugin notify placement=sidecar scope=shared tools=2 effects=post image=ghcr.io/acme/mayfly-plugin-notify@sha256:...
 ```
 
-`effects` lists the tools that are not idempotent.
+`effects` lists the tools that are not idempotent. A `service.mcpServer`
+plugin has `image=-` and ends with `mcpServer=<server>`.
 
 ## Tool names
 
@@ -710,7 +698,7 @@ the old behavior for them.
 | Sidecar container exits | Kubernetes restarts it with back-off. Calls meanwhile return an error result |
 | Plugin exits or the connection drops during a call | Error result with the last stderr lines when known. Not retried |
 | Call exceeds its timeout | Mayfly sends `notifications/cancelled` and returns an error result. A late response is discarded |
-| Rate limit reached | Error result naming the limit and when to retry. Not counted as a call |
+| Rate limit reached | Error result naming the plugin. The runtime does not retry, and the gateway records no call |
 | Gateway unreachable | The runtime retries for up to 5 minutes, then exits so a replacement container resumes the turn |
 | Session ends | Inline: stdin closed, SIGTERM to the process group after 2 seconds, SIGKILL after 2 more. Sidecar: stopped with the pod. Service: keeps running |
 
@@ -740,8 +728,10 @@ mayfly plugin test DIR TOOL JSON [--workspace DIR] [--key KEY] [--timeout 2m]
   `MAYFLY_WORKSPACE_DIR` (default: a temporary directory). `--key` sets the
   idempotency key.
 
-Placement does not change what the plugin process sees, so a plugin that
-passes `mayfly plugin test` behaves the same in every placement.
+Placement does not change the MCP protocol the plugin speaks, so a plugin that
+passes `mayfly plugin test` behaves the same in every placement. The identity
+variables differ: a service plugin gets the session ID per call in
+`_meta["mayfly.io/session"]` instead of in its environment.
 
 ## Local backend
 
@@ -749,8 +739,9 @@ The local backend does not pull images. It runs `local.command` on the host
 with the manifest directory as the plugin directory:
 
 - `inline` as on Kubernetes.
-- `sidecar` as `inline`, with a startup warning. Secrets are then visible to
-  the agent process, and the `allowShell` rule applies.
+- `sidecar` as `inline`. Its secrets are then read from the `mayflyd`
+  environment and written into the agent's secret directory, so the agent
+  process can read them, and the `allowShell` rule applies.
 - `service` as one child process of `mayflyd`, behind the same adapter, on a
   Unix socket in the state directory. `service.mcpServer` works unchanged.
 

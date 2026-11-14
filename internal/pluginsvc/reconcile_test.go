@@ -143,6 +143,14 @@ func TestReconcileCreates(t *testing.T) {
 	}
 
 	object := plugin.ObjectName("tickets")
+	// The bundle's own secret shares the plugin name. Reconcile must not adopt
+	// it as the gateway key or overwrite it.
+	if _, err := cs.CoreV1().Secrets("plugins").Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "mayfly-plugin-tickets", Namespace: "plugins"},
+		Data:       map[string][]byte{"token": []byte("ticket-token")},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
 	manifest := manifests[0]
 	deployment, err := cs.AppsV1().Deployments("plugins").Get(ctx, object, metav1.GetOptions{})
 	if err != nil {
@@ -222,12 +230,19 @@ func TestReconcileCreates(t *testing.T) {
 	if _, err := cs.NetworkingV1().NetworkPolicies("plugins").Get(ctx, object, metav1.GetOptions{}); err != nil {
 		t.Fatalf("network policy: %v", err)
 	}
-	secret, err := cs.CoreV1().Secrets("plugins").Get(ctx, object, metav1.GetOptions{})
+	secret, err := cs.CoreV1().Secrets("plugins").Get(ctx, plugin.GatewayKeyName("tickets"), metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("secret: %v", err)
+		t.Fatalf("gateway secret: %v", err)
 	}
 	if len(secret.Data["key"]) != 32 {
 		t.Fatalf("gateway key length = %d", len(secret.Data["key"]))
+	}
+	bundleSecret, err := cs.CoreV1().Secrets("plugins").Get(ctx, "mayfly-plugin-tickets", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("bundle secret: %v", err)
+	}
+	if string(bundleSecret.Data["token"]) != "ticket-token" || len(bundleSecret.Data["key"]) != 0 {
+		t.Fatalf("bundle secret was changed: %+v", bundleSecret.Data)
 	}
 
 	url, key, err := reconciler.ServiceURL("tickets")
@@ -333,7 +348,7 @@ func TestReconcilePrune(t *testing.T) {
 			return err
 		},
 		func() error {
-			_, err := cs.CoreV1().Secrets("plugins").Get(ctx, plugin.ObjectName("word"), metav1.GetOptions{})
+			_, err := cs.CoreV1().Secrets("plugins").Get(ctx, plugin.GatewayKeyName("word"), metav1.GetOptions{})
 			return err
 		},
 	} {
@@ -443,7 +458,7 @@ func TestReconcileHTTPTransport(t *testing.T) {
 	if gatewayKey == nil || gatewayKey.ValueFrom == nil || gatewayKey.ValueFrom.SecretKeyRef == nil {
 		t.Fatalf("gateway key env = %+v", gatewayKey)
 	}
-	if gatewayKey.ValueFrom.SecretKeyRef.Name != plugin.ObjectName("tickets") {
+	if gatewayKey.ValueFrom.SecretKeyRef.Name != plugin.GatewayKeyName("tickets") {
 		t.Fatalf("gateway key secret = %+v", gatewayKey.ValueFrom.SecretKeyRef)
 	}
 	if container.StartupProbe == nil || container.StartupProbe.TCPSocket == nil ||

@@ -266,6 +266,44 @@ func TestStdioMCPThroughGateway(t *testing.T) {
 	assertSessionStatus(t, gs, model.StatusRunning)
 }
 
+// TestStdioMCPWildcardThroughGateway proves that a stdio mcp.servers entry
+// without a tools allowlist still routes through the gateway: the runtime
+// resolves a tool its own manager listed against the wildcard owner.
+func TestStdioMCPWildcardThroughGateway(t *testing.T) {
+	root := repoRoot(t)
+	fixture := buildFixture(t, root)
+	llmServer := pluginLLM("mcp_echostd_echo", `{"text":"hi"}`)
+	gs := startGatewaySession(t, sessionSetup{
+		llm: llmServer,
+		mcpServers: []config.MCPServerConfig{{
+			Name:      "echostd",
+			Transport: "stdio",
+			Command:   fixture,
+		}},
+		agent: "plain",
+	})
+
+	entries := waitForTurn(t, gs, func(entries []journal.Entry) bool {
+		return len(entries) > 2 && entries[2].Name == "tool:mcp_echostd_echo"
+	})
+	step := decodeStep(t, entries[2])
+	if !step.Executed || step.IsError || step.Replayed || step.Interrupted {
+		t.Fatalf("step = %+v", step)
+	}
+	if step.Message.Content != "echo: hi" {
+		t.Fatalf("result = %q", step.Message.Content)
+	}
+	records := waitForAudit(t, gs.audit, "mcp_echostd_echo", "call.done")
+	if !hasAuditEvent(records, "call.begin") || !hasAuditEvent(records, "call.done") {
+		t.Fatalf("audit = %+v, want begin and done", records)
+	}
+	record := waitForLedgerDone(t, gs, "mcp_echostd_echo")
+	if record.State != journal.CallDone || !strings.Contains(record.Content, "echo: hi") {
+		t.Fatalf("ledger record = %+v", record)
+	}
+	assertSessionStatus(t, gs, model.StatusRunning)
+}
+
 // startGatewaySession starts a control plane whose sessions may call gateway
 // tools, creates one session, and returns it.
 func startGatewaySession(t *testing.T, setup sessionSetup) *gatewaySession {
@@ -316,11 +354,19 @@ func startGatewaySession(t *testing.T, setup sessionSetup) *gatewaySession {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = audit.Close() })
+	mcpDefs := make(map[string]config.MCPServerConfig, len(cfg.MCP.Servers))
+	for _, def := range cfg.MCP.Servers {
+		mcpDefs[def.Name] = def
+	}
 	gw := gateway.New(gateway.Options{
 		Ledger:    &delayedLedger{Ledger: memory, hold: setup.holdComplete},
 		Sequencer: memory,
-		Audit:     audit,
-		Logger:    logger,
+		MCPServer: func(name string) (config.MCPServerConfig, bool) {
+			def, ok := mcpDefs[name]
+			return def, ok
+		},
+		Audit:  audit,
+		Logger: logger,
 	})
 	mgr.SetGateway(extraGrants{gateway: gw, tools: setup.extraGrant})
 
@@ -658,7 +704,7 @@ func waitForAudit(t *testing.T, path, tool, want string) []auditRecord {
 				return true, ""
 			}
 		}
-		return false, fmt.Sprintf("%d records", len(records))
+		return false, fmt.Sprintf("%d records: %+v", len(records), records)
 	})
 	return records
 }

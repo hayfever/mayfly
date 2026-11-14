@@ -1,8 +1,8 @@
 # Agents
 
-An agent plugin is a manifest that declares one or more selectable agents. It can also select a runtime image. The control plane parses manifests and builds session configuration; it never executes plugin code.
+An agent manifest is a bundle file that declares one or more selectable agents. It can also select a runtime image. The control plane parses manifests and builds session configuration; it never executes their code.
 
-This is the only plugin surface in the current version. Tools remain MCP servers, and prompt extensions remain skills.
+Agent manifests share a bundle with plugin manifests. A plugin adds custom tools to a session; see [plugins.md](plugins.md).
 
 ## Select an agent
 
@@ -64,6 +64,7 @@ agents:
 | `systemPromptFile` | Prompt template file relative to the manifest; mutually exclusive with `systemPrompt` |
 | `skills` | Skill names from the global registry (local directories or verified remote sources) |
 | `mcpServers` | MCP server names from the global MCP registry |
+| `plugins` | Plugin names from the bundle's `plugins/` directory. Plugins need the built-in harness. See [plugins.md](plugins.md) |
 | `allowShell` | Enables the `run_command` tool for this agent; overrides `sessions.allow_shell` |
 | `maxSteps` | Model/tool iterations per user message |
 | `maxHistoryMessages` | Messages sent to the model |
@@ -191,7 +192,7 @@ agent maxSteps     > sessions.max_steps
 agent maxHistory   > sessions.max_history_messages
 ```
 
-Request skills and MCP servers replace the agent lists when non-empty. They do not append. Unknown names are rejected.
+Request skills and MCP servers replace the agent lists when non-empty. They do not append. Unknown names are rejected. Plugins have no request or trigger override: only the agent manifest selects them.
 
 ## Discovery
 
@@ -205,7 +206,9 @@ agents:
 
 All `.yaml`, `.yml`, and `.json` files under the directories are parsed. Hidden directories are skipped so Kubernetes ConfigMap mounts work. A manifest may declare several agents. Manifests load at control-plane startup; restart `mayflyd` after changing them. Sessions are short-lived, so there is no hot reload.
 
-`allowed_images` uses `path.Match` globs. An empty list allows any image declared in a manifest. Keep it non-empty in shared clusters and pin images by digest.
+`allowed_images` uses `path.Match` globs. An empty list allows any image declared in a manifest, including plugin images. Keep it non-empty in shared clusters and pin images by digest.
+
+A bundle also carries plugin manifests under `plugins/<name>/plugin.yaml`. They are loaded by the same project loader and checked for the same scope owners.
 
 ## Harness contract
 
@@ -223,7 +226,7 @@ The session gets the same pod security context, NetworkPolicy, session token, an
 
 The local backend ignores `harness`, `image`, `command`, and `args` and runs `runtime.agent_binary`. Selecting a non-Mayfly harness locally fails because the dispatcher is not involved.
 
-Do not run arbitrary plugin code in `mayflyd`.
+Do not run arbitrary agent code in `mayflyd`.
 
 ## Failure behavior
 
@@ -249,7 +252,7 @@ Set `runtime.image_pull_secrets` to the names of registry Secrets in the session
 
 ## Limits
 
-- No executable hooks or custom tools in the control plane or Go runtime.
-- Custom tools belong in MCP servers.
+- No executable hooks in the control plane or Go runtime.
+- Custom tools belong in plugins or MCP servers. See [plugins.md](plugins.md) and [mcp-and-skills.md](mcp-and-skills.md).
 - Custom harnesses belong in runtime images.
 - No package manager, hot reload, or plugin registry yet.

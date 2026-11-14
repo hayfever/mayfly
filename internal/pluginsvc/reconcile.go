@@ -319,7 +319,6 @@ func renderService(manifest plugin.Manifest, cfg RenderConfig, key []byte) (k8s.
 	if err != nil {
 		return k8s.PluginObjects{}, err
 	}
-	object := plugin.ObjectName(manifest.Name)
 	labels := pluginLabels(manifest.Name)
 	annotations := map[string]string{k8s.AnnotationSpecHash: manifest.SpecHash()}
 	return k8s.PluginObjects{
@@ -327,7 +326,7 @@ func renderService(manifest plugin.Manifest, cfg RenderConfig, key []byte) (k8s.
 		Service:       renderServiceObject(manifest, cfg, labels, annotations),
 		NetworkPolicy: renderNetworkPolicy(manifest, cfg, labels, annotations),
 		Secret: &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: object, Namespace: cfg.Namespace, Labels: labels},
+			ObjectMeta: metav1.ObjectMeta{Name: plugin.GatewayKeyName(manifest.Name), Namespace: cfg.Namespace, Labels: labels},
 			Type:       corev1.SecretTypeOpaque,
 			Data:       map[string][]byte{"key": key},
 		},
@@ -534,7 +533,7 @@ func gatewayKeyVolume(name string) corev1.Volume {
 		Name: "gateway-key",
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
-				SecretName:  plugin.ObjectName(name),
+				SecretName:  plugin.GatewayKeyName(name),
 				DefaultMode: &mode,
 				Items:       []corev1.KeyToPath{{Key: "key", Path: "key", Mode: &mode}},
 			},
@@ -548,7 +547,7 @@ func gatewayKeyEnv(name string) corev1.EnvVar {
 		Name: "MAYFLY_GATEWAY_KEY",
 		ValueFrom: &corev1.EnvVarSource{
 			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: plugin.ObjectName(name)},
+				LocalObjectReference: corev1.LocalObjectReference{Name: plugin.GatewayKeyName(name)},
 				Key:                  "key",
 			},
 		},
