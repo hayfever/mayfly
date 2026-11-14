@@ -1,0 +1,131 @@
+// {{.Name}} is a Mayfly plugin: a stdio MCP server with one tool.
+//
+// The runtime speaks MCP to this process over stdin and stdout. Stdout carries
+// the protocol; write logs to stderr. Node strips the type annotations when it
+// loads a .ts file, so this file runs without a build step.
+
+import * as readline from "node:readline";
+
+const PROTOCOL_VERSION = "2025-06-18";
+const SERVER_INFO = { name: "{{.Name}}", version: "{{.Version}}" };
+
+type ToolDefinition = {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+};
+
+type CallParams = {
+  name?: string;
+  arguments?: Record<string, unknown>;
+  _meta?: Record<string, unknown>;
+};
+
+type Request = {
+  id?: unknown;
+  method?: string;
+  params?: CallParams;
+};
+
+const TOOLS: ToolDefinition[] = [
+  {
+    name: "send",
+    description: "Send a message to SAMPLE_API_URL.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "the message to send" },
+      },
+      required: ["text"],
+    },
+  },
+];
+
+// send posts one message and forwards the gateway's idempotency key. The key
+// is the same across replacement containers, so a target that deduplicates on
+// it takes the effect once.
+//
+// The tool stays at `idempotent: false` in plugin.yaml. Set it to true only
+// when the target really honors the header: one that ignores it would take the
+// effect twice after a restart.
+async function send(text: string, meta: Record<string, unknown>): Promise<string> {
+  const raw = meta["mayfly.io/idempotency-key"];
+  const key = typeof raw === "string" ? raw : "";
+  const target = process.env.SAMPLE_API_URL ?? "";
+  if (target === "") {
+    return `SAMPLE_API_URL is not set; text ${JSON.stringify(text)}, idempotency key ${JSON.stringify(key)}`;
+  }
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (key !== "") {
+    headers["Idempotency-Key"] = key;
+  }
+  const response = await fetch(target, { method: "POST", headers, body: JSON.stringify({ text }) });
+  if (!response.ok) {
+    throw new Error(`${target} returned ${response.status}`);
+  }
+  return `sent ${JSON.stringify(text)} (status ${response.status})`;
+}
+
+async function callTool(params: CallParams): Promise<Record<string, unknown>> {
+  const name = params.name ?? "";
+  if (name !== "send") {
+    throw new Error(`unknown tool ${JSON.stringify(name)}`);
+  }
+  const args = params.arguments ?? {};
+  const text = typeof args.text === "string" ? args.text : "";
+  return textResult(await send(text, params._meta ?? {}));
+}
+
+function textResult(text: string): Record<string, unknown> {
+  return { content: [{ type: "text", text }] };
+}
+
+function errorResult(error: unknown): Record<string, unknown> {
+  const text = error instanceof Error ? error.message : String(error);
+  return { content: [{ type: "text", text }], isError: true };
+}
+
+async function handle(message: Request): Promise<Record<string, unknown>> {
+  const response: Record<string, unknown> = { jsonrpc: "2.0", id: message.id };
+  switch (message.method) {
+    case "initialize":
+      response.result = {
+        protocolVersion: PROTOCOL_VERSION,
+        capabilities: { tools: {} },
+        serverInfo: SERVER_INFO,
+      };
+      break;
+    case "tools/list":
+      response.result = { tools: TOOLS };
+      break;
+    case "tools/call":
+      try {
+        response.result = await callTool(message.params ?? {});
+      } catch (error) {
+        // A failed tool is an error result, not a crash.
+        response.result = errorResult(error);
+      }
+      break;
+    default:
+      response.error = { code: -32601, message: `method not found: ${message.method ?? ""}` };
+  }
+  return response;
+}
+
+const lines = readline.createInterface({ input: process.stdin });
+lines.on("line", async (line: string) => {
+  if (line.trim() === "") {
+    return;
+  }
+  let message: Request;
+  try {
+    message = JSON.parse(line) as Request;
+  } catch (error) {
+    console.error(`decode request: ${String(error)}`);
+    return;
+  }
+  if (message.id === undefined) {
+    return; // a notification, for example notifications/initialized
+  }
+  process.stdout.write(JSON.stringify(await handle(message)) + "\n");
+});
