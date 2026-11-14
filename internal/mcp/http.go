@@ -12,20 +12,29 @@ import (
 )
 
 type httpTransport struct {
-	url       string
-	token     string
-	headers   map[string]string
-	client    *http.Client
-	mu        sync.Mutex
-	sessionID string
+	url        string
+	headers    map[string]string
+	client     *http.Client
+	perRequest func(*http.Request)
+	mu         sync.Mutex
+	sessionID  string
 }
 
-func newHTTPTransport(url, token string, headers map[string]string) *httpTransport {
+// defaultHTTPClient is the client for a Streamable HTTP server: one request
+// can wait as long as a tool may run.
+func defaultHTTPClient() *http.Client {
+	return &http.Client{Timeout: 5 * time.Minute}
+}
+
+func newHTTPTransport(url string, headers map[string]string, client *http.Client, perRequest func(*http.Request)) *httpTransport {
+	if client == nil {
+		client = defaultHTTPClient()
+	}
 	return &httpTransport{
-		url:     url,
-		token:   token,
-		headers: headers,
-		client:  &http.Client{Timeout: 5 * time.Minute},
+		url:        url,
+		headers:    headers,
+		client:     client,
+		perRequest: perRequest,
 	}
 }
 
@@ -70,9 +79,6 @@ func (t *httpTransport) post(ctx context.Context, payload []byte) (*http.Respons
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("MCP-Protocol-Version", protocolVersion)
-	if t.token != "" {
-		req.Header.Set("Authorization", "Bearer "+t.token)
-	}
 	t.mu.Lock()
 	for k, v := range t.headers {
 		req.Header.Set(k, v)
@@ -81,6 +87,9 @@ func (t *httpTransport) post(ctx context.Context, payload []byte) (*http.Respons
 		req.Header.Set("Mcp-Session-Id", t.sessionID)
 	}
 	t.mu.Unlock()
+	if t.perRequest != nil {
+		t.perRequest(req)
+	}
 
 	resp, err := t.client.Do(req)
 	if err != nil {
@@ -113,8 +122,8 @@ func (t *httpTransport) Close() error {
 		return nil
 	}
 	req.Header.Set("Mcp-Session-Id", sid)
-	if t.token != "" {
-		req.Header.Set("Authorization", "Bearer "+t.token)
+	if t.perRequest != nil {
+		t.perRequest(req)
 	}
 	resp, err := t.client.Do(req)
 	if err == nil {
