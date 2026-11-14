@@ -162,7 +162,7 @@ curl -sS http://localhost:8080/hooks/generic \
   -d '{"prompt":"Check the latest deploy"}'
 ```
 
-Full endpoint list: [docs/api.md](docs/api.md). Provider auth: [docs/providers.md](docs/providers.md). Scheduled sources: [docs/sources.md](docs/sources.md). Release process: [docs/release.md](docs/release.md). Testing: [docs/testing.md](docs/testing.md).
+Full endpoint list: [docs/api.md](docs/api.md). Provider auth: [docs/providers.md](docs/providers.md). Scheduled sources: [docs/sources.md](docs/sources.md). Release process: [docs/release.md](docs/release.md). Testing: [docs/testing.md](docs/testing.md). Plugins (planned, not built yet): [docs/plugins.md](docs/plugins.md).
 
 ## Configuration
 
