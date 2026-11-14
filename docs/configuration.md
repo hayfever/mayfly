@@ -174,7 +174,7 @@ agents:
 
 | Key | Meaning |
 |---|---|
-| `dirs` | Directories of `.yaml`, `.yml`, or `.json` agent manifests. Loaded at startup; hidden directories are skipped |
+| `dirs` | Directories of `.yaml`, `.yml`, or `.json` bundles. A bundle holds agents, schedules, connections, and sources. Loaded at startup; hidden directories are skipped |
 | `allowed_images` | Globs for images declared by manifests. Empty means any manifest image is allowed |
 
 Agent manifests and selection are documented in [agents.md](agents.md). The built-in `default` agent uses the global model, skill, MCP, and limit settings. Manifest agents can select a named in-image `harness`, and can set a `runtime` image, command, args, env, and harness config.

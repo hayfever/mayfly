@@ -30,6 +30,9 @@ type Skill struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Body        string `json:"body"`
+	// Scope is "shared" or "agent:<name>". A private skill is available only
+	// to its owner, and never included in defaults.
+	Scope string `json:"scope,omitempty"`
 }
 
 // MCPServer describes one MCP server made available to the session.

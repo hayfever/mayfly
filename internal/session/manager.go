@@ -28,6 +28,7 @@ import (
 	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/k8s"
 	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/project"
 	"github.com/hayfever/mayfly/internal/runner"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
 	"github.com/hayfever/mayfly/internal/skills"
@@ -102,6 +103,7 @@ type instance struct {
 // Manager is the control plane session registry and lifecycle engine.
 type Manager struct {
 	cfg     *config.Config
+	bundle  *project.Bundle
 	logger  *slog.Logger
 	store   artifact.Store
 	hub     *hub.Hub
@@ -134,7 +136,7 @@ type Manager struct {
 }
 
 // New builds a manager. kube may be nil for the local backend.
-func New(cfg *config.Config, store artifact.Store, h *hub.Hub, js journal.Durable, r runner.Runner, kube *k8s.Client, logger *slog.Logger) (*Manager, error) {
+func New(cfg *config.Config, bundle *project.Bundle, store artifact.Store, h *hub.Hub, js journal.Durable, r runner.Runner, kube *k8s.Client, logger *slog.Logger) (*Manager, error) {
 	if js == nil {
 		return nil, errors.New("journal store is required")
 	}
@@ -164,6 +166,7 @@ func New(cfg *config.Config, store artifact.Store, h *hub.Hub, js journal.Durabl
 	}
 	m := &Manager{
 		cfg:         cfg,
+		bundle:      bundle,
 		logger:      logger,
 		store:       store,
 		hub:         h,
@@ -319,18 +322,18 @@ func (m *Manager) resolveRequest(opts CreateOptions) (request, error) {
 		return request{}, fmt.Errorf("model %q is not allowed", modelName)
 	}
 	requestedSkills := opts.Skills
-	if len(requestedSkills) == 0 {
-		requestedSkills = agent.Skills
+	if len(requestedSkills) == 0 && agent.Skills != nil {
+		requestedSkills = *agent.Skills
 	}
-	resolvedSkills, skillNames, err := m.resolveSkills(requestedSkills)
+	resolvedSkills, skillNames, err := m.resolveSkills(agent, requestedSkills)
 	if err != nil {
 		return request{}, err
 	}
 	requestedMCP := opts.MCPServers
-	if len(requestedMCP) == 0 {
-		requestedMCP = agent.MCPServers
+	if len(requestedMCP) == 0 && agent.MCPServers != nil {
+		requestedMCP = *agent.MCPServers
 	}
-	resolvedMCP, mcpNames, err := m.resolveMCP(requestedMCP)
+	resolvedMCP, mcpNames, err := m.resolveMCP(agent, requestedMCP)
 	if err != nil {
 		return request{}, err
 	}
@@ -709,9 +712,9 @@ func (m *Manager) Ready() error {
 	return nil
 }
 
-func (m *Manager) resolveSkills(requested []string) ([]sessioncfg.Skill, []string, error) {
+func (m *Manager) resolveSkills(agent agents.Agent, requested []string) ([]sessioncfg.Skill, []string, error) {
 	names := requested
-	if len(names) == 0 {
+	if len(names) == 0 && agent.Skills == nil {
 		names = m.defaultSkill
 	}
 	out := make([]sessioncfg.Skill, 0, len(names))
@@ -725,6 +728,9 @@ func (m *Manager) resolveSkills(requested []string) ([]sessioncfg.Skill, []strin
 		if !ok {
 			return nil, nil, fmt.Errorf("unknown skill %q", name)
 		}
+		if !scopeVisible(skill.Scope, agent.Name) {
+			return nil, nil, fmt.Errorf("skill %q is not available to agent %q", name, agent.Name)
+		}
 		seen[name] = true
 		out = append(out, skill)
 		selected = append(selected, name)
@@ -732,9 +738,9 @@ func (m *Manager) resolveSkills(requested []string) ([]sessioncfg.Skill, []strin
 	return out, selected, nil
 }
 
-func (m *Manager) resolveMCP(requested []string) ([]sessioncfg.MCPServer, []string, error) {
+func (m *Manager) resolveMCP(agent agents.Agent, requested []string) ([]sessioncfg.MCPServer, []string, error) {
 	names := requested
-	if len(names) == 0 {
+	if len(names) == 0 && agent.MCPServers == nil {
 		names = m.defaultMCP
 	}
 	internal := strings.TrimRight(m.cfg.Server.InternalURL, "/")
@@ -747,6 +753,9 @@ func (m *Manager) resolveMCP(requested []string) ([]sessioncfg.MCPServer, []stri
 		def, ok := m.mcpByName[name]
 		if !ok {
 			return nil, nil, fmt.Errorf("unknown mcp server %q", name)
+		}
+		if !scopeVisible(def.Scope, agent.Name) {
+			return nil, nil, fmt.Errorf("mcp server %q is not available to agent %q", name, agent.Name)
 		}
 		seen[name] = true
 		server := sessioncfg.MCPServer{

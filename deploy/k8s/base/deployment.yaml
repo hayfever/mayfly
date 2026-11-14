@@ -34,6 +34,9 @@ spec:
           envFrom:
             - secretRef:
                 name: mayfly-secrets
+            - secretRef:
+                name: mayfly-sources
+                optional: true
           env:
             - name: MAYFLY_LOG_LEVEL
               value: info
@@ -81,6 +84,11 @@ spec:
             - name: agents
               mountPath: /etc/mayfly-agents
               readOnly: true
+            # Operator-owned bundles (for example competitor-watch). No
+            # overlay generates mayfly-bundles, so redeploying never removes it.
+            - name: bundles
+              mountPath: /etc/mayfly-bundles
+              readOnly: true
             - name: tmp
               mountPath: /tmp
             - name: state
@@ -96,6 +104,10 @@ spec:
         - name: agents
           configMap:
             name: mayfly-agents
+            optional: true
+        - name: bundles
+          configMap:
+            name: mayfly-bundles
             optional: true
         - name: tmp
           emptyDir:

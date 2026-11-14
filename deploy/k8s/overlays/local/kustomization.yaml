@@ -65,8 +65,7 @@ patches:
           llm:
             base_url: http://llmstub.mayfly.svc.cluster.local:9099/v1
             model: stub
-            allow_models: [stub]
-            timeout: 120s
+            timeout: 300s
           artifacts:
             store: local
             local:
@@ -80,10 +79,16 @@ patches:
             backend: bbolt
             bbolt:
               path: /var/lib/mayfly/journal.db
+          sources:
+            state_path: /var/lib/mayfly/schedule.db
+            max_artifact_bytes: 16777216
+            concurrency: 4
+            timeout: 15m
+            job_timeout: 30m
           skills:
             dirs: [/etc/mayfly-skills]
           agents:
-            dirs: [/etc/mayfly-agents]
+            dirs: [/etc/mayfly-agents, /etc/mayfly-bundles]
             allowed_images: [mayfly-agent:dev]
           mcp:
             servers:

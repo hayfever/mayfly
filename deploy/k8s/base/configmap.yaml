@@ -64,6 +64,14 @@ data:
       backend: bbolt
       bbolt:
         path: /var/lib/mayfly/journal.db
+    agents:
+      dirs: [/etc/mayfly-agents, /etc/mayfly-bundles]
+    sources:
+      state_path: /var/lib/mayfly/schedule.db
+      max_artifact_bytes: 16777216
+      concurrency: 4
+      timeout: 15m
+      job_timeout: 30m
     skills:
       dirs: [/etc/mayfly-skills]
     mcp:

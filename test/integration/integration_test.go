@@ -28,6 +28,7 @@ import (
 	"github.com/hayfever/mayfly/internal/hub"
 	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/project"
 	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/runner"
 	"github.com/hayfever/mayfly/internal/session"
@@ -81,7 +82,7 @@ func TestWebhookToArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mgr, err := session.New(cfg, store, hub.New(1000), journal.NewMemory(), local, nil, logger)
+	mgr, err := session.New(cfg, testBundle(t, cfg), store, hub.New(1000), journal.NewMemory(), local, nil, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,6 +344,19 @@ func testConfig(t *testing.T, root, agentBin, addr, llmURL, mcpURL string) *conf
 	}}
 	cfg.Triggers = []config.TriggerConfig{{Name: "generic", Type: "generic", AllowUnsigned: true}}
 	return cfg
+}
+
+func testBundle(t *testing.T, cfg *config.Config) *project.Bundle {
+	t.Helper()
+	bundle, err := project.Load(cfg.Agents.Dirs, project.Options{
+		Concurrency: cfg.Sources.Concurrency,
+		Timeout:     cfg.Sources.Timeout.Std(),
+		DeniedEnv:   cfg.SecretEnvNames(),
+	})
+	if err != nil {
+		t.Fatalf("load project: %v", err)
+	}
+	return bundle
 }
 
 func buildAgent(t *testing.T, root string) string {

@@ -76,7 +76,7 @@ func resumeAfterSignal(t *testing.T, sig syscall.Signal) {
 		t.Fatal(err)
 	}
 	journalStore := journal.NewMemory()
-	mgr, err := session.New(cfg, store, hub.New(1000), journalStore, local, nil, logger)
+	mgr, err := session.New(cfg, testBundle(t, cfg), store, hub.New(1000), journalStore, local, nil, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
