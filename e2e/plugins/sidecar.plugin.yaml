@@ -1,0 +1,25 @@
+schemaVersion: 1
+name: sidecar
+version: 0.1.0
+description: Deterministic sidecar plugin with a secret the agent container cannot read.
+placement: sidecar
+image: PLUGIN_IMAGE
+command: node
+args: [server.js]
+env:
+  E2E_MODE: sidecar
+  E2E_SIDECAR_ENV: sidecar-value
+  E2E_TOOLS: echo,env
+secrets:
+  - env: E2E_SIDECAR_SECRET
+    secret: mayfly-plugin-e2e
+    key: sidecar-token
+tools:
+  - name: echo
+    idempotent: true
+  - name: env
+    idempotent: true
+sidecar:
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {memory: 128Mi}

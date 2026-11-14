@@ -37,6 +37,8 @@ IMG_MAYFLYD="${PREFIX}mayflyd:$TAG"
 IMG_AGENT="${PREFIX}mayfly-agent:$TAG"
 IMG_LLMSTUB="${PREFIX}mayfly-llmstub:$TAG"
 IMG_MCPSTUB="${PREFIX}mayfly-mcpstub:$TAG"
+IMG_PLUGIN="${PREFIX}mayfly-e2e-plugin:$TAG"
+IMG_PLUGIN_MISSING="${PREFIX}mayfly-e2e-plugin-missing:$TAG"
 
 log() { printf '\n==> %s\n' "$*"; }
 die() { echo "e2e: $*" >&2; exit 1; }
@@ -56,6 +58,8 @@ build_images() {
   docker build "${args[@]}" --target mayfly-agent -t "$IMG_AGENT" .
   docker build "${args[@]}" --target llmstub -t "$IMG_LLMSTUB" .
   docker build "${args[@]}" --target mcpstub -t "$IMG_MCPSTUB" .
+  docker build --target plugin -t "$IMG_PLUGIN" e2e/plugins
+  docker build --target missing -t "$IMG_PLUGIN_MISSING" e2e/plugins
 }
 
 create_cluster() {
@@ -74,12 +78,15 @@ create_cluster() {
   log "waiting for nodes"
   k wait --for=condition=Ready nodes --all --timeout=300s
   log "importing images into k3d"
-  k3d image import --cluster "$CLUSTER" "$IMG_MAYFLYD" "$IMG_AGENT" "$IMG_LLMSTUB" "$IMG_MCPSTUB"
+  k3d image import --cluster "$CLUSTER" \
+    "$IMG_MAYFLYD" "$IMG_AGENT" "$IMG_LLMSTUB" "$IMG_MCPSTUB" \
+    "$IMG_PLUGIN" "$IMG_PLUGIN_MISSING"
 }
 
 push_images() {
   log "pushing images to $REGISTRY"
-  for img in "$IMG_MAYFLYD" "$IMG_AGENT" "$IMG_LLMSTUB" "$IMG_MCPSTUB"; do
+  for img in "$IMG_MAYFLYD" "$IMG_AGENT" "$IMG_LLMSTUB" "$IMG_MCPSTUB" \
+    "$IMG_PLUGIN" "$IMG_PLUGIN_MISSING"; do
     docker push "$img"
   done
 }
@@ -106,6 +113,16 @@ deploy() {
   kn rollout status deployment/llmstub --timeout=180s
   kn rollout status deployment/mcpstub --timeout=180s
 
+  # The plugin manifests carry the fixture image through a placeholder, so the
+  # same files work on k3d (bare image name) and against a registry.
+  local plugin_dir="$ARTIFACTS/plugins" name
+  mkdir -p "$plugin_dir"
+  for name in inline sidecar counter missing; do
+    sed -e "s|PLUGIN_MISSING_IMAGE|$IMG_PLUGIN_MISSING|g" \
+      -e "s|PLUGIN_IMAGE|$IMG_PLUGIN|g" \
+      "e2e/plugins/$name.plugin.yaml" >"$plugin_dir/$name.plugin.yaml"
+  done
+
   helm --kube-context "$CONTEXT" upgrade --install "$RELEASE" deploy/helm/mayfly \
     --namespace "$NAMESPACE" \
     -f e2e/values.yaml \
@@ -113,6 +130,10 @@ deploy() {
     --set agentImage.repository="${IMG_AGENT%:*}" --set agentImage.tag="$TAG" \
     --set-file 'skills.files.incident-triage\.md=examples/skills/incident-triage.md' \
     --set-file 'agents.files.e2e\.yaml=e2e/agents.yaml' \
+    --set-file "agents.files.inline\\.plugin\\.yaml=$plugin_dir/inline.plugin.yaml" \
+    --set-file "agents.files.sidecar\\.plugin\\.yaml=$plugin_dir/sidecar.plugin.yaml" \
+    --set-file "agents.files.counter\\.plugin\\.yaml=$plugin_dir/counter.plugin.yaml" \
+    --set-file "agents.files.missing\\.plugin\\.yaml=$plugin_dir/missing.plugin.yaml" \
     "${queue_args[@]}" \
     --wait --timeout 5m
   # A reused cluster keeps the pod when only the image content changed.
@@ -151,6 +172,7 @@ run_tests() {
   log "running the e2e suite against $CONTEXT/$NAMESPACE"
   # shellcheck disable=SC2086
   if MAYFLY_E2E_KUBECONTEXT="$CONTEXT" MAYFLY_E2E_NAMESPACE="$NAMESPACE" MAYFLY_E2E_RELEASE="$RELEASE" \
+    MAYFLY_E2E_PLUGIN_IMAGE="$IMG_PLUGIN" MAYFLY_E2E_PLUGIN_MISSING_IMAGE="$IMG_PLUGIN_MISSING" \
     go test -tags e2e -count=1 -timeout 30m -v $GO_TEST_FLAGS ./e2e 2>&1 | tee "$ARTIFACTS/go-test.log"; then
     kn logs "deployment/$RELEASE" --tail=-1 >"$ARTIFACTS/mayflyd.log" 2>&1 || true
     return 0
