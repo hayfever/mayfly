@@ -338,13 +338,25 @@ func (c *Client) GetPod(ctx context.Context, name string) (*corev1.Pod, error) {
 	return c.cs.CoreV1().Pods(c.namespace).Get(ctx, name, metav1.GetOptions{})
 }
 
-// SessionToken reads the token stored for a session secret.
-func (c *Client) SessionToken(ctx context.Context, secretName string) (string, error) {
+// SessionKeys are the credentials stored for one session.
+type SessionKeys struct {
+	// Token authenticates every internal route the runtime calls.
+	Token string
+	// GatewayKey signs the call tokens of this session's sidecars. It is empty
+	// for a session without one.
+	GatewayKey []byte
+}
+
+// SessionKeys reads the credentials stored for a session secret.
+func (c *Client) SessionKeys(ctx context.Context, secretName string) (SessionKeys, error) {
 	secret, err := c.cs.CoreV1().Secrets(c.namespace).Get(ctx, secretName, metav1.GetOptions{})
 	if err != nil {
-		return "", err
+		return SessionKeys{}, err
 	}
-	return string(secret.Data["token"]), nil
+	return SessionKeys{
+		Token:      string(secret.Data["token"]),
+		GatewayKey: append([]byte(nil), secret.Data[GatewayKeySecretKey]...),
+	}, nil
 }
 
 // SessionConfig reads the mounted session configuration.

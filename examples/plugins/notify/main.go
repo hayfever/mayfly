@@ -1,5 +1,6 @@
-// Command notify is an inline Mayfly plugin: a stdio MCP server that posts a
-// message to a team webhook.
+// Command notify is a Mayfly plugin: a stdio MCP server that posts a message
+// to a team webhook. The manifest places it as a sidecar, and the shim serves
+// it to the session over the socket volume.
 //
 // The webhook URL is a credential, so it arrives as a secret file that the
 // runtime reads into NOTIFY_WEBHOOK_URL; the agent never sees it. The runtime

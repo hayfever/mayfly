@@ -122,8 +122,10 @@ type instance struct {
 	// verifiedArtifacts records the artifact keys whose stored bytes already
 	// matched their declared SHA-256.
 	verifiedArtifacts map[string]bool
-	// sidecarKey signs this session's sidecar call tokens. It is generated at
-	// create, lives in the grant, and never reaches the agent container.
+	// sidecarKey signs this session's sidecar call tokens. Create generates
+	// it and adoption reads it back from the session Secret, so a replacement
+	// pod and this control plane sign the same tokens. It never reaches the
+	// agent container.
 	sidecarKey []byte
 	stalePods  []string
 	// seqFloor is the highest sequence this control plane durably reserved
@@ -707,6 +709,7 @@ func (m *Manager) prepare(_ context.Context, inst *instance, podName, token stri
 		Plugins:             cfg.Plugins,
 		ToolsImage:          m.cfg.Runtime.Image,
 		PluginVolumeLimit:   m.cfg.Runtime.PluginVolumeLimit,
+		GatewayKey:          inst.sidecarKey,
 	}
 	for _, e := range m.cfg.Runtime.Egress {
 		spec.Egress = append(spec.Egress, k8s.Egress{CIDR: e.CIDR, Ports: e.Ports})
@@ -1150,6 +1153,22 @@ func (m *Manager) registerGrant(inst *instance) {
 	grant := gateway.GrantFor(inst.runtimeCfg, inst.sess.Agent, m.mcpDefs(inst.sess.MCPServers))
 	grant.SidecarKey = inst.sidecarKey
 	m.gateway.Register(grant)
+}
+
+// warnMissingGatewayKey reports a session whose plugins need sidecar call
+// tokens but whose Secret holds no signing key. Create writes the key once and
+// nothing rotates it, so an empty key means the Secret predates sidecars.
+func (m *Manager) warnMissingGatewayKey(cfg sessioncfg.Config, key []byte, session string) {
+	if len(key) > 0 {
+		return
+	}
+	for _, p := range cfg.Plugins {
+		if p.Placement != string(plugin.Sidecar) {
+			continue
+		}
+		m.logger.Warn("adopt: session has a sidecar plugin and no gateway key; its call tokens cannot be signed", "session", session, "plugin", p.Name)
+		return
+	}
 }
 
 // dropGrant forgets the session's grant. A nil registry has nothing to forget.

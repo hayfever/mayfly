@@ -438,3 +438,169 @@ func TestAdoptRebuildsGrant(t *testing.T) {
 		t.Fatalf("replacement plugin dir = %q", replacement.Plugins[0].Dir)
 	}
 }
+
+// TestAdoptKeepsGatewayKey covers a control-plane restart under a sidecar
+// session: the key that signs call tokens comes back from the session Secret,
+// so the adopted grant, the replacement pod, and the running sidecar agree.
+func TestAdoptKeepsGatewayKey(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := fake.NewSimpleClientset()
+	m := testManager(t)
+	m.cfg.LLM.Model = "test-model"
+	m.cfg.Server.InternalURL = "http://mayfly:8080"
+	if err := m.loadAgents(); err != nil {
+		t.Fatal(err)
+	}
+	m.cfg.Runtime.Backend = "kubernetes"
+	m.cfg.Sessions.MaxRestarts = 2
+	m.journal = journal.NewMemory()
+	m.kube = k8s.NewForClient(cs, "mayfly")
+	m.stateDir = t.TempDir()
+	fake := &fakeRunner{handle: runner.Handle{
+		Backend:             "kubernetes",
+		SessionID:           "s1",
+		Namespace:           "mayfly",
+		PodName:             "mayfly-s1-r1",
+		SecretName:          "mayfly-s1",
+		ConfigMapName:       "mayfly-s1",
+		PVCName:             "mayfly-s1-workspace",
+		PersistentWorkspace: true,
+	}}
+	m.runner = fake
+	registry := newFakeGateway()
+	m.SetGateway(registry)
+
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	cfg := sessioncfg.Config{
+		Version:    sessioncfg.Version,
+		SessionID:  "s1",
+		Agent:      "default",
+		Model:      "test-model",
+		Title:      "sidecar",
+		TTLSeconds: 600,
+		CreatedAt:  time.Now().UTC(),
+		Plugins: []sessioncfg.Plugin{{
+			Name:               "notify",
+			Placement:          "sidecar",
+			Image:              "example/notify:1",
+			Command:            "bin/notify",
+			Socket:             k8s.PluginSocketsDir + "/notify.sock",
+			Secrets:            []sessioncfg.PluginSecret{{Env: "NOTIFY_WEBHOOK_URL", Secret: "mayfly-plugin-notify", Key: "webhook-url"}},
+			Tools:              []sessioncfg.PluginTool{{Name: "post", TimeoutSeconds: 30}},
+			InitTimeoutSeconds: 30,
+			MaxOutputBytes:     64 << 10,
+			Sidecar: &sessioncfg.PluginSidecar{
+				Requests:  map[string]string{"cpu": "10m"},
+				Limits:    map[string]string{"memory": "64Mi"},
+				RunAsUser: 65532,
+				Workspace: "read",
+			},
+		}},
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := &k8s.SessionSpec{
+		Namespace:           "mayfly",
+		SessionID:           "s1",
+		PodName:             "mayfly-s1",
+		SecretName:          "mayfly-s1",
+		ConfigMapName:       "mayfly-s1",
+		Image:               "example/agent:1",
+		PlatformNs:          "mayfly",
+		PersistentWorkspace: true,
+		SessionJSON:         raw,
+		Token:               "token",
+		ToolsImage:          "example/agent:1",
+		GatewayKey:          key,
+		TTL:                 time.Hour,
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	client := k8s.NewForClient(cs, "mayfly")
+	if err := client.CreateSession(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := client.SessionKeys(ctx, "mayfly-s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stored.GatewayKey) != string(key) {
+		t.Fatalf("stored gateway key = %x", stored.GatewayKey)
+	}
+	// The control plane stopped after deleting the pod.
+	if err := client.DeletePod(ctx, spec.PodName, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown(context.Background())
+
+	var grant gateway.Grant
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if found, ok := registry.grant("s1"); ok {
+			grant = found
+			break
+		}
+	}
+	if grant.SessionID != "s1" {
+		t.Fatal("adoption did not rebuild the grant")
+	}
+	if string(grant.SidecarKey) != string(key) {
+		t.Fatalf("adopted grant key = %x, want the stored key", grant.SidecarKey)
+	}
+
+	var replacement *k8s.SessionSpec
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		starts := fake.specs()
+		if len(starts) == 0 {
+			continue
+		}
+		if pod, ok := starts[0].K8sSpec.(*k8s.SessionSpec); ok {
+			replacement = pod
+			break
+		}
+	}
+	if replacement == nil {
+		t.Fatal("adoption did not start a replacement")
+	}
+	if string(replacement.GatewayKey) != string(key) {
+		t.Fatalf("replacement key = %x, want the stored key", replacement.GatewayKey)
+	}
+	pod := replacement.Pod()
+	sidecar, keyMounted := false, false
+	for _, container := range pod.Spec.InitContainers {
+		if container.Name != "plugin-notify" {
+			continue
+		}
+		sidecar = true
+		for _, mount := range container.VolumeMounts {
+			if mount.Name == "gateway-key" && mount.ReadOnly && mount.MountPath == k8s.GatewayKeyDir {
+				keyMounted = true
+			}
+		}
+	}
+	if !sidecar {
+		t.Fatalf("replacement has no sidecar container: %+v", pod.Spec.InitContainers)
+	}
+	if !keyMounted {
+		t.Fatal("the replacement sidecar does not mount the gateway key")
+	}
+
+	// The key already in the cluster is reused, never rotated by a replacement.
+	after, err := client.SessionKeys(ctx, "mayfly-s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after.GatewayKey) != string(key) {
+		t.Fatalf("replacement rotated the gateway key to %x", after.GatewayKey)
+	}
+}
