@@ -21,6 +21,7 @@ import (
 
 	"github.com/hayfever/mayfly/internal/artifact"
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/httpapi"
 	"github.com/hayfever/mayfly/internal/hub"
 	"github.com/hayfever/mayfly/internal/journal"
@@ -80,13 +81,17 @@ func resumeAfterSignal(t *testing.T, sig syscall.Signal) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The runtime sends every granted tool through the gateway, so a session
+	// without one cannot call its tools.
+	toolGateway := gateway.New(gateway.Options{Ledger: journalStore, Logger: logger})
+	mgr.SetGateway(toolGateway)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := mgr.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	ts.Config.Handler = httpapi.New(cfg, mgr, nil, logger).Handler()
+	ts.Config.Handler = httpapi.New(cfg, mgr, nil, logger, httpapi.WithGateway(toolGateway)).Handler()
 	ts.Start()
 	defer ts.Close()
 	// Registered after Close so it runs first and stops the agent's SSE

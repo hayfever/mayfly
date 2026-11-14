@@ -8,16 +8,19 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/llm"
 	"github.com/hayfever/mayfly/internal/mcp"
 	"github.com/hayfever/mayfly/internal/model"
 	"github.com/hayfever/mayfly/internal/platformclient"
+	"github.com/hayfever/mayfly/internal/pluginhost"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
 	"github.com/hayfever/mayfly/internal/version"
 )
@@ -28,8 +31,10 @@ type Runtime struct {
 	token      string
 	logger     *slog.Logger
 	platform   *platformclient.Client
+	gateway    toolGateway
 	llm        *llm.Client
 	mcp        *mcp.Manager
+	plugins    *pluginhost.Host
 	tools      *toolset
 	toolsList  []llm.Tool
 	conv       *conversation
@@ -42,6 +47,10 @@ type Runtime struct {
 	finalizeMu sync.Mutex
 	finalized  bool
 	finalErr   error
+
+	// dispatch runs the local half of a granted call. Run points it at the
+	// toolset; unit tests answer calls without starting a plugin process.
+	dispatch localDispatch
 
 	// resumeMu guards resumeEv, the inbox event the runtime replayed from the
 	// journal. Its redelivery is skipped by identity, not by sequence number:
@@ -93,6 +102,7 @@ func New(cfg sessioncfg.Config, token string, logger *slog.Logger) (*Runtime, er
 		token:    token,
 		logger:   logger,
 		platform: platform,
+		gateway:  platform,
 		llm:      llm.New(cfg.LLMBaseURL, token, cfg.Model),
 		conv:     conv,
 		journal:  platform,
@@ -110,21 +120,46 @@ func (r *Runtime) Run(ctx context.Context) error {
 		"model", r.cfg.Model,
 		"skills", len(r.cfg.Skills),
 		"mcp_servers", len(r.cfg.MCPServers),
+		"plugins", len(r.cfg.Plugins),
 	)
 
 	r.mcp = mcp.Start(ctx, r.cfg.MCPServers, r.token, r.logger)
 	for _, err := range r.mcp.Errors() {
 		r.events.Emit(ctx, model.EventSystem, "mayfly", "MCP server unavailable: "+err.Error(), nil)
 	}
+	if err := r.startPlugins(ctx); err != nil {
+		r.stopChildren()
+		return r.finalize(context.Background(), "failed", err)
+	}
+	grant, err := r.discoverTools(ctx)
+	if err != nil {
+		if !permanentGatewayError(err) {
+			// The control plane is unreachable, not wrong. Exit without
+			// finalizing so a replacement starts a fresh runtime.
+			r.closeLocal()
+			return err
+		}
+		r.stopChildren()
+		return r.finalize(context.Background(), "failed", err)
+	}
 	var artifacts ArtifactReader
 	if len(r.cfg.Artifacts) > 0 {
 		artifacts = r.platform
 	}
-	tools, err := newToolset(r.cfg.WorkspaceDir, r.cfg.AllowShell, time.Duration(r.cfg.ShellTimeoutSecs)*time.Second, r.mcp, artifacts)
+	tools, err := newToolset(toolsetConfig{
+		Workspace:    r.cfg.WorkspaceDir,
+		AllowShell:   r.cfg.AllowShell,
+		ShellTimeout: time.Duration(r.cfg.ShellTimeoutSecs) * time.Second,
+		MCP:          r.mcp,
+		Plugins:      r.plugins,
+		Grant:        grant,
+		Artifacts:    artifacts,
+	})
 	if err != nil {
 		return r.finalize(context.Background(), "failed", err)
 	}
 	r.tools = tools
+	r.dispatch = tools.Dispatch
 	r.toolsList = tools.Tools()
 
 	skillNames := make([]string, 0, len(r.cfg.Skills))
@@ -135,10 +170,15 @@ func (r *Runtime) Run(ctx context.Context) error {
 	for _, s := range r.cfg.MCPServers {
 		mcpNames = append(mcpNames, s.Name)
 	}
+	pluginNames := make([]string, 0, len(r.cfg.Plugins))
+	for _, p := range r.cfg.Plugins {
+		pluginNames = append(pluginNames, p.Name)
+	}
 	r.events.Emit(ctx, model.EventSystem, "mayfly", "Session started. Attach to interact.", map[string]any{
 		"model":       r.cfg.Model,
 		"skills":      skillNames,
 		"mcp_servers": mcpNames,
+		"plugins":     pluginNames,
 		"tool_count":  len(r.toolsList),
 	})
 
@@ -328,15 +368,77 @@ shutdown:
 	if r.tools != nil {
 		_ = r.tools.Close()
 	}
-	if r.mcp != nil {
-		r.mcp.Close()
-	}
+	r.stopChildren()
 	if stopErr != nil {
 		r.logger.Warn("session stopped without finalizing", "error", stopErr)
 		r.closeLogs()
 		return stopErr
 	}
 	return r.finalize(context.Background(), reason, nil)
+}
+
+// startPlugins launches the session's inline plugins. A required plugin that
+// did not start fails the session; an optional one is reported as a system
+// event and its tools are not offered. Tools a plugin reports but its manifest
+// does not declare are hidden and named once.
+func (r *Runtime) startPlugins(ctx context.Context) error {
+	host, errs := pluginhost.Start(ctx, r.cfg.Plugins, pluginhost.Options{
+		SessionID:    r.cfg.SessionID,
+		Agent:        r.cfg.Agent,
+		WorkspaceDir: r.cfg.WorkspaceDir,
+		ArtifactsDir: r.cfg.ArtifactsDir,
+		Logger:       r.logger,
+	})
+	r.plugins = host
+	for _, err := range errs {
+		r.events.Emit(ctx, model.EventSystem, "mayfly", "Plugin unavailable: "+err.Error(), nil)
+	}
+	if err := host.RequiredErr(); err != nil {
+		return err
+	}
+	hidden := host.Hidden()
+	names := make([]string, 0, len(hidden))
+	for name := range hidden {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		r.events.Emit(ctx, model.EventSystem, "mayfly", fmt.Sprintf(
+			"Plugin %s exposes tools that the manifest does not declare; they are hidden: %s",
+			name, strings.Join(hidden[name], ", ")), nil)
+	}
+	return nil
+}
+
+// discoverTools reads the session's tool grant from the gateway and returns it
+// keyed by model-visible name. The runtime routes exactly the granted tools
+// through the gateway; anything else, including the MCP servers it still
+// reaches directly, keeps its local path.
+func (r *Runtime) discoverTools(ctx context.Context) (map[string]gateway.DiscoveryTool, error) {
+	discovery, err := retryGateway(ctx, r.logger, "list tools",
+		func(ctx context.Context) (gateway.Discovery, error) {
+			return r.gateway.Tools(ctx)
+		})
+	if err != nil {
+		return nil, fmt.Errorf("read tool grant: %w", err)
+	}
+	var required []error
+	for _, failure := range discovery.Errors {
+		err := fmt.Errorf("%s: %s", failure.Owner, failure.Error)
+		if failure.Required {
+			required = append(required, err)
+			continue
+		}
+		r.events.Emit(ctx, model.EventSystem, "mayfly", "Plugin unavailable: "+err.Error(), nil)
+	}
+	if len(required) > 0 {
+		return nil, errors.Join(required...)
+	}
+	grant := make(map[string]gateway.DiscoveryTool, len(discovery.Tools))
+	for _, tool := range discovery.Tools {
+		grant[tool.Name] = tool
+	}
+	return grant, nil
 }
 
 // turnCounter counts turns that are queued or running. The idle timer must not
@@ -637,47 +739,60 @@ func (r *Runtime) executeTool(ctx context.Context, turn int64, step int, call ll
 	}
 	r.events.EmitRecord(ctx, callKey, callEvent)
 	started := time.Now()
-	out, isErr, err := r.tools.Call(ctx, name, json.RawMessage(args))
+	outcome, err := r.callTool(ctx, turn, step, call)
 	if err != nil {
-		out = "ERROR: " + err.Error()
-		isErr = true
+		return stepRun{}, err
 	}
-	out = truncate(out, maxToolOutput)
+	out := truncate(outcome.Content, maxToolOutput)
+	isErr := outcome.IsError
+	if outcome.Interrupted {
+		// The gateway refused to repeat a non-idempotent call that a restart
+		// cut short. Its message is the whole result, so the model reads why.
+		r.events.Emit(ctx, model.EventSystem, "mayfly", out, nil)
+	}
+	resultData := map[string]any{
+		"tool":    name,
+		"call_id": call.ID,
+		"error":   isErr,
+	}
+	if outcome.Interrupted {
+		resultData["interrupted"] = true
+	}
 	resultEvent := journal.StepEvent{
 		Type:  string(model.EventToolResult),
 		Actor: "agent",
 		Text:  truncate(out, 8<<10),
-		Data: map[string]any{
-			"tool":    name,
-			"call_id": call.ID,
-			"error":   isErr,
-		},
+		Data:  resultData,
 	}
 	r.trace.Write("tool_result", map[string]any{
 		"tool":        name,
 		"call_id":     call.ID,
 		"arguments":   args,
 		"is_error":    isErr,
+		"executed":    outcome.Executed,
+		"replayed":    outcome.Replayed,
+		"interrupted": outcome.Interrupted,
 		"output":      out,
 		"duration_ms": time.Since(started).Milliseconds(),
 	})
-	content := out
-	if isErr && !strings.HasPrefix(content, "ERROR:") {
-		content = "ERROR: " + content
+	msg := llm.Message{Role: "tool", ToolCallID: call.ID, Content: out}
+	if isErr && !strings.HasPrefix(out, "ERROR:") {
+		msg.Content = "ERROR: " + out
 	}
-	msg := llm.Message{Role: "tool", ToolCallID: call.ID, Content: content}
 	raw, err := json.Marshal(toolStepOutput{
-		Message:  msg,
-		IsError:  isErr,
-		Executed: true,
-		Events:   []journal.StepEvent{callEvent, resultEvent},
+		Message:     msg,
+		IsError:     isErr,
+		Executed:    outcome.Executed,
+		Replayed:    outcome.Replayed,
+		Interrupted: outcome.Interrupted,
+		Events:      []journal.StepEvent{callEvent, resultEvent},
 	})
 	if err != nil {
 		return stepRun{}, err
 	}
 	errMsg := ""
 	if isErr {
-		errMsg = truncate(content, 2<<10)
+		errMsg = truncate(msg.Content, 2<<10)
 	}
 	return stepRun{name: "tool:" + name, message: msg, output: raw, errMsg: errMsg}, nil
 }
@@ -795,6 +910,24 @@ func (r *Runtime) failTurn(ctx context.Context, err error) {
 		return
 	}
 	r.turnFailed(ctx, err)
+}
+
+// stopChildren closes the MCP clients and plugin processes. A plugin's stderr
+// is flushed here, so a bundle built afterwards holds all of it.
+func (r *Runtime) stopChildren() {
+	if r.mcp != nil {
+		r.mcp.Close()
+	}
+	if r.plugins != nil {
+		r.plugins.Close()
+	}
+}
+
+// closeLocal releases the processes and logs of a runtime that will not
+// finalize. A replacement starts its own.
+func (r *Runtime) closeLocal() {
+	r.stopChildren()
+	r.closeLogs()
 }
 
 // closeLogs closes the local logs without exporting an artifact. A runtime
