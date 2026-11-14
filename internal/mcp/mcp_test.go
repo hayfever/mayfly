@@ -222,6 +222,41 @@ func TestManagerNamesTools(t *testing.T) {
 	}
 }
 
+func TestManagerToolAllowlist(t *testing.T) {
+	server := httptest.NewServer(stub.MCPHandler())
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	allowed := Start(ctx, []sessioncfg.MCPServer{{
+		Name:      "search",
+		Transport: "http",
+		URL:       server.URL + "/mcp",
+		Tools:     []string{"echo"},
+	}}, "tok", testLogger())
+	defer allowed.Close()
+	if errs := allowed.Errors(); len(errs) != 0 {
+		t.Fatalf("errors: %v", errs)
+	}
+	if tools := allowed.Tools(); len(tools) != 1 || tools[0].Name != "mcp_search_echo" {
+		t.Fatalf("allowed tools = %+v", tools)
+	}
+
+	hidden := Start(ctx, []sessioncfg.MCPServer{{
+		Name:      "search",
+		Transport: "http",
+		URL:       server.URL + "/mcp",
+		Tools:     []string{"missing"},
+	}}, "tok", testLogger())
+	defer hidden.Close()
+	if errs := hidden.Errors(); len(errs) != 0 {
+		t.Fatalf("errors: %v", errs)
+	}
+	if tools := hidden.Tools(); len(tools) != 0 {
+		t.Fatalf("allowlist did not hide echo: %+v", tools)
+	}
+}
+
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

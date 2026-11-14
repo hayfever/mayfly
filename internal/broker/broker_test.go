@@ -201,3 +201,43 @@ func TestMCPProxyInjectsCredentials(t *testing.T) {
 		t.Fatalf("session header = %q", upstreamSession)
 	}
 }
+
+// TestBrokerProxyUnchanged keeps the alternate-harness path intact: the byte
+// proxy still injects resolved headers, and HTTPClient exposes the one client
+// that carries the broker's transport policy.
+func TestBrokerProxyUnchanged(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":7,"result":{"tools":[]}}`))
+	}))
+	defer upstream.Close()
+
+	b := New(config.LLMConfig{MaxBodyBytes: 1 << 20}, testLogger())
+	if b.HTTPClient() == nil {
+		t.Fatal("HTTPClient returned nil")
+	}
+	if b.HTTPClient() != b.client {
+		t.Fatal("HTTPClient did not return the broker's client")
+	}
+	if b.HTTPClient().Transport == nil {
+		t.Fatal("the broker's client has no transport")
+	}
+
+	def := config.MCPServerConfig{
+		Name:            "remote",
+		Transport:       "http",
+		URL:             upstream.URL + "/mcp",
+		ResolvedHeaders: map[string]string{"Authorization": "Bearer upstream-secret"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/mcp/remote", strings.NewReader(`{"jsonrpc":"2.0","id":7,"method":"tools/list"}`))
+	rec := httptest.NewRecorder()
+	b.ServeMCP(rec, req, def)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotAuth != "Bearer upstream-secret" {
+		t.Fatalf("upstream auth = %q", gotAuth)
+	}
+}

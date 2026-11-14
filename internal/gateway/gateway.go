@@ -17,6 +17,7 @@ import (
 
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/journal"
+	"github.com/hayfever/mayfly/internal/mcp"
 	"github.com/hayfever/mayfly/internal/plugin"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
@@ -76,8 +77,9 @@ type Grant struct {
 	SessionID string
 	Agent     string
 	Tools     map[string]GrantTool // exact model-visible names
-	// Wildcards holds HTTP mcp.servers whose tools the gateway discovers
-	// from the server instead of the bundle.
+	// Wildcards holds the mcp.servers entries whose tools are not named in
+	// the bundle. An HTTP entry resolves against the server's tools; a stdio
+	// entry resolves by its tool-name prefix.
 	Wildcards map[string]Placement
 	// SidecarKey signs call and discovery tokens for this session's
 	// sidecars. It is nil when the session has no sidecar plugin.
@@ -88,7 +90,7 @@ type Grant struct {
 }
 
 // Options wires the gateway to the control plane. Ledger and Sequencer are
-// required; the rest select behavior WP9 extends.
+// required; the rest select behavior the gateway enables.
 type Options struct {
 	Ledger journal.Ledger
 	// Sequencer bounds a call's turn by the sequence range the session
@@ -99,10 +101,13 @@ type Options struct {
 	Manifests func() []plugin.Manifest
 	// MCPServer returns one mcp.servers definition for remote dispatch.
 	MCPServer func(name string) (config.MCPServerConfig, bool)
-	// HTTPClient reaches service plugins and HTTP MCP servers. WP9 uses it.
+	// HTTPClient reaches service plugins and HTTP MCP servers. The caller
+	// supplies the broker's client to share its transport policy; a nil
+	// client uses the MCP package's default.
 	HTTPClient *http.Client
-	// ServiceURL returns a service plugin's endpoint and gateway key. WP12
-	// supplies it; until then it is nil and service calls are unavailable.
+	// ServiceURL returns a service plugin's endpoint and gateway key. It is
+	// nil until the service reconciler supplies it; service calls then report
+	// that no service transport is configured.
 	ServiceURL func(name string) (url string, key []byte, err error)
 	// MaxInflight bounds dispatched calls across every session.
 	MaxInflight int
@@ -121,6 +126,10 @@ type Gateway struct {
 
 	mu     sync.RWMutex
 	grants map[string]Grant
+
+	// remote holds the upstream MCP clients and their discovery results,
+	// one client and one listing per (session, server).
+	remote remoteState
 }
 
 // New returns an empty gateway. A nil Logger uses the process logger; a nil
@@ -146,6 +155,10 @@ func New(opts Options) *Gateway {
 		audit:  audit,
 		limits: newLimits(opts.MaxInflight, opts.Logger),
 		grants: map[string]Grant{},
+		remote: remoteState{
+			clients:   map[remoteKey]*clientEntry{},
+			discovery: map[remoteKey]*discoveryEntry{},
+		},
 	}
 }
 
@@ -189,10 +202,13 @@ func (g *Gateway) Drop(session string) {
 	delete(g.grants, session)
 	g.mu.Unlock()
 	g.limits.dropSession(session)
+	g.dropRemote(session)
 }
 
-// Discover reports the session's tools. Remote tools are omitted until WP9
-// supplies upstream discovery.
+// Discover reports the session's tools. A local tool carries the grant
+// fields only; a remote tool carries the description and schema the upstream
+// reported. A remote owner the gateway cannot reach is reported in Errors and
+// contributes no tools.
 func (g *Gateway) Discover(ctx context.Context, session string) (Discovery, error) {
 	grant, ok := g.grantFor(session)
 	if !ok {
@@ -206,9 +222,11 @@ func (g *Gateway) Discover(ctx context.Context, session string) (Discovery, erro
 	sort.Strings(names)
 	sidecars := map[string]SidecarToken{}
 	sidecarSeen := map[string]bool{}
+	owners := map[string]Placement{}
 	for _, name := range names {
 		tool := grant.Tools[name]
 		if tool.Placement == Service || tool.Placement == MCPHTTP {
+			owners[tool.Owner] = tool.Placement
 			continue
 		}
 		out.Tools = append(out.Tools, DiscoveryTool{
@@ -232,10 +250,86 @@ func (g *Gateway) Discover(ctx context.Context, session string) (Discovery, erro
 			sidecars[tool.Owner] = SidecarToken{DiscoveryToken: token}
 		}
 	}
+	for owner, placement := range grant.Wildcards {
+		owners[owner] = placement
+	}
+
+	remoteOwners := make([]string, 0, len(owners))
+	for owner := range owners {
+		remoteOwners = append(remoteOwners, owner)
+	}
+	sort.Strings(remoteOwners)
+	for _, owner := range remoteOwners {
+		placement := owners[owner]
+		if placement == MCPStdio {
+			// The runtime lists a local server's tools from mcp.Manager.
+			continue
+		}
+		tools, err := g.remoteTools(ctx, session, owner, placement)
+		if err != nil {
+			out.Errors = append(out.Errors, DiscoveryError{
+				Owner:    owner,
+				Required: g.requiredOwner(owner),
+				Error:    err.Error(),
+			})
+			continue
+		}
+		if _, wildcard := grant.Wildcards[owner]; wildcard {
+			def, _ := g.mcpServer(owner)
+			for _, tool := range tools {
+				out.Tools = append(out.Tools, DiscoveryTool{
+					Name:        mcp.ToolName(owner, tool.Name),
+					Owner:       owner,
+					Placement:   placement,
+					Description: tool.Description,
+					InputSchema: tool.InputSchema,
+					Idempotent:  containsName(def.IdempotentTools, tool.Name),
+					TimeoutMS:   mcpCallTimeout.Milliseconds(),
+				})
+			}
+			continue
+		}
+		for _, name := range names {
+			tool := grant.Tools[name]
+			if tool.Owner != owner {
+				continue
+			}
+			entry := DiscoveryTool{
+				Name:       tool.Name,
+				Owner:      tool.Owner,
+				Placement:  tool.Placement,
+				Idempotent: tool.Idempotent,
+				TimeoutMS:  tool.Timeout.Milliseconds(),
+			}
+			for _, reported := range tools {
+				if reported.Name == tool.Remote {
+					entry.Description = reported.Description
+					entry.InputSchema = reported.InputSchema
+					break
+				}
+			}
+			out.Tools = append(out.Tools, entry)
+		}
+	}
+	sort.Slice(out.Tools, func(i, j int) bool { return out.Tools[i].Name < out.Tools[j].Name })
 	if len(sidecars) > 0 {
 		out.Sidecars = sidecars
 	}
 	return out, nil
+}
+
+// requiredOwner reports whether the bundle marks one plugin required, so a
+// discovery failure can fail the session only when the bundle asked for it.
+func (g *Gateway) requiredOwner(name string) bool {
+	if g.opts.Manifests == nil {
+		return false
+	}
+	for _, manifest := range g.opts.Manifests() {
+		if manifest.Name == name {
+			return manifest.Required
+		}
+	}
+	return false
 }
 
 // Begin authorizes one tool call and applies the resume table.
@@ -246,7 +340,12 @@ func (g *Gateway) Begin(ctx context.Context, session string, req BeginRequest) (
 	}
 	tool, ok := grant.Tools[req.Tool]
 	if !ok {
-		return BeginResponse{}, errf(http.StatusForbidden, "tool %q is not granted to this session", req.Tool)
+		// A tool of an mcp.servers entry without an allowlist is not in the
+		// fixed table; resolve it against the entry before refusing.
+		tool, ok = g.wildcardTool(ctx, grant, req.Tool)
+		if !ok {
+			return BeginResponse{}, errf(http.StatusForbidden, "tool %q is not granted to this session", req.Tool)
+		}
 	}
 	if err := g.checkTurnStep(ctx, session, grant, req); err != nil {
 		return BeginResponse{}, err
@@ -274,10 +373,6 @@ func (g *Gateway) Begin(ctx context.Context, session string, req BeginRequest) (
 		case !tool.Idempotent:
 			return g.interrupt(ctx, grant, tool, rec)
 		}
-	}
-
-	if tool.Placement == Service || tool.Placement == MCPHTTP {
-		return BeginResponse{}, errf(http.StatusServiceUnavailable, "remote dispatch for %q is not available", tool.Owner)
 	}
 
 	limiter := g.limits.limiter(session, tool.Owner, g.rateFor(tool.Owner))
@@ -323,6 +418,9 @@ func (g *Gateway) Begin(ctx context.Context, session string, req BeginRequest) (
 	}
 
 	g.auditBegin(ctx, grant, tool, rec)
+	if tool.Placement == Service || tool.Placement == MCPHTTP {
+		return g.beginRemote(ctx, grant, tool, rec, req.Arguments)
+	}
 	dispatch := Dispatch{Key: key, TimeoutMS: tool.Timeout.Milliseconds()}
 	if tool.Placement == Sidecar {
 		token, err := SignToken(grant.SidecarKey, Claims{
@@ -514,8 +612,28 @@ func GrantFor(cfg sessioncfg.Config, agent string, mcp []config.MCPServerConfig)
 		}
 	}
 	for _, s := range mcp {
+		placement := MCPStdio
 		if s.Transport == "http" {
-			grant.Wildcards[s.Name] = MCPHTTP
+			placement = MCPHTTP
+		}
+		if len(s.Tools) == 0 {
+			// No allowlist: the tools are whatever the server reports. An HTTP
+			// server's list is discovered by the gateway; a stdio server's is
+			// listed by the runtime's manager.
+			grant.Wildcards[s.Name] = placement
+			continue
+		}
+		for _, remote := range s.Tools {
+			name := mcpToolName(s.Name, remote)
+			grant.Tools[name] = GrantTool{
+				Name:       name,
+				Owner:      s.Name,
+				Remote:     remote,
+				Placement:  placement,
+				Idempotent: containsName(s.IdempotentTools, remote),
+				Timeout:    mcpCallTimeout,
+				MaxOutput:  plugin.MaxOutputBytes,
+			}
 		}
 	}
 	return grant
