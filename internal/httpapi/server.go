@@ -89,11 +89,12 @@ type Server struct {
 	tickets    *ticketStore
 	web        fs.FS
 	upgrader   websocket.Upgrader
+	schedules  *ScheduleService
 }
 
 // New builds the HTTP server. queue may be nil in tests that do not exercise
 // webhooks.
-func New(cfg *config.Config, mgr *session.Manager, q queue.Store, logger *slog.Logger) *Server {
+func New(cfg *config.Config, mgr *session.Manager, q queue.Store, logger *slog.Logger, opts ...Option) *Server {
 	sub, _ := fs.Sub(webAssets, "web")
 	triggersByName := map[string]config.TriggerConfig{}
 	limiters := map[string]*ratelimit.Limiter{}
@@ -107,7 +108,7 @@ func New(cfg *config.Config, mgr *session.Manager, q queue.Store, logger *slog.L
 	for _, m := range cfg.MCP.Servers {
 		mcpServers[m.Name] = m
 	}
-	return &Server{
+	server := &Server{
 		cfg:        cfg,
 		mgr:        mgr,
 		queue:      q,
@@ -130,6 +131,10 @@ func New(cfg *config.Config, mgr *session.Manager, q queue.Store, logger *slog.L
 			},
 		},
 	}
+	for _, opt := range opts {
+		opt(server)
+	}
+	return server
 }
 
 // Handler returns the fully wired HTTP handler.
@@ -157,6 +162,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sessions/{id}/attach-ticket", s.admin(s.createTicket))
 	mux.HandleFunc("GET /api/v1/sessions/{id}/artifact", s.admin(s.downloadArtifact))
 	mux.HandleFunc("GET /api/v1/config", s.admin(s.publicConfig))
+	mux.HandleFunc("GET /api/v1/schedules", s.admin(s.listSchedules))
+	mux.HandleFunc("POST /api/v1/schedules/{name}/run", s.admin(s.runSchedule))
 	mux.HandleFunc("GET /api/v1/queue", s.admin(s.queueStats))
 	mux.HandleFunc("GET /api/v1/queue/jobs/{id}", s.admin(s.queueJob))
 	mux.HandleFunc("GET /api/v1/queue/dead", s.admin(s.queueDead))
@@ -318,7 +325,15 @@ func (s *Server) publicConfig(w http.ResponseWriter, r *http.Request) {
 		"default_ttl_seconds": int(s.cfg.Sessions.DefaultTTL.Std().Seconds()),
 		"max_ttl_seconds":     int(s.cfg.Sessions.MaxTTL.Std().Seconds()),
 		"triggers":            s.triggerNames(),
+		"schedules":           s.scheduleList(),
 	})
+}
+
+func (s *Server) scheduleList() []ScheduleInfo {
+	if s.schedules == nil || s.schedules.List == nil {
+		return []ScheduleInfo{}
+	}
+	return s.schedules.List
 }
 
 func (s *Server) triggerNames() []string {

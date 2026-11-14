@@ -73,6 +73,11 @@ type CreateOptions struct {
 	// Artifacts are inputs the caller already stored. The control plane never
 	// fetches them; it only checks the reference and lets the session read it.
 	Artifacts []ArtifactRef
+	// IdempotencyKey makes Create safe to repeat. While a session created
+	// with the same key is still registered, Create returns that session
+	// instead of starting another one. Queue handlers pass the job ID so a
+	// crash between Create and Ack cannot start a second session.
+	IdempotencyKey string
 }
 
 // ArtifactRef is one stored input a session may read.
@@ -108,6 +113,9 @@ type instance struct {
 	// artifacts are the inputs this session may read; the map keys are the
 	// only keys the internal artifact endpoint serves for this session.
 	artifacts map[string]sessioncfg.Artifact
+	// idempotencyKey is CreateOptions.IdempotencyKey. The manager reads and
+	// writes it under Manager.mu.
+	idempotencyKey string
 	// verifiedArtifacts records the artifact keys whose stored bytes already
 	// matched their declared SHA-256.
 	verifiedArtifacts map[string]bool
@@ -462,6 +470,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		Artifacts:          req.artifacts,
 		CreatedAt:          now,
 		AgentVersion:       version.Version,
+		IdempotencyKey:     opts.IdempotencyKey,
 		// max_restarts: 0 means no replacement will ever start, so a signal
 		// must finalize instead of leaving the turn to one.
 		Resumable: m.cfg.Sessions.MaxRestarts > 0 &&
@@ -506,6 +515,13 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 	}
 
 	m.mu.Lock()
+	if existing := m.idempotentLocked(opts.IdempotencyKey); existing != nil {
+		m.mu.Unlock()
+		snapshot := m.copySession(existing)
+		m.logger.Info("session create repeated; returning existing session", "session", snapshot.ID)
+		return &snapshot, nil
+	}
+	inst.idempotencyKey = opts.IdempotencyKey
 	if err := m.reserveLocked(inst); err != nil {
 		m.mu.Unlock()
 		return nil, err
@@ -557,6 +573,11 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		inst.sess.ClosedAt = &now
 		inst.finalized = true
 		inst.mu.Unlock()
+		// A session that never started must not answer a retry: the caller
+		// gets the error and may try again with the same key.
+		m.mu.Lock()
+		inst.idempotencyKey = ""
+		m.mu.Unlock()
 		m.removeToken(hash)
 		m.hub.Append(id, model.Event{Type: model.EventError, Actor: "mayfly", Text: "Failed to start session: " + err.Error()})
 		m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session failed.", Data: map[string]any{"status": string(model.StatusFailed)}})
@@ -661,6 +682,20 @@ func completeRunes(b []byte) int {
 		return n
 	}
 	return n
+}
+
+// idempotentLocked returns the registered session created with key, or nil.
+// The caller holds mu.
+func (m *Manager) idempotentLocked(key string) *instance {
+	if key == "" {
+		return nil
+	}
+	for _, inst := range m.sessions {
+		if inst.idempotencyKey == key {
+			return inst
+		}
+	}
+	return nil
 }
 
 // reserveLocked registers a new session and enforces sessions.max_concurrent.
