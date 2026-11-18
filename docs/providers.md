@@ -140,7 +140,7 @@ llm:
 
 This is still one provider and one key.
 
-## Not supported in v0.1.0
+## Not supported
 
 - Native Anthropic Messages API. It needs a translation adapter for tools and streaming.
 - Native Bedrock Converse API and SigV4. Use LiteLLM.
