@@ -65,6 +65,11 @@ Headers forwarded: `Content-Type`, `Accept`, `Mcp-Session-Id`,
 `MCP-Protocol-Version`, `Last-Event-ID`. Response headers forwarded:
 `Content-Type`, `Cache-Control`, `Mcp-Session-Id`, `MCP-Protocol-Version`.
 
+MCP servers that require OAuth are not supported in 0.x. The HTTP transport
+sends only the static headers from the configuration: there is no
+authorization flow, token refresh, or browser callback. Use a server that
+accepts a static token or API key, and rotate the token at the control plane.
+
 ### stdio servers
 
 ```yaml
