@@ -75,9 +75,22 @@ helm install mayfly oci://ghcr.io/hayfever/charts/mayfly \
 
 For LiteLLM, set `litellm.enabled=true` and provide the provider keys in `litellm-secrets`. See [docs/providers.md](docs/providers.md) and [deploy/helm/mayfly/README.md](deploy/helm/mayfly/README.md).
 
+The chart ships `config.triggers: []`. Add a trigger in your values file. This one exposes `/hooks/generic` and checks the request signature or the `X-Mayfly-Token` header against `MAYFLY_WEBHOOK_SECRET`:
+
+```yaml
+config:
+  triggers:
+    - name: generic
+      type: generic
+      secret_env: MAYFLY_WEBHOOK_SECRET
+      ttl: 30m
+```
+
+Put `MAYFLY_WEBHOOK_SECRET` in the `mayfly-secrets` Secret. Set `allow_unsigned: true` only on a local cluster. See [docs/configuration.md](docs/configuration.md#triggers) for the trigger fields and template data.
+
 ## Quickstart with k3d
 
-Requirements: Docker, k3d, kubectl, Go 1.26+, jq, openssl.
+Requirements: Docker, k3d, kubectl, Helm, Go 1.26+, jq, openssl.
 
 ```bash
 git clone https://github.com/hayfever/mayfly.git
@@ -96,6 +109,24 @@ export MAYFLY_TOKEN=<printed token>
 ./bin/mayfly ls
 ./bin/mayfly attach <id>
 ```
+
+Fire a webhook instead of using the CLI. The local overlay sets
+`allow_unsigned: true` on the `generic` trigger, so a request starts a session
+without a signature. The control plane queues the delivery and answers
+immediately:
+
+```bash
+curl -sS http://localhost:8080/hooks/generic \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Check the latest deploy"}'
+```
+
+```json
+{"accepted":true,"duplicate":false,"job_id":"9c1e4a7b2d5f...","delivery":""}
+```
+
+The queue worker starts the session within a few seconds. `./bin/mayfly ls`
+shows it once the runtime connects.
 
 Open <http://localhost:8080> for the web UI and paste the token in Settings.
 
