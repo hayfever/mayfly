@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="https://github.com/hayfever/mayfly/actions/workflows/ci.yml"><img src="https://github.com/hayfever/mayfly/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/release-v0.1.0-2563EB" alt="Release v0.1.0"></a>
+  <a href="https://github.com/hayfever/mayfly/releases"><img src="https://img.shields.io/github/v/release/hayfever/mayfly?include_prereleases&amp;label=release&amp;color=2563EB" alt="Release"></a>
   <a href="go.mod"><img src="https://img.shields.io/badge/go-1.26-00ADD8" alt="Go 1.26"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
 </p>
@@ -56,7 +56,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the code map and invariants, and [doc
 
 ## Install with Helm
 
-Published images are `ghcr.io/hayfever/mayflyd:0.1.0` and `ghcr.io/hayfever/mayfly-agent:0.1.0`.
+No release is tagged yet, so no images or chart are published. The k3d quickstart below builds the images and applies the manifests. A tagged release publishes `ghcr.io/hayfever/mayflyd`, `ghcr.io/hayfever/mayfly-agent`, and the chart at `oci://ghcr.io/hayfever/charts/mayfly`. Install a tagged release with:
 
 ```bash
 kubectl create namespace mayfly
@@ -67,22 +67,13 @@ kubectl -n mayfly create secret generic mayfly-secrets \
   --from-literal=OPENAI_API_KEY="sk-..."
 
 helm install mayfly oci://ghcr.io/hayfever/charts/mayfly \
-  --version 0.1.0 \
+  --version <version> \
   --namespace mayfly \
   --set existingSecret=mayfly-secrets \
   --set config.server.public_url=https://mayfly.example.com
 ```
 
 For LiteLLM, set `litellm.enabled=true` and provide the provider keys in `litellm-secrets`. See [docs/providers.md](docs/providers.md) and [deploy/helm/mayfly/README.md](deploy/helm/mayfly/README.md).
-
-Local chart install:
-
-```bash
-helm install mayfly deploy/helm/mayfly \
-  --namespace mayfly \
-  --set existingSecret=mayfly-secrets \
-  --set config.server.public_url=https://mayfly.example.com
-```
 
 ## Quickstart with k3d
 
@@ -197,7 +188,7 @@ skills:
 
 ## Status
 
-v0.1.0 is an experimental, single-tenant release. The API and harness protocol may change during 0.x. Read [docs/deployment.md](docs/deployment.md) and the known limitations in [CHANGELOG.md](CHANGELOG.md) before exposing it.
+Mayfly is experimental and single-tenant. The current release candidate is `0.1.0-rc.2`. The API and harness protocol may change during 0.x. Read [docs/deployment.md](docs/deployment.md) and the known limitations in [CHANGELOG.md](CHANGELOG.md) before exposing it.
 
 ## Security model
 

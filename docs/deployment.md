@@ -47,26 +47,33 @@ To check a cluster before relying on it, run the end-to-end suite against it. It
 
 ## Helm
 
-The release chart is published to `oci://ghcr.io/hayfever/charts/mayfly`.
+A tagged release publishes the chart to `oci://ghcr.io/hayfever/charts/mayfly`. No release is tagged yet. To install from a checkout, build the images, import them into the cluster, and set the image names and tags:
 
 ```bash
+make image
+k3d image import --cluster mayfly mayflyd:dev mayfly-agent:dev
+
 kubectl create namespace mayfly
 kubectl -n mayfly create secret generic mayfly-secrets \
   --from-literal=MAYFLY_API_TOKEN="$(openssl rand -hex 24)" \
   --from-literal=MAYFLY_WEBHOOK_SECRET="$(openssl rand -hex 24)" \
   --from-literal=OPENAI_API_KEY="sk-..."
 
-helm install mayfly oci://ghcr.io/hayfever/charts/mayfly \
-  --version 0.1.0 \
+helm install mayfly deploy/helm/mayfly \
   --namespace mayfly \
   --set existingSecret=mayfly-secrets \
+  --set image.repository=mayflyd \
+  --set image.tag=dev \
+  --set agentImage.repository=mayfly-agent \
+  --set agentImage.tag=dev \
   --set config.server.public_url=https://mayfly.example.com
 ```
 
-Or install the local chart:
+Once a release is tagged, install the published chart instead:
 
 ```bash
-helm install mayfly deploy/helm/mayfly \
+helm install mayfly oci://ghcr.io/hayfever/charts/mayfly \
+  --version <version> \
   --namespace mayfly \
   --set existingSecret=mayfly-secrets \
   --set config.server.public_url=https://mayfly.example.com
