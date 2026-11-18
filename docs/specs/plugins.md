@@ -1210,6 +1210,9 @@ Until one of these is designed, plugins are trusted code.
 
 ## Open questions
 
+These are not implemented. Each entry records the current choice and the
+condition for revisiting it.
+
 1. **Sidecar over localhost TCP.** Call tokens would make TCP acceptable, but
    the Unix socket limits reach to containers that mount the volume and costs
    nothing. Add `sidecar.listen: tcp` only if an image cannot use Unix
