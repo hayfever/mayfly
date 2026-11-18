@@ -6,7 +6,7 @@ import "fmt"
 // Version is the current release. Release builds override Version, Commit, and
 // Date with -ldflags; see the Makefile and release workflow.
 var (
-	Version = "0.1.0"
+	Version = "dev"
 	Commit  = "none"
 	Date    = "unknown"
 )

@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 GO ?= go
 BIN ?= bin
-VERSION ?= 0.1.0
+VERSION ?= $(patsubst v%,%,$(shell git describe --tags --dirty 2>/dev/null || echo dev))
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 CLUSTER ?= mayfly

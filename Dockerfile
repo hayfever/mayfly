@@ -8,7 +8,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-ARG VERSION=0.1.0
+ARG VERSION=dev
 ARG COMMIT=none
 ARG DATE=unknown
 RUN LDFLAGS="-s -w -X github.com/hayfever/mayfly/internal/version.Version=${VERSION} -X github.com/hayfever/mayfly/internal/version.Commit=${COMMIT} -X github.com/hayfever/mayfly/internal/version.Date=${DATE}" \
