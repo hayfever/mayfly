@@ -37,14 +37,19 @@ Mayfly puts a durable job queue in front of a session lifecycle manager. A verif
 flowchart LR
   Hook["Webhook<br/>POST /hooks/{name}"] -->|"verify, rate limit, Accept"| Q[("queue.Store<br/>memory, bbolt, redis")]
   API["API / CLI<br/>POST /api/v1/sessions"] --> M
+  Cron["Schedule<br/>cron or POST /api/v1/schedules"] -->|"source job"| Q
   Q -->|"Claim lease"| W["queue.Worker"]
   W -->|"SessionHandler"| M["session.Manager<br/>Create"]
+  W -->|"source job"| WF["workflow.Runner<br/>source chain, run artifact"]
+  WF -->|"material change"| M
   W -->|"Release on ErrCapacity"| Q
   W -->|"Ack: job id to session id"| Done[("done tombstones<br/>tombstone_ttl")]
   W -->|"Nack at max_attempts"| Dead[("dead jobs<br/>retry or delete")]
   M -->|"runner.Start"| R["Kubernetes pod<br/>or local process"]
   R --> A["mayfly-harness<br/>mayfly-agent"]
   A -->|"events, inbox, LLM and MCP via broker"| M
+  A -->|"authorize tool call"| G["Tool gateway in mayflyd<br/>grant, ledger, rate limit, audit"]
+  A -->|"dispatch with call token"| P["Plugin<br/>inline, sidecar, service"]
   A -->|"bundle, finalize"| M
   M -->|"Put bundle"| S[("artifact.Store<br/>local, S3")]
   M -->|"runner.Stop: teardown"| R
@@ -56,7 +61,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the code map and invariants, and [doc
 
 ## Install with Helm
 
-No release is tagged yet, so no images or chart are published. The k3d quickstart below builds the images and applies the manifests. A tagged release publishes `ghcr.io/hayfever/mayflyd`, `ghcr.io/hayfever/mayfly-agent`, and the chart at `oci://ghcr.io/hayfever/charts/mayfly`. Install a tagged release with:
+The current release candidate is `v0.1.0-rc.2`. Each tagged release publishes `ghcr.io/hayfever/mayflyd`, `ghcr.io/hayfever/mayfly-agent`, and the chart at `oci://ghcr.io/hayfever/charts/mayfly`. The packages are private during the release candidate, so pulling them needs a GitHub token with `read:packages`. The k3d quickstart below builds the images locally instead. Install the release candidate with:
 
 ```bash
 kubectl create namespace mayfly
@@ -67,7 +72,7 @@ kubectl -n mayfly create secret generic mayfly-secrets \
   --from-literal=OPENAI_API_KEY="sk-..."
 
 helm install mayfly oci://ghcr.io/hayfever/charts/mayfly \
-  --version <version> \
+  --version 0.1.0-rc.2 \
   --namespace mayfly \
   --set existingSecret=mayfly-secrets \
   --set config.server.public_url=https://mayfly.example.com

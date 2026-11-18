@@ -47,7 +47,7 @@ To check a cluster before relying on it, run the end-to-end suite against it. It
 
 ## Helm
 
-A tagged release publishes the chart to `oci://ghcr.io/hayfever/charts/mayfly`. No release is tagged yet. To install from a checkout, build the images, import them into the cluster, and set the image names and tags:
+A tagged release publishes the chart to `oci://ghcr.io/hayfever/charts/mayfly`. The current release candidate is `v0.1.0-rc.2`, and its images and chart are private, so pulling them needs a GitHub token with `read:packages`. To install from a checkout, build the images, import them into the cluster, and set the image names and tags:
 
 ```bash
 make image
@@ -69,11 +69,11 @@ helm install mayfly deploy/helm/mayfly \
   --set config.server.public_url=https://mayfly.example.com
 ```
 
-Once a release is tagged, install the published chart instead:
+To install the published chart instead:
 
 ```bash
 helm install mayfly oci://ghcr.io/hayfever/charts/mayfly \
-  --version <version> \
+  --version 0.1.0-rc.2 \
   --namespace mayfly \
   --set existingSecret=mayfly-secrets \
   --set config.server.public_url=https://mayfly.example.com
