@@ -428,8 +428,8 @@ the providers again. Change tracking such as Firecrawl's reports a change
 only once, so a second fetch would report `same` and lose it. A stored
 artifact that does not decode, or that belongs to another run, fails the
 job. The session is created with the job ID as its idempotency key, so a
-retry after a crash does not start a second session. The session mounts the run artifact, and the agent reads it with
-`read_artifact` in windows.
+retry after a crash does not start a second session. The session mounts the
+run artifact, and the agent reads it with `read_artifact` in byte ranges.
 
 ## API
 
