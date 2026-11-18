@@ -1,10 +1,8 @@
 # Plugins: implementation spec
 
-Status: approved design (v2: placements and tool gateway), not started
-Audience: Mayfly maintainers and the coding agents that build it
-User docs: [../plugins.md](../plugins.md) describes the finished behavior.
-Every work package below must leave that page true for the parts it ships.
-Base: commit `7aa80cc`
+Status: Implemented; shipped in 0.1.0
+Audience: Mayfly maintainers
+User docs: [../plugins.md](../plugins.md) describes the behavior users see.
 
 ## Summary
 
@@ -12,13 +10,13 @@ A plugin is an MCP server declared in the project bundle and shipped as an
 image. Its manifest picks a `placement`:
 
 - `inline`: a stdio child of the session runtime, copied into the pod by an
-  init container (the v1 design).
+  init container.
 - `sidecar`: a native sidecar container in the session pod, reached over
   streamable HTTP MCP on a Unix socket.
 - `service`: a Deployment and Service in the cluster, reconciled by `mayflyd`
   from the manifest and shared by sessions, reached over streamable HTTP MCP.
 
-Every plugin call, whatever the placement, goes through a new tool gateway in
+Every plugin call, whatever the placement, goes through a tool gateway in
 `mayflyd` (`internal/gateway`). The gateway holds each session's tool grant,
 records every call in a durable ledger keyed by `<session>/<turn>/<step>`,
 attaches the idempotency key, enforces timeouts and rate limits, writes the
@@ -26,19 +24,14 @@ audit log, and injects credentials. For inline and sidecar plugins the
 runtime makes the call after the gateway authorizes it and reports the result
 back. For service plugins the gateway makes the call itself.
 
-`mcp.servers` tools move behind the same gateway for the built-in harness:
-HTTP servers are called by the gateway through the existing broker's HTTP
-client and resolved headers; stdio servers use the same begin/complete path as
-inline plugins. That closes gap 8.2 (Gap 3) of
-[architecture-gaps.md](../architecture-gaps.md) for every tool that is not a
-built-in, including the competitor-watch Slack post.
+`mcp.servers` tools go through the same gateway for the built-in harness:
+HTTP servers are called by the gateway through the broker's HTTP client and
+resolved headers; stdio servers use the same begin/complete path as inline
+plugins. Built-in tools are the only tool calls outside the gateway.
 
 The plugin process itself is always a plain MCP server. Sidecar and service
 placements put a Mayfly shim (`mayfly-plugin-shim serve`) in front of a stdio
 server, so one image works in all three placements.
-
-Build order: gateway plus inline (phase A), then service (phase B), then
-sidecar (phase C).
 
 ## Goals
 
@@ -64,10 +57,10 @@ sidecar (phase C).
 - Hostname-based egress allowlists (NetworkPolicy is CIDR-based).
 - Plugins in alternate harnesses (`harness: pi` and others). They keep using
   the broker's byte proxy for `mcp.servers` and get no plugins.
-- Per-agent tool subsets (open question 3).
+- Per-agent tool subsets (see [Open questions](#open-questions)).
 - Registry, hot reload, installing packages at session start.
 - MCP resources, prompts, sampling, roots, or server-initiated requests.
-- Autoscaling services (open question 11).
+- Autoscaling services (see [Open questions](#open-questions)).
 
 ## Decisions
 
@@ -99,12 +92,10 @@ computed at create and rebuilt from `session.json` on adoption. No second
 token is minted for that hop: the agent container already holds the session
 token, so a second credential there would add nothing.
 
-### Ledger replaces the v1 runtime-side pending entry
+### Ledger records every call
 
-v1 wrote a pending journal entry from the runtime before a non-idempotent
-call. v2 moves the record to the gateway: the ledger record is written at
-begin and completed with the result. On resume the runtime asks the gateway
-again with the same key:
+The ledger record is written at begin and completed with the result. On
+resume the runtime asks the gateway again with the same key:
 
 | Ledger state at begin | Tool | Gateway answer |
 |---|---|---|
@@ -113,17 +104,16 @@ again with the same key:
 | `pending` | non-idempotent | Return an error `result` with `interrupted: true`; mark the record `done` with that result; the runtime emits the system event |
 | `pending` | idempotent | Return `dispatch` (or call upstream) again with the same key; the record stays `pending` |
 
-The `done` row is new relative to v1: a call that completed but whose journal
-step never landed now replays its recorded result instead of running again.
-`internal/agent/steps.go` changes only for the `Interrupted` and `Replayed`
-flags on `toolStepOutput`; the runtime no longer writes pending entries.
-Journal steps are still appended after the tool, exactly as today.
+A call that completed but whose journal step never landed replays its
+recorded result instead of running again. `internal/agent/steps.go` handles
+the `Interrupted` and `Replayed` flags on `toolStepOutput`; the runtime does
+not write pending entries. Journal steps are still appended after the tool.
 
 The idempotency key is `<session>/<turn>/<step>`. The gateway checks that
 `turn` is at most the session's reserved sequence
 (`journal.Sequencer.HighWater`) and that `step` is positive and within the
-runtime's step bound for a turn (WP3 reads the real bound from
-`internal/agent`; `sessions.max_steps` bounds model calls, and each model
+runtime's step bound for a turn (`internal/agent` defines the real bound;
+`sessions.max_steps` bounds model calls, and each model
 step can be followed by tool steps). The same key with a different tool or
 argument hash is rejected with 409, because it means the runtime is no longer
 deterministic for that step.
@@ -313,7 +303,7 @@ gateway key (a Mayfly-owned secret), and `service.mcpServer` reuses the
 
 ### Packaging (inline): init container copy
 
-Unchanged from v1. Each inline plugin adds one init container that runs the
+Each inline plugin adds one init container that runs the
 plugin image with Mayfly's static shim as its command and copies
 `/mayfly-plugin/` into an emptyDir the agent container mounts read-only at
 `/opt/mayfly/plugins/<name>/`. Reasons: stdio needs a child process; it works
@@ -325,9 +315,9 @@ containers because `Manager.prepare` builds the pod from `session.json`.
 Image volumes (`volumes[].image`, beta and on by default in 1.35, stable in
 1.36, containerd 2.1 or later) can replace the copy later as
 `runtime.plugin_packaging: image-volume` without changing plugin images
-(open question 10).
+(see [Open questions](#open-questions)).
 
-### The shim (replaces the v1 copier)
+### The shim
 
 `cmd/mayfly-plugin-shim`, `CGO_ENABLED=0`, installed in the agent image at
 `/usr/local/bin/mayfly-plugin-shim`:
@@ -335,7 +325,7 @@ Image volumes (`volumes[].image`, beta and on by default in 1.35, stable in
 | Subcommand | Used by | Behavior |
 |---|---|---|
 | `install-self <dst>` | `mayfly-tools` init container | Copies its own executable to `dst`, mode 0755 |
-| `copy <src> <dst>` | `plugin-<name>` init containers (inline) | The v1 copier: copies the tree, keeps modes minus group/other write, refuses escaping symlinks (checked lexically before the copy, and resolved with `filepath.EvalSymlinks` inside the destination afterwards, because a chain through another link can escape) and device files, fails with `plugin image has no /mayfly-plugin directory`, 1 GiB backstop |
+| `copy <src> <dst>` | `plugin-<name>` init containers (inline) | Copies the tree, keeps modes minus group/other write, refuses escaping symlinks (checked lexically before the copy, and resolved with `filepath.EvalSymlinks` inside the destination afterwards, because a chain through another link can escape) and device files, fails with `plugin image has no /mayfly-plugin directory`, 1 GiB backstop |
 | `serve --listen unix:PATH\|tcp:ADDR --key-file F [--session S] [--max-concurrency N] [--init-timeout D] -- CMD ARGS...` | Sidecar and service containers, local service children | Supervises the stdio child, serves streamable HTTP MCP on `POST /mcp`, verifies call tokens, multiplexes, restarts the child with back-off |
 | `probe --listen ...` | Startup and readiness probes | Exits 0 when `serve` has initialized the child and listed its tools |
 
@@ -352,11 +342,10 @@ numeric suffixes, because the names are declared. Names do not depend on
 placement, so moving a plugin between placements does not change prompts,
 transcripts, or journal step names.
 
-Docs: "plugin" means this feature. `docs/agents.md` calls agent manifests
-"agent plugins" and says "This is the only plugin surface". WP15 renames that
-wording to "agent manifest".
+Docs: "plugin" means this feature. Agent manifests are "agent manifests" in
+`docs/agents.md`.
 
-### Rules kept from v1
+### Rules
 
 - **Loader rule:** `plugins/<name>/plugin.yaml` is a manifest; every other
   file under `plugins/<name>/` is skipped as plugin source.
@@ -367,7 +356,7 @@ wording to "agent manifest".
   service plugins, whose secrets are outside the agent container. On the
   local backend sidecars run inline, so the rule applies to them there.
 - **Secret prefix:** `secrets[].secret` must start with `mayfly-plugin-`.
-- **`required` semantics** as in v1.
+- **`required` semantics.**
 
 ## Architecture
 
@@ -398,76 +387,76 @@ agents.yaml (plugins) ───▶ agents.Definition.Plugins
 
 New:
 
-| Path | Purpose | WP |
-|---|---|---|
-| `internal/plugin/manifest.go` | `Manifest` types, `Parse`, `Validate`, defaults | WP1 |
-| `internal/plugin/names.go` | `ToolName`, `IsManifestPath`, `ContainerName`, `ObjectName` | WP1 |
-| `internal/plugin/manifest_test.go` | Table tests | WP1 |
-| `internal/journal/ledger.go` | `Ledger` interface and `Call` record | WP3 |
-| `internal/journal/ledger_test.go` | Conformance tests for memory and bbolt | WP3 |
-| `internal/gateway/gateway.go` | `Gateway`, `Grant`, `GrantFor`, begin and complete, resume table | WP3, WP9, WP13 |
-| `internal/gateway/api.go` | Request and response types shared with `platformclient` | WP3 |
-| `internal/gateway/limits.go` | Per-session, per-plugin rate limiters; in-flight cap | WP3 |
-| `internal/gateway/audit.go` | slog audit line and optional JSONL file | WP3 |
-| `internal/gateway/token.go` | Call token sign and verify (used by the shim too) | WP3 |
-| `internal/gateway/gateway_test.go` | Unit tests | WP3 |
-| `internal/gateway/remote.go` | Upstream MCP clients per (session, server), discovery | WP9 |
-| `internal/gateway/remote_test.go` | Against an in-process streamable HTTP MCP server | WP9 |
-| `internal/pluginhost/host.go` | Inline supervisor: start, verify, call, restart, close | WP6 |
-| `internal/pluginhost/env.go` | Process environment builder, on the shared `sessioncfg` allowlist | WP6 |
-| `internal/sessioncfg/env.go` | Child environment allowlist: `StdioEnv`, `PassthroughEnv`, `DefaultPath` | WP6 |
-| `internal/pluginhost/stderr.go` | Capped stderr sink | WP6 |
-| `internal/pluginhost/host_test.go` | Tests against a fixture plugin | WP6 |
-| `internal/pluginhost/testdata/fixture/main.go` | Go fixture MCP server (build tag `ignore`) | WP6 |
-| `internal/pluginhost/sidecar.go`, `sidecar_test.go` | Sidecar client over UDS with tokens | WP13 |
-| `internal/pluginsvc/reconcile.go` | Service object rendering and reconcile loop | WP12 |
-| `internal/pluginsvc/local.go` | Local-backend service children | WP12 |
-| `internal/pluginsvc/reconcile_test.go` | Fake clientset tests | WP12 |
-| `cmd/mayfly-plugin-shim/main.go`, `main_test.go` | `install-self`, `copy` | WP5 |
-| `cmd/mayfly-plugin-shim/serve.go`, `serve_test.go` | `serve`, `probe` | WP11 |
-| `cmd/mayfly/plugin.go`, `plugin_test.go` | `mayfly plugin init\|check\|test` | WP10 |
-| `cmd/mayfly/plugintemplates/{go,python,ts}/` | Embedded scaffolds | WP10 |
-| `examples/plugins/notify/` | Go, sidecar, non-idempotent, uses the key | WP10, WP13 |
-| `examples/plugins/tickets/` | Python, service, shared cache | WP10, WP12 |
-| `examples/plugins/word-count/` | TypeScript, inline, no secrets | WP10 |
-| `test/integration/plugin_test.go` | Local-backend tests, SIGKILL resume | WP8 |
-| `e2e/plugin_test.go`, `e2e/plugins/` | k3d tests and fixture image source | WP14 |
+| Path | Purpose |
+|---|---|
+| `internal/plugin/manifest.go` | `Manifest` types, `Parse`, `Validate`, defaults |
+| `internal/plugin/names.go` | `ToolName`, `IsManifestPath`, `ContainerName`, `ObjectName` |
+| `internal/plugin/manifest_test.go` | Table tests |
+| `internal/journal/ledger.go` | `Ledger` interface and `Call` record |
+| `internal/journal/ledger_test.go` | Conformance tests for memory and bbolt |
+| `internal/gateway/gateway.go` | `Gateway`, `Grant`, `GrantFor`, begin and complete, resume table |
+| `internal/gateway/api.go` | Request and response types shared with `platformclient` |
+| `internal/gateway/limits.go` | Per-session, per-plugin rate limiters; in-flight cap |
+| `internal/gateway/audit.go` | slog audit line and optional JSONL file |
+| `internal/gateway/token.go` | Call token sign and verify (used by the shim too) |
+| `internal/gateway/gateway_test.go` | Unit tests |
+| `internal/gateway/remote.go` | Upstream MCP clients per (session, server), discovery |
+| `internal/gateway/remote_test.go` | Against an in-process streamable HTTP MCP server |
+| `internal/pluginhost/host.go` | Inline supervisor: start, verify, call, restart, close |
+| `internal/pluginhost/env.go` | Process environment builder, on the shared `sessioncfg` allowlist |
+| `internal/sessioncfg/env.go` | Child environment allowlist: `StdioEnv`, `PassthroughEnv`, `DefaultPath` |
+| `internal/pluginhost/stderr.go` | Capped stderr sink |
+| `internal/pluginhost/host_test.go` | Tests against a fixture plugin |
+| `internal/pluginhost/testdata/fixture/main.go` | Go fixture MCP server (build tag `ignore`) |
+| `internal/pluginhost/sidecar.go`, `sidecar_test.go` | Sidecar client over UDS with tokens |
+| `internal/pluginsvc/reconcile.go` | Service object rendering and reconcile loop |
+| `internal/pluginsvc/local.go` | Local-backend service children |
+| `internal/pluginsvc/reconcile_test.go` | Fake clientset tests |
+| `cmd/mayfly-plugin-shim/main.go`, `main_test.go` | `install-self`, `copy` |
+| `cmd/mayfly-plugin-shim/serve.go`, `serve_test.go` | `serve`, `probe` |
+| `cmd/mayfly/plugin.go`, `plugin_test.go` | `mayfly plugin init\|check\|test` |
+| `cmd/mayfly/plugintemplates/{go,python,ts}/` | Embedded scaffolds |
+| `examples/plugins/notify/` | Go, sidecar, non-idempotent, uses the key |
+| `examples/plugins/tickets/` | Python, service, shared cache |
+| `examples/plugins/word-count/` | TypeScript, inline, no secrets |
+| `test/integration/plugin_test.go` | Local-backend tests, SIGKILL resume |
+| `e2e/plugin_test.go`, `e2e/plugins/` | k3d tests and fixture image source |
 
 Modified:
 
-| Path | Change | WP |
-|---|---|---|
-| `internal/sessioncfg/config.go` | `Plugin`, `PluginTool`, `PluginSecret`, `PluginSidecar`, `Config.Plugins`, `MCPServer.Tools`/`IdempotentTools`, validation | WP1 |
-| `internal/project/project.go` | Discover manifests, skip plugin trees, `Bundle.Plugins`, scope checks, `Describe` | WP2 |
-| `internal/agents/agents.go` | `Definition.Plugins *[]string` | WP2 |
-| `internal/session/agents.go` | `loadAgents` rules, `AgentInfo.Plugins` | WP2 |
-| `cmd/mayflyd/main.go` | `RequirePluginImage`; ledger and gateway; `mgr.SetGateway`; reconciler | WP2, WP4, WP7, WP12 |
-| `internal/journal/memory.go`, `internal/journal/bbolt.go` | Implement `Ledger`; `calls` bucket; `Delete` removes ledger records | WP3 |
-| `internal/config/config.go` | `PluginsConfig` (`plugins:`) in WP3; `RuntimeConfig.PluginVolumeLimit` in WP7; `MCPServerConfig.Tools`/`IdempotentTools` in WP9 | WP3, WP7, WP9 |
-| `internal/httpapi/server.go` | Construct the gateway; register the tool routes | WP4 |
-| `internal/httpapi/internal.go` | Tool route handlers | WP4 |
-| `internal/platformclient/client.go` | `Tools`, `BeginCall`, `CompleteCall` | WP4 |
-| `internal/session/manager.go` | `resolvePlugins`, `copySession`, `prepare`, grants on create and adopt (WP7); `mcp.servers` tool lists (WP9); gateway key (WP13) | WP7, WP9, WP13 |
-| `internal/session/lifecycle.go` | Finalize drops the grant; ledger deleted with the journal | WP7 |
-| `internal/session/restart.go` | Local replacement re-resolves plugin secrets | WP7 |
-| `internal/runner/runner.go`, `internal/runner/local.go` | `Spec.PluginSecrets`; write secret files | WP7 |
-| `internal/model/model.go` | `Session.Plugins` | WP7 |
-| `internal/k8s/spec.go` | Inline init containers and mounts (WP5); sidecars, per-plugin socket volumes, `gateway-key-<name>` (WP13) | WP5, WP13 |
-| `internal/k8s/client.go` | Plugin object helpers (WP12); `SessionKeys` (WP13) | WP12, WP13 |
-| `internal/mcp/stdio.go`, `internal/mcp/mcp.go`, `internal/mcp/http.go` | `NewStdioExact`, `CallToolMeta`, `Cancel`, `Exited`, `NewHTTPWithClient` (WP6); UDS dialer (WP13) | WP6, WP13 |
-| `internal/mcp/manager.go` | Optional tool allowlist; naming unchanged | WP9 |
-| `internal/broker/broker.go` | `HTTPClient()` accessor | WP9 |
-| `internal/ratelimit/ratelimit.go` | No change expected; the gateway keys limiters itself | none |
-| `internal/agent/tools.go` | Route `plugin_*` and `mcp_*` through the gateway; per-tool timeout and output cap | WP8 |
-| `internal/agent/runtime.go` | Start and close the host; system events; gateway calls in `executeTool` (WP8); sidecar members (WP13) | WP8, WP13 |
-| `internal/agent/steps.go` | `toolStepOutput.Interrupted`, `Replayed` | WP8 |
-| `internal/agent/finalize.go` | Plugin stderr logs; `Manifest.Plugins` | WP8 |
-| `internal/bundle/bundle.go` | `Manifest.Plugins []string` | WP8 |
-| `deploy/k8s/base/rbac.yaml`, `deploy/helm/mayfly/templates/rbac.yaml` | Deployments, services, update verbs | WP12 |
-| `deploy/helm/mayfly/values.yaml` | `plugins:` section, `plugin_volume_limit` | WP15 |
-| `Dockerfile`, `Makefile` | Build and install `mayfly-plugin-shim`; `mkdir -p /opt/mayfly/plugins` | WP5 |
-| `cmd/llmstub/main.go` or `internal/stub/llm.go` | Script `plugin_*` calls if the stub cannot already | WP8, WP14 |
-| `docs/*`, `ARCHITECTURE.md`, `README.md`, `CHANGELOG.md` | Documentation | WP15 |
+| Path | Change |
+|---|---|
+| `internal/sessioncfg/config.go` | `Plugin`, `PluginTool`, `PluginSecret`, `PluginSidecar`, `Config.Plugins`, `MCPServer.Tools`/`IdempotentTools`, validation |
+| `internal/project/project.go` | Discover manifests, skip plugin trees, `Bundle.Plugins`, scope checks, `Describe` |
+| `internal/agents/agents.go` | `Definition.Plugins *[]string` |
+| `internal/session/agents.go` | `loadAgents` rules, `AgentInfo.Plugins` |
+| `cmd/mayflyd/main.go` | `RequirePluginImage`; ledger and gateway; `mgr.SetGateway`; reconciler |
+| `internal/journal/memory.go`, `internal/journal/bbolt.go` | Implement `Ledger`; `calls` bucket; `Delete` removes ledger records |
+| `internal/config/config.go` | `PluginsConfig` (`plugins:`), `RuntimeConfig.PluginVolumeLimit`, `MCPServerConfig.Tools`/`IdempotentTools` |
+| `internal/httpapi/server.go` | Construct the gateway; register the tool routes |
+| `internal/httpapi/internal.go` | Tool route handlers |
+| `internal/platformclient/client.go` | `Tools`, `BeginCall`, `CompleteCall` |
+| `internal/session/manager.go` | `resolvePlugins`, `copySession`, `prepare`, grants on create and adopt; `mcp.servers` tool lists; gateway key |
+| `internal/session/lifecycle.go` | Finalize drops the grant; ledger deleted with the journal |
+| `internal/session/restart.go` | Local replacement re-resolves plugin secrets |
+| `internal/runner/runner.go`, `internal/runner/local.go` | `Spec.PluginSecrets`; write secret files |
+| `internal/model/model.go` | `Session.Plugins` |
+| `internal/k8s/spec.go` | Inline init containers and mounts; sidecars, per-plugin socket volumes, `gateway-key-<name>` |
+| `internal/k8s/client.go` | Plugin object helpers; `SessionKeys` |
+| `internal/mcp/stdio.go`, `internal/mcp/mcp.go`, `internal/mcp/http.go` | `NewStdioExact`, `CallToolMeta`, `Cancel`, `Exited`, `NewHTTPWithClient`; UDS dialer |
+| `internal/mcp/manager.go` | Optional tool allowlist; naming unchanged |
+| `internal/broker/broker.go` | `HTTPClient()` accessor |
+| `internal/ratelimit/ratelimit.go` | No change expected; the gateway keys limiters itself |
+| `internal/agent/tools.go` | Route `plugin_*` and `mcp_*` through the gateway; per-tool timeout and output cap |
+| `internal/agent/runtime.go` | Start and close the host; system events; gateway calls in `executeTool`; sidecar members |
+| `internal/agent/steps.go` | `toolStepOutput.Interrupted`, `Replayed` |
+| `internal/agent/finalize.go` | Plugin stderr logs; `Manifest.Plugins` |
+| `internal/bundle/bundle.go` | `Manifest.Plugins []string` |
+| `deploy/k8s/base/rbac.yaml`, `deploy/helm/mayfly/templates/rbac.yaml` | Deployments, services, update verbs |
+| `deploy/helm/mayfly/values.yaml` | `plugins:` section, `plugin_volume_limit` |
+| `Dockerfile`, `Makefile` | Build and install `mayfly-plugin-shim`; `mkdir -p /opt/mayfly/plugins` |
+| `cmd/llmstub/main.go` or `internal/stub/llm.go` | Script `plugin_*` calls if the stub cannot already |
+| `docs/*`, `ARCHITECTURE.md`, `README.md`, `CHANGELOG.md` | Documentation |
 
 ## Types and schema
 
@@ -829,7 +818,7 @@ type SessionSpec struct {
 }
 ```
 
-Inline pod additions (WP5): volumes `mayfly-tools` (emptyDir 64Mi) and
+Inline pod additions: volumes `mayfly-tools` (emptyDir 64Mi) and
 `plugins` (emptyDir `PluginVolumeLimit`); one projected
 `plugin-secrets-<name>` per inline plugin with secrets (`items` key →
 `<env>`, mode 0400). Init containers `mayfly-tools`, then `plugin-<name>`,
@@ -843,7 +832,7 @@ startup: a plugin then cannot read the session token from
 `/proc/<pid>/environ`, although it can still read a sibling plugin's secret
 files.
 
-Sidecar pod additions (WP13): one volume `plugin-sockets-<name>` per sidecar
+Sidecar pod additions: one volume `plugin-sockets-<name>` per sidecar
 plugin (emptyDir, `medium: Memory`, 1Mi); the session Secret gains
 `gateway-key-<name>` for each sidecar plugin; one native sidecar
 `plugin-<name>` per sidecar plugin, after `mayfly-tools`, with
@@ -1048,7 +1037,7 @@ Values are never logged or written to `session.json`.
 
 ### Runtime host (`internal/pluginhost`)
 
-Inline plugins, as in v1:
+Inline plugins:
 
 ```go
 func Start(ctx context.Context, plugins []sessioncfg.Plugin, opts Options) (*Host, []error)
@@ -1092,7 +1081,7 @@ func (h *Host) Close()
   to 15 minutes, or the bundle and the finalize step are lost. The stdio
   transport's `Close` takes no call lock either, for the same reason.
 
-Sidecar members (WP13): an `mcp.Client` over HTTP with a Unix-socket
+Sidecar members: an `mcp.Client` over HTTP with a Unix-socket
 dialer, sending `Authorization: Bearer <token>` (discovery token for
 `initialize` and `tools/list`, call token for `tools/call`). An unreachable
 socket is reported as a call error; nothing is restarted by the host,
@@ -1112,19 +1101,19 @@ The host never talks to the gateway; `internal/agent` does.
 - `stdioTransport.Close` gains SIGTERM before SIGKILL.
 - `NewHTTPWithClient(name, url string, headers map[string]string, client *http.Client, perRequest func(*http.Request)) *Client`.
   `NewHTTP(name, url, token, headers)` keeps its signature and calls it.
-- WP13: a Unix-socket option, a client whose `Transport.DialContext` dials
+- A Unix-socket option, a client whose `Transport.DialContext` dials
   the socket, with URL `http://plugin/mcp`.
 
 ### Runtime integration (`internal/agent`)
 
-- `Runtime.Run`: after `mcp.Start`, start `pluginhost` for inline (and, from
-  WP13, sidecar) plugins, then call `platformclient.Tools`. Required
+- `Runtime.Run`: after `mcp.Start`, start `pluginhost` for inline and
+  sidecar plugins, then call `platformclient.Tools`. Required
   failures (local, or in `errors`) finalize the session as `failed`, as
   `newToolset` failures do today; others emit `model.EventSystem`
   `Plugin unavailable: <err>`. Hidden tools emit
   `Plugin <name> exposes tools that the manifest does not declare; they are hidden: a, b`.
   The "Session started" event data gains `plugins`.
-- HTTP `mcp.servers` (from WP9): the runtime no longer connects to
+- HTTP `mcp.servers`: the runtime does not connect to
   `/internal/v1/mcp/{server}`; their tools come from `Tools()` and are
   called by remote dispatch. `mcp.Start` skips HTTP entries.
 - `toolset.Tools()` order: built-ins, `mcp_*` as today, then `plugin_*`.
@@ -1219,603 +1208,40 @@ Not designed; listed so later work has a starting point.
 
 Until one of these is designed, plugins are trusted code.
 
-## Work packages
-
-### Order and parallelism
-
-```text
-Phase A: gateway and inline
-  Wave 1:  WP1
-  Wave 2:  WP2   WP3   WP5   WP6     (disjoint files)
-  Wave 3:  WP4   WP7   WP10          (disjoint files)
-  Wave 4:  WP8   WP9                 (disjoint files)
-Phase B: service
-  Wave 5:  WP11
-  Wave 6:  WP12
-Phase C: sidecar
-  Wave 7:  WP13
-Closing
-  Wave 8:  WP14 (finish)   WP15
-```
-
-| ID | Title | Depends on | Wave | Phase |
-|---|---|---|---|---|
-| WP1 | Manifest v2 and session config types | none | 1 | A |
-| WP2 | Bundle loading, agent selection, `-check` | WP1 | 2 | A |
-| WP3 | Ledger and gateway core | WP1 | 2 | A |
-| WP4 | Gateway endpoints and platformclient | WP3 | 3 | A |
-| WP5 | Shim `install-self`/`copy` and inline pod packaging | WP1 | 2 | A |
-| WP6 | MCP client changes and inline plugin host | WP1 | 2 | A |
-| WP7 | Session resolution, grants, local secrets | WP2, WP3, WP5 (merge after WP4) | 3 | A |
-| WP8 | Runtime integration through the gateway | WP4, WP6, WP7 | 4 | A |
-| WP9 | Gateway remote dispatch and the `mcp.servers` fold | WP4, WP6, WP7 | 4 | A |
-| WP10 | CLI and examples | WP1, WP6 | 3 | A |
-| WP11 | Shim `serve`, `probe`, call tokens | WP3, WP5, WP6 | 5 | B |
-| WP12 | Service reconciler, RBAC, endpoint mode, local children | WP9, WP11 | 6 | B |
-| WP13 | Sidecar pod spec and UDS dispatch | WP8, WP11, WP12 | 7 | C |
-| WP14 | End-to-end tests on k3d | WP8 and WP9 (A), WP12 (B), WP13 (C) | 4 to 8 | A to C |
-| WP15 | Documentation | all others | 8 | A to C |
-
-WP11 has no phase A dependency beyond waves 2 and 3, so it may start in
-wave 3 or 4 when an agent is free; it is listed in wave 5 to keep the build
-order (gateway and inline, then service, then sidecar). WP13 depends on WP12
-only to rebase on `internal/k8s/client.go`.
-
-WP14 opens after wave 4 with the phase A subtests, gains the service
-subtests after WP12 and the sidecar subtests after WP13, and closes in
-wave 8.
-
-File ownership is disjoint inside a wave. Files shared across waves (the
-later package rebases): `internal/config/config.go` (WP3, WP7, WP9),
-`internal/session/manager.go` (WP7, WP9, WP13), `internal/k8s/spec.go` (WP5,
-WP13), `internal/k8s/client.go` (WP12, WP13), `cmd/mayflyd/main.go` (WP2,
-WP4, WP7, WP12; WP4 merges before WP7's one-line change), `internal/gateway/gateway.go` (WP3, WP9, WP13),
-`internal/mcp/http.go` (WP6, WP13).
-
-Every package ends with `gofmt`, `go vet ./...`,
-`go vet -tags e2e ./e2e/...`, and `go test ./...` passing.
-
----
-
-### WP1: Manifest v2 and session config types
-
-- **Depends on:** none.
-- **Files:** create `internal/plugin/manifest.go`, `internal/plugin/names.go`,
-  `internal/plugin/manifest_test.go`; modify `internal/sessioncfg/config.go`,
-  `internal/sessioncfg/config_test.go`.
-- **Behavior:** the types and functions in
-  [`internal/plugin`](#internalplugin-new) and
-  [`internal/sessioncfg` additions](#internalsessioncfg-additions);
-  validation rules 1 and 3 to 12 (rule 2 needs the bundle and is WP2);
-  defaults; `IsManifestPath` per [Loader rules](#loader-rules-internalproject);
-  `ContainerName` and `ObjectName` (lowercase, `.` and `_` to `-`, truncated
-  to 63 with an 8-character hash suffix on truncation). `Parse` uses
-  `yaml.Decoder.KnownFields(true)`, like `decodeManifest`.
-- **Acceptance:**
-  - Every manifest in `docs/plugins.md` parses and validates (copied into
-    `internal/plugin/testdata/` with a comment naming the doc section).
-  - Each rule has a failing case whose error names the field and the path.
-  - A `service` block on an inline manifest fails; `service.mcpServer` with
-    `image` fails.
-  - `ToolName("notify", "post") == "plugin_notify_post"`; the sanitizer
-    matches `internal/mcp.sanitize` on a shared table.
-  - `sessioncfg.Config` with each placement round-trips through JSON;
-    `Validate` rejects each invalid case.
-- **Tests:** unit: `TestParseRejectsUnknownFields`, `TestValidateRules`
-  (table), `TestPlacementBlocks`, `TestDefaults`, `TestToolNameMatchesMCP`,
-  `TestIsManifestPath`, `TestContainerAndObjectNames`,
-  `TestConfigValidatePlugins`.
-
-### WP2: Bundle loading, agent selection, `-check`
-
-- **Depends on:** WP1.
-- **Files:** modify `internal/project/project.go`,
-  `internal/project/project_test.go`, `internal/agents/agents.go`,
-  `internal/agents/agents_test.go`, `internal/session/agents.go`, a new
-  `internal/session/agents_test.go`, `cmd/mayflyd/main.go`
-  (`RequirePluginImage`), `docs/sources.md` (expected `-check` output only).
-- **Behavior:**
-  - `Load`'s `WalkDir` callback consults `plugin.IsManifestPath` before the
-    extension switch; manifests are parsed through the existing `os.Root`;
-    `buildBundle` validates each and stores `Bundle.Plugins`; private owners
-    are checked.
-  - `agents.Definition.Plugins *[]string` (`yaml:"plugins" json:"plugins"`);
-    nil and empty both mean none; duplicates and invalid names rejected.
-  - `Describe`: the first line gains `plugins: N` after `connections: N`;
-    one line per plugin, sorted:
-    `plugin <name> placement=<p> scope=<scope> tools=<n> effects=<a,b|-> image=<image|->`,
-    with ` mcpServer=<name>` for endpoint plugins; agent lines append
-    ` plugins=<a,b>` when non-empty.
-  - `session.loadAgents`: rules 13 to 18 in the existing message style
-    (`%s: agent %q references unknown plugin %q`).
-  - `AgentInfo.Plugins []string` (`json:"plugins"`).
-- **Acceptance:**
-  - A bundle with `plugins/notify/plugin.yaml`, `package.json`, and
-    `tsconfig.json` loads without parsing the JSON files.
-  - `plugins/x/plugin.yaml` with `name: y` and duplicate names fail, naming
-    both paths.
-  - `notify.plugin.yaml` at the bundle root loads as plugin `notify`.
-  - `-check` for the competitor-watch fixture changes only by `plugins: 0`.
-  - Each rule 13 to 18 fails `session.Validate` with a specific message. An
-    inline plugin with secrets and `allowShell` fails; a sidecar plugin with
-    secrets and `allowShell` passes on kubernetes and fails on local.
-  - `GET /api/v1/config` lists each agent's plugins (its `agents` field comes from `Manager.Agents`).
-- **Tests:** unit: `TestLoadPluginManifests`, `TestLoadSkipsPluginSource`,
-  `TestFlatPluginManifest`, `TestDuplicatePlugin`, `TestPrivatePluginScope`,
-  `TestDescribePlugins`; session: `TestAgentUnknownPlugin`,
-  `TestAgentPluginScope`, `TestAgentPluginHarness`,
-  `TestAgentPluginSecretsWithShell` (placement × backend table),
-  `TestAgentPluginImageAllowlist`, `TestAgentPluginMCPServerRef`.
-
-### WP3: Ledger and gateway core
-
-- **Depends on:** WP1.
-- **Files:** create `internal/journal/ledger.go`,
-  `internal/journal/ledger_test.go`, `internal/gateway/gateway.go`,
-  `internal/gateway/api.go`, `internal/gateway/limits.go`,
-  `internal/gateway/audit.go`, `internal/gateway/token.go`,
-  `internal/gateway/gateway_test.go`; modify `internal/journal/memory.go`,
-  `internal/journal/bbolt.go`, `internal/config/config.go` and
-  `internal/config/config_test.go` (`plugins:` section only).
-- **Behavior:** [ledger](#internaljournal-ledger),
-  [gateway types](#internalgateway-new), `GrantFor`, and
-  [Gateway behavior](#gateway-behavior) for local dispatch. Remote dispatch
-  is an interface that returns an error until WP9, and `Discover` omits
-  remote tools until then. Token sign and verify use `hmac.Equal`.
-  `Delete` removes ledger records.
-- **Acceptance:**
-  - One test per resume-table row, including that an interrupted answer
-    marks the record done, so a second resume gets the same interrupted
-    result.
-  - Same key with other arguments → error; same arguments → the existing
-    record.
-  - A rate-limited begin records nothing and reports a positive
-    `RetryAfter`.
-  - Bolt records survive close and reopen; `Delete` removes them along with
-    the journal.
-  - Audit records never contain argument or result text (sentinel test).
-  - Tokens: tampered claims, wrong key, expired, wrong tool, wrong hash all
-    fail verification.
-- **Tests:** unit: `TestLedgerConformance` (memory and bbolt),
-  `TestLedgerDeleteWithJournal`, `TestGatewayResumeTable`,
-  `TestGatewayKeyReuse`, `TestGatewayRateLimit`, `TestGatewayInflightCap`,
-  `TestGatewayStepBounds`, `TestGrantFor`, `TestAuditOmitsPayloads`,
-  `TestCallToken`, `TestConfigPluginsDefaults`.
-
-### WP4: Gateway endpoints and platformclient
-
-- **Depends on:** WP3.
-- **Files:** modify `internal/httpapi/server.go`, `internal/httpapi/internal.go`,
-  `internal/httpapi/server_test.go`, `internal/platformclient/client.go`,
-  `internal/platformclient/client_test.go` (create if absent),
-  `cmd/mayflyd/main.go` (build the ledger from the journal store, construct
-  the gateway, pass it to the server and the session manager options).
-- **Behavior:** [API](#api). The server holds a `*gateway.Gateway`; grants
-  are registered by the session manager (WP7), so tests here register them
-  directly.
-- **Acceptance:**
-  - Wrong session token → 401; tool not in the grant → 403; alternate
-    harness session → 404.
-  - Begin and complete round-trip through `httptest` with the memory ledger;
-    429 carries `Retry-After`.
-  - `platformclient` decodes every response shape and maps 403, 409, 429,
-    and 503 to typed errors.
-- **Tests:** `TestInternalToolsAuth`, `TestInternalToolCallRoundTrip`,
-  `TestInternalToolCallRateLimited`, `TestPlatformClientToolCalls`.
-
-### WP5: Shim `install-self`/`copy` and inline pod packaging
-
-- **Depends on:** WP1.
-- **Files:** create `cmd/mayfly-plugin-shim/main.go`,
-  `cmd/mayfly-plugin-shim/main_test.go`; modify `internal/k8s/spec.go`,
-  `internal/k8s/spec_test.go`, `Dockerfile`, `Makefile`.
-- **Behavior:** `install-self` and `copy` per
-  [The shim](#the-shim-replaces-the-v1-copier); `serve` and `probe` exit 2
-  with "not implemented" until WP11. Inline pod additions per
-  [`internal/k8s`](#internalk8s); `SessionSpec.Validate` checks that
-  `PluginVolumeLimit` parses and `ToolsImage` is set when inline plugins are
-  present. No NetworkPolicy change. `Dockerfile`: build
-  `./cmd/mayfly-plugin-shim`, install it at `/usr/local/bin/mayfly-plugin-shim`
-  in the `mayfly-agent` stage, `RUN mkdir -p /opt/mayfly/plugins` before
-  `USER`. `Makefile`: add `mayfly-plugin-shim` to `CMDS`.
-- **Acceptance:**
-  - A spec without plugins renders exactly today's pod (golden), and so does
-    a spec with only service plugins.
-  - A spec with inline plugins renders the init containers in order with
-    the hardened security context, the volumes, the mounts, and projected
-    secrets with mode 0400.
-  - The copier copies a tree, keeps the executable bit, and rejects an
-    escaping symlink.
-  - `make image` builds and the agent image contains the shim.
-- **Tests:** `TestPodWithoutPluginsUnchanged`, `TestPodServiceOnlyUnchanged`,
-  `TestPodPluginInitContainers`, `TestPodPluginSecretsProjected`,
-  `TestShimCopyTree`, `TestShimCopyRejectsEscapingSymlink`,
-  `TestShimInstallSelf`.
-
-### WP6: MCP client changes and inline plugin host
-
-- **Depends on:** WP1.
-- **Files:** modify `internal/mcp/stdio.go`, `internal/mcp/mcp.go`,
-  `internal/mcp/http.go`, `internal/mcp/mcp_test.go`; create
-  `internal/pluginhost/host.go`, `internal/pluginhost/env.go`,
-  `internal/pluginhost/stderr.go`, `internal/pluginhost/host_test.go`,
-  `internal/pluginhost/testdata/fixture/main.go`.
-- **Behavior:** [MCP client changes](#mcp-client-changes-internalmcp)
-  (except the WP13 socket option) and the inline part of
-  [Runtime host](#runtime-host-internalpluginhost). The fixture is a small
-  stdio MCP server on the existing JSON-RPC shapes (no new module
-  dependency), configured by env: tools to report, sleep in a tool, exit
-  after N calls, stderr output, a file that records each call's arguments
-  and `_meta`, and a per-`mayfly.io/session` counter tool. WP11, WP12, and
-  WP14 reuse it.
-- **Acceptance:**
-  - The plugin environment has exactly the listed variables;
-    `MAYFLY_SESSION_TOKEN` set in the parent is absent.
-  - A missing declared tool fails start; an undeclared tool is hidden and
-    listed by `Hidden()`; a non-object schema fails start; `RequiredErr`
-    reports a required failure.
-  - A crash between calls restarts the plugin on the next call, bounded by
-    `MaxRestarts`; the error after that names the plugin and has stderr.
-  - A crash during a call returns an error result and does not retry.
-  - A timeout sends `notifications/cancelled` (recorded by the fixture) and
-    a late response does not corrupt the next call.
-  - `_meta` keys reach the server; stderr is capped with one marker;
-    `Close` stops a plugin that ignores stdin EOF in about 4s and kills one
-    that ignores SIGTERM.
-  - `TestStdioClient` and `TestManagerNamesTools` still pass;
-    `NewHTTPWithClient` uses the given client and per-request hook.
-- **Tests:** `TestHostEnvExact`, `TestHostVerifyTools`, `TestHostRestart`,
-  `TestHostCrashDuringCall`, `TestHostTimeoutCancels`, `TestHostMeta`,
-  `TestHostStderrCap`, `TestHostClose`, `TestHTTPWithClientHeaders`.
-
-### WP7: Session resolution, grants, local secrets
-
-- **Depends on:** WP2, WP3, WP5.
-- **Files:** modify `internal/session/manager.go` (`resolvePlugins`,
-  `copySession`, `prepare`, grant registration on create and adopt),
-  `internal/session/lifecycle.go` (finalize calls `gateway.Drop`),
-  `internal/session/restart.go`, `internal/session/manager_test.go`,
-  `internal/session/restart_test.go`, `internal/session/adopt_test.go`,
-  `internal/runner/runner.go`, `internal/runner/local.go`,
-  `internal/runner/local_test.go`, `internal/model/model.go`,
-  `internal/config/config.go` and `internal/config/config_test.go`
-  (`runtime.plugin_volume_limit`, default `512Mi`), and one line in
-  `cmd/mayflyd/main.go` (`mgr.SetGateway(gw)`). That line is the only overlap
-  with WP4 in wave 3: merge WP4 first, then WP7 rebases.
-- **Behavior:** `(*Manager).SetGateway(g GrantRegistry)` where
-  `GrantRegistry` is the `Register`/`Drop` subset of `*gateway.Gateway`
-  (nil means no plugins and no gateway routes in use, for existing tests).
-  [Session creation and adoption](#session-creation-and-adoption-internalsession)
-  for inline and service plugins; sidecar-as-inline on the local backend;
-  local secrets. `resolvePlugins` runs inside `resolveRequest`, so
-  `Manager.Validate` (used by webhooks before accept) catches a missing
-  local secret. `prepare` fills `Plugins`, `ToolsImage`
-  (`cfg.Runtime.Image`), and `PluginVolumeLimit`.
-- **Acceptance:**
-  - A Kubernetes session with two inline plugins and one service plugin
-    writes a `session.json` with Kubernetes paths, no secret values, and the
-    service entry with tools only; its pod has the inline init containers.
-  - The grant for that session lists exactly the declared tools.
-  - A replacement pod and an adopted session have identical plugin pod
-    sections and the same grant; a `pending` ledger record from before the
-    restart is answered per the resume table.
-  - Finalize drops the grant and the ledger records.
-  - Local backend: secret files 0600; a missing variable fails `Create` and
-    `Validate` with `plugin %q: environment variable %s is not set`.
-  - Requests that set `mcp_servers` do not change plugins.
-- **Tests:** `TestCreateResolvesPlugins`,
-  `TestCreatePluginSessionJSONHasNoSecrets`, `TestCreateRegistersGrant`,
-  `TestRestartKeepsPlugins`, `TestAdoptRebuildsGrant`,
-  `TestFinalizeDropsLedger`, `TestLocalWritesPluginSecrets`,
-  `TestLocalMissingPluginSecret`, `TestLocalSidecarRunsInline`,
-  `TestConfigPluginVolumeLimit`.
-
-### WP8: Runtime integration through the gateway
-
-- **Depends on:** WP4, WP6, WP7.
-- **Files:** modify `internal/agent/tools.go`, `internal/agent/runtime.go`,
-  `internal/agent/steps.go`, `internal/agent/finalize.go`, the matching
-  `internal/agent/*_test.go`, `internal/bundle/bundle.go`; create
-  `test/integration/plugin_test.go`; modify `cmd/llmstub/main.go` or
-  `internal/stub/llm.go` only if the stub cannot script `plugin_*` calls.
-- **Behavior:** [Runtime integration](#runtime-integration-internalagent)
-  for inline plugins, stdio `mcp.servers` (local dispatch), and any tool
-  `Tools()` reports with a remote placement (remote dispatch is just a
-  `result` answer). `mcp.Start` skips an HTTP server only when `Tools()`
-  lists its tools, so HTTP servers stay on the broker proxy until WP9
-  merges, with no change in this package.
-- **Acceptance:**
-  - A local-backend session calls an inline plugin tool; the audit has
-    begin and done; the transcript has the result.
-  - Integration: SIGKILL the agent while a non-idempotent plugin tool
-    sleeps; the replacement does not call it again (fixture call log) and
-    the transcript has the interrupted message and the `system` event.
-  - The same with an idempotent tool: called again with the same key.
-  - Kill after `CompleteCall` and before the journal append (test hook):
-    the replacement does not call the tool, and the step has
-    `replayed: true`.
-  - A stdio `mcp.servers` tool goes through begin and complete.
-  - The gateway down for less than the budget: the call proceeds after
-    recovery; longer: the runtime exits non-zero and the replacement
-    resumes.
-- **Tests:** unit: `TestExecuteToolDispatch`, `TestExecuteToolReplayed`,
-  `TestExecuteToolInterrupted`, `TestExecuteToolRateLimited`,
-  `TestGatewayRetryBudget`; integration: `TestPluginResumeDoesNotRepeatEffect`,
-  `TestPluginResumeRepeatsIdempotent`, `TestPluginReplaysCompletedCall`,
-  `TestStdioMCPThroughGateway`.
-
-### WP9: Gateway remote dispatch and the `mcp.servers` fold
-
-- **Depends on:** WP4, WP6, WP7.
-- **Files:** create `internal/gateway/remote.go`,
-  `internal/gateway/remote_test.go`; modify `internal/gateway/gateway.go`
-  (enable remote dispatch and remote discovery), `internal/broker/broker.go`
-  (`HTTPClient()`), `internal/broker/broker_test.go`,
-  `internal/config/config.go` and `internal/config/config_test.go`
-  (`mcp.servers[].tools`, `idempotent_tools`), `internal/mcp/manager.go`
-  (stdio allowlist), `internal/session/manager.go` (copy the two lists into
-  `sessioncfg.MCPServer` in `resolveRequest`).
-- **Behavior:** remote dispatch per [Gateway behavior](#gateway-behavior):
-  one upstream client per (session, server) built with
-  `mcp.NewHTTPWithClient`, the broker's client, and `ResolvedHeaders`;
-  per-session discovery; `ServeMCP` unchanged. Service plugins resolve
-  through an `Options.ServiceURL` that returns an error until WP12.
-- **Acceptance:**
-  - An HTTP `mcp.servers` call reaches an in-process streamable HTTP MCP
-    server with the configured headers and the `_meta` idempotency key; the
-    runtime never receives the headers.
-  - The `tools` allowlist hides other tools from discovery and returns 403.
-  - An in-flight call to a tool not in `idempotent_tools` is not repeated on
-    resume; a listed one is.
-  - Upstream clients close on finalize.
-  - Alternate harness sessions still use `/internal/v1/mcp/{server}`.
-  - After WP8 and WP9, the competitor-watch example works with no config
-    change and its Slack post is no longer repeated on resume.
-- **Tests:** `TestRemoteCallInjectsHeaders`, `TestRemoteAllowlist`,
-  `TestRemoteResumeNonIdempotent`, `TestRemoteClosesOnFinalize`,
-  `TestBrokerProxyUnchanged`, `TestConfigMCPToolLists`.
-
-### WP10: CLI and examples
-
-- **Depends on:** WP1, WP6.
-- **Files:** create `cmd/mayfly/plugin.go`, `cmd/mayfly/plugin_test.go`,
-  `cmd/mayfly/plugintemplates/go/{plugin.yaml,main.go,go.mod,Dockerfile,.dockerignore}.tmpl`,
-  `cmd/mayfly/plugintemplates/python/{plugin.yaml,server.py,requirements.txt,Dockerfile,.dockerignore}.tmpl`,
-  `cmd/mayfly/plugintemplates/ts/{plugin.yaml,src/index.ts,package.json,tsconfig.json,Dockerfile,.dockerignore}.tmpl`,
-  `examples/plugins/notify/`, `examples/plugins/tickets/`,
-  `examples/plugins/word-count/`; modify `cmd/mayfly/main.go` (dispatch and
-  `usage`).
-- **Behavior:** `init`, `check`, and `test` as in
-  [the user docs](../plugins.md#local-testing). They ignore placement and
-  run the stdio server locally through `pluginhost`. `init` writes
-  `placement: inline`. The examples start as `placement: inline`; WP12
-  switches `tickets` to `service` and WP13 switches `notify` to `sidecar`,
-  so the examples load at every step. Plugin commands need no `MAYFLY_URL`
-  or token.
-  Every scaffold's sample tool reads `_meta["mayfly.io/idempotency-key"]`
-  and shows forwarding it as an `Idempotency-Key` header, with a comment
-  explaining when to declare `idempotent: true`. The sample manifest leaves
-  the tool at `idempotent: false`.
-- **Acceptance:**
-  - `init` then `check` passes for each language where the toolchain exists
-    (Go always in CI; Python and Node tests skip without `python3` or
-    `node`).
-  - `test` against `examples/plugins/word-count` prints the expected count.
-  - `test` exits 1 for an unknown tool, invalid JSON, a missing secret, and
-    an error result.
-  - Each generated sample tool forwards the idempotency key from `_meta`.
-- **Tests:** `TestInitWritesValidManifest`, `TestInitRefusesNonEmptyDir`,
-  `TestCheckGoTemplate`, `TestPluginTestWordCount`, `TestPluginTestErrors`.
-
-### WP11: Shim `serve`, `probe`, call tokens
-
-- **Depends on:** WP3 (`internal/gateway/token.go`), WP5, WP6 (fixture).
-- **Files:** create `cmd/mayfly-plugin-shim/serve.go`,
-  `cmd/mayfly-plugin-shim/serve_test.go`; modify
-  `cmd/mayfly-plugin-shim/main.go` (dispatch).
-- **Behavior:** [Shim serve](#shim-serve-cmdmayfly-plugin-shim) and the
-  verify side of [Call tokens](#call-tokens), including replay dedupe.
-  Listens on `unix:` (removes a stale socket file, mode 0660) or `tcp:`.
-- **Acceptance:**
-  - With the fixture as the child, `tools/list` with a discovery token works
-    and without one gets 401.
-  - `tools/call` with a valid call token works; mismatched tool or argument
-    hash, expired, or wrong key → 401; the same key twice concurrently →
-    409; the same key after completion returns the cached result without
-    calling the child.
-  - 16 concurrent calls with distinct keys each get their own result.
-  - A child crash fails in-flight calls with the stderr tail and restarts
-    the child; `probe` fails while it is down and passes after.
-  - The child lacks `MAYFLY_SESSION_TOKEN` when it is set for the shim.
-- **Tests:** `TestServeDiscoveryToken`, `TestServeCallToken`,
-  `TestServeReplayDedupe`, `TestServeMultiplex`, `TestServeChildRestart`,
-  `TestServeEnv`, `TestProbe`.
-
-### WP12: Service reconciler, RBAC, endpoint mode, local children
-
-- **Depends on:** WP9, WP11.
-- **Files:** create `internal/pluginsvc/reconcile.go`,
-  `internal/pluginsvc/local.go`, `internal/pluginsvc/reconcile_test.go`;
-  modify `internal/k8s/client.go` and `internal/k8s/client_test.go` (plugin
-  object helpers in `plugins.namespace`), `cmd/mayflyd/main.go` (start the
-  reconciler or local children; pass `ServiceURL` to the gateway),
-  `deploy/k8s/base/rbac.yaml`, `deploy/helm/mayfly/templates/rbac.yaml`,
-  `examples/plugins/tickets/plugin.yaml` (switch to `placement: service`).
-- **Behavior:** [Service reconciler](#service-reconciler-internalpluginsvc)
-  and the service decision. `service.mcpServer` resolves to the
-  `mcp.servers` entry through the WP9 remote path under `plugin_` names.
-- **Acceptance:**
-  - Fake clientset: reconcile creates the four objects with labels, hash,
-    hardened pod, `secretKeyRef` env, resources, and replicas; an unchanged
-    manifest writes nothing; a changed one updates; a removed plugin is
-    pruned, and is kept with `prune: false`.
-  - `GarbageCollect` and `OrphanSessions` ignore plugin objects.
-  - The NetworkPolicy admits only `runtime.platform_labels` pods in
-    `runtime.platform_namespace` and allows egress only to DNS and the
-    manifest CIDRs.
-  - A gateway call to a service plugin (an `httptest` server running the
-    real shim handler in front of the fixture) carries a valid token and
-    `_meta` session and key.
-  - A `service.mcpServer` plugin calls the configured server with its
-    headers under `plugin_` names, and nothing is reconciled for it.
-  - Local backend: a service plugin runs as a shim child on a socket in the
-    state directory and stops on shutdown.
-  - The RBAC files grant the new verbs; `helm template` renders them, and
-    renders the Role in `plugins.namespace` when it is set.
-- **Tests:** `TestReconcileCreates`, `TestReconcileNoop`,
-  `TestReconcileUpdates`, `TestReconcilePrune`, `TestGCIgnoresPluginObjects`,
-  `TestServiceNetworkPolicy`, `TestGatewayServiceCall`,
-  `TestServiceMCPServerRef`, `TestLocalServiceChild`.
-
-### WP13: Sidecar pod spec and UDS dispatch
-
-- **Depends on:** WP8, WP11, WP12.
-- **Files:** modify `internal/k8s/spec.go`, `internal/k8s/spec_test.go`
-  (sidecar containers, per-plugin socket volumes, `gateway-key-<name>`),
-  `internal/k8s/client.go` (`SessionKeys`), `internal/session/manager.go`
-  (key generation; adoption reads it), `internal/session/adopt_test.go`,
-  `internal/gateway/gateway.go` (sidecar tokens in dispatch and discovery),
-  `internal/mcp/http.go` (socket dialer), `internal/agent/runtime.go`
-  (start sidecar members), `internal/sessioncfg/config.go` (only if WP1's
-  sidecar validation needs adjusting); create
-  `internal/pluginhost/sidecar.go` and `internal/pluginhost/sidecar_test.go`;
-  modify `examples/plugins/notify/plugin.yaml` (switch to
-  `placement: sidecar`).
-- **Behavior:** sidecar pod additions per [`internal/k8s`](#internalk8s);
-  the runtime connects to each socket with the discovery token, verifies
-  tools, and dispatches with call tokens.
-- **Acceptance:**
-  - Pod: one native sidecar per plugin after `mayfly-tools`, with
-    `restartPolicy: Always`, a startup probe, manifest resources and UID,
-    `secretKeyRef` env, its own socket volume, and only its own
-    `gateway-key-<name>` item mounted. The agent container has no env or
-    mount for sidecar secrets and no `gateway-key-*` item.
-  - No two sidecars share a key file or a socket volume, and a token signed
-    for one plugin fails the signature check at another.
-  - `session.json` for a sidecar plugin holds no secret values.
-  - A replacement pod and an adopted session use the same gateway key.
-  - The runtime calls the sidecar through the socket with a call token.
-- **Tests:** `TestPodSidecarContainers`, `TestPodGatewayKeyOnlyInSidecars`,
-  `TestAdoptKeepsGatewayKey`, `TestSidecarClientTokens`,
-  `TestExecuteToolSidecar`.
-
-### WP14: End-to-end tests on k3d
-
-- **Depends on:** WP8 and WP9 (phase A subtests), WP12 (phase B), WP13
-  (phase C).
-- **Files:** create `e2e/plugin_test.go`, `e2e/plugins/` (bundle files and
-  the fixture image source); modify `e2e/main_test.go` (build, import into
-  k3d, allowlist the image), `e2e/values.yaml`, `e2e/agents.yaml`,
-  `e2e/manifests/stubs.yaml` if a stub is needed, and the Make targets that
-  build e2e images.
-- **Behavior:** real pods and Deployments on k3d
-  (`rancher/k3s:v1.35.5-k3s1`).
-- **Acceptance:**
-  - A: an inline session completes; the pod has the init containers and a
-    read-only plugin mount; the plugin env has no `MAYFLY_SESSION_TOKEN`;
-    deleting the pod during a non-idempotent call does not repeat it; an
-    HTTP `mcp.servers` stub call carries an idempotency key; an image
-    without `/mayfly-plugin/` fails the session at start.
-  - B: the reconciler creates the service; two sessions call it and share
-    one replica's state (fixture counter keyed by `_meta` session); a
-    session pod cannot reach the service directly; the service reaches only
-    its egress CIDR.
-  - C: a sidecar session completes; the agent container has no sidecar
-    secret; an unauthenticated socket call from `run_command` gets 401.
-  - `TestNetworkIsolation` still passes.
-- **Tests:** `TestPluginInlineSession`, `TestPluginEnvIsolated`,
-  `TestPluginResumeAfterPodDelete`, `TestPluginMissingDirFailsSession`,
-  `TestMCPServerIdempotencyKey`, `TestPluginServiceShared`,
-  `TestPluginServiceNetworkPolicy`, `TestPluginSidecarSession`,
-  `TestPluginSidecarSocketRequiresToken`. Run with `make e2e` and
-  `E2E_QUEUE=redis make e2e`.
-
-### WP15: Documentation
-
-- **Depends on:** all others merged.
-- **Files:** modify `docs/plugins.md` (remove the status line; correct
-  drift), `docs/agents.md` (`plugins` field; "agent manifest" wording;
-  remove "This is the only plugin surface" and the Limits lines about custom
-  tools), `docs/mcp-and-skills.md` (gateway, `tools`, `idempotent_tools`,
-  the resume change, the `plugin_` prefix), `docs/security.md` (plugin
-  trust, where secrets live per placement, call tokens, the `allowShell`
-  rule, service NetworkPolicy, what is not solved),
-  `docs/configuration.md` (`plugins:`, `runtime.plugin_volume_limit`,
-  `mcp.servers` keys), `docs/deployment.md` (RBAC additions,
-  `plugins.namespace`), `docs/architecture-gaps.md` (8.2 closed for plugins
-  and `mcp.servers` under the built-in harness, open for alternate
-  harnesses), `docs/architecture.md` (gateway and session start),
-  `docs/api.md` (internal tool routes), `docs/testing.md`,
-  `ARCHITECTURE.md` (code map entries for `internal/plugin`,
-  `internal/gateway`, `internal/pluginhost`, `internal/pluginsvc`,
-  `cmd/mayfly-plugin-shim`; the invariant on tool calls and the ledger),
-  `README.md` (drop "planned"), `deploy/helm/mayfly/values.yaml`
-  (`plugins:`, `plugin_volume_limit`), `CHANGELOG.md` (the feature and the
-  `mcp.servers` resume change).
-- **Behavior:** docs describe what shipped, in the existing tone.
-- **Acceptance:** every path, key, flag, route, and tool name in the docs
-  exists in the code; `-check` output in `docs/sources.md` matches.
-- **Tests:** a path and key check (`rg` for every `internal/...`,
-  `docs/...`, and config key the docs mention).
-
 ## Open questions
 
-Changed from v1: 1, 4, 6, 7, 8, 9, 11, 12, 13, 14, 15 are new or rewritten.
-v1's questions on sidecars and per-plugin resource limits are settled by the
-placements.
-
-1. **Sidecar over localhost TCP as an option.** Recommendation: not in v2.
-   Call tokens would make TCP acceptable, but the socket limits reach to
-   containers that mount the volume and costs nothing. Add
-   `sidecar.listen: tcp` only if an image cannot use Unix sockets.
-2. **Can API requests or triggers select plugins?** Recommendation: no. The
-   agent manifest is the reviewed place to grant tools with effects.
-3. **Per-agent tool subsets (gap 8.3).** Recommendation: later, as
+1. **Sidecar over localhost TCP.** Call tokens would make TCP acceptable, but
+   the Unix socket limits reach to containers that mount the volume and costs
+   nothing. Add `sidecar.listen: tcp` only if an image cannot use Unix
+   sockets.
+2. **Plugin selection from API requests or triggers.** No. The agent manifest
+   is the reviewed place to grant tools with effects.
+3. **Per-agent tool subsets.** Later, as
    `plugins: [{name: notify, tools: [post]}]`. The grant already holds a
    per-session tool set, so this is a loader and `GrantFor` change only.
-4. **Default idempotency for `mcp.servers` tools.** v2 treats them as
-   non-idempotent, so an in-flight call is no longer repeated on resume.
-   Recommendation: ship it as the default with a CHANGELOG note. Repeating
-   an unknown effect is the worse failure; operators list safe tools in
-   `idempotent_tools`.
-5. **Separate image allowlist for plugins.** Recommendation: reuse
-   `agents.allowed_images`, including for service Deployments.
-6. **Hostname egress for plugins.** NetworkPolicy matches CIDRs, and SaaS
-   APIs have no stable ones. Services already isolate egress by CIDR, which
-   covers internal APIs. Recommendation: later, an egress proxy in
-   `mayflyd` with a per-plugin hostname allowlist, used by sidecar and
-   service plugins through `HTTPS_PROXY`.
-7. **Reject or warn on `allowShell` with inline secrets.** Recommendation:
-   reject, as in v1, now with an error that suggests `placement: sidecar`.
-8. **Gateway key rotation for services.** Reconcile creates the key once.
-   Recommendation: later, `mayflyd plugin rotate-key <name>`, with the shim
-   accepting two `--key-file` values during the switch.
-9. **Cross-session discovery cache for remote servers.** Recommendation:
-   per-session in v2, which stays correct when a server's tools depend on
+4. **Separate image allowlist for plugins.** Reuse `agents.allowed_images`,
+   including for service Deployments.
+5. **Hostname egress for plugins.** NetworkPolicy matches CIDRs, and SaaS APIs
+   have no stable ones. Services isolate egress by CIDR, which covers internal
+   APIs. Later, an egress proxy in `mayflyd` with a per-plugin hostname
+   allowlist, used by sidecar and service plugins through `HTTPS_PROXY`.
+6. **Gateway key rotation for services.** Reconcile creates the key once.
+   Later, `mayflyd plugin rotate-key <name>`, with the shim accepting two
+   `--key-file` values during the switch.
+7. **Cross-session discovery cache for remote servers.** Discovery is
+   per-session, which stays correct when a server's tools depend on
    credentials or change. Add a TTL cache keyed by server only if
    `tools/list` latency shows up in session start times.
-10. **Image volumes instead of copying (inline).** Recommendation: add
-    `runtime.plugin_packaging: copy|image-volume` once the minimum supported
-    Kubernetes is 1.36; keep `copy` the default.
-11. **Service autoscaling.** Recommendation: v2 owns `replicas`. Later,
-    `service.autoscale: {min, max, cpu}` renders an HPA and reconcile stops
-    writing `replicas`.
-12. **The `mergeEnv` leak.** Resolved. Stdio `mcp.servers` used to inherit
-    `os.Environ()`, including `MAYFLY_SESSION_TOKEN`, which with the gateway
-    also authorizes tool calls. They now use `sessioncfg.StdioEnv`, the same
-    allowlist as an inline plugin, and `NewStdioExact` with that environment.
-    This is a behavior change for a server that depended on inheriting an
-    unrelated variable; set it in the entry's `env` instead.
-13. **Arguments in the ledger.** v2 stores only their hash. Recommendation:
-    keep it that way. The journal already holds arguments for replay; the
-    ledger should not become a second copy of sensitive inputs.
-14. **Plugins for alternate harnesses.** They bypass the gateway through the
-    byte proxy. Recommendation: later, expose the gateway as a per-session
-    streamable HTTP MCP endpoint (`/internal/v1/sessions/{id}/mcp`) that any
-    harness can use, with idempotency keys from a gateway call counter
-    instead of journal steps.
-15. **`mayfly plugin test --shim`.** Running the plugin behind the shim
+8. **Image volumes instead of copying (inline).** Add
+   `runtime.plugin_packaging: copy|image-volume` once the minimum supported
+   Kubernetes is 1.36; keep `copy` the default.
+9. **Service autoscaling.** `replicas` is a manifest field. Later,
+   `service.autoscale: {min, max, cpu}` renders an HPA and reconcile stops
+   writing `replicas`.
+10. **Plugins for alternate harnesses.** They bypass the gateway through the
+    byte proxy. Later, expose the gateway as a per-session streamable HTTP MCP
+    endpoint (`/internal/v1/sessions/{id}/mcp`) that any harness can use, with
+    idempotency keys from a gateway call counter instead of journal steps.
+11. **`mayfly plugin test --shim`.** Running the plugin behind the shim
     locally would exercise tokens and multiplexing and catch stdout logging
-    bugs. Recommendation: add it after WP11; it is small.
-16. **Name of the feature in docs.** Recommendation: "plugin" means this
-    feature; agent manifests are "agent manifests" (WP15).
+    bugs. Small, not implemented.
