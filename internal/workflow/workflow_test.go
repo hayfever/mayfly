@@ -183,7 +183,7 @@ connections:
     allowPrivate: true
     requiredEnv: [FIRECRAWL_API_KEY]
 sources:
-  - name: competitors
+  - name: watch-list
     type: http.json
     connection: notion
     requiredEnv: [NOTION_DATABASE_ID]
@@ -224,10 +224,10 @@ sources:
       presentAny: [pricing, changelog]
   - name: pages
     type: http.json
-    needs: [competitors]
+    needs: [watch-list]
     connection: firecrawl
     fanout:
-      from: competitors
+      from: watch-list
       urls: [pricing, changelog]
     request:
       method: POST
@@ -241,7 +241,7 @@ sources:
           - markdown
           - type: changeTracking
             modes: [git-diff]
-            tag: competitor-watch
+            tag: page-watch
     retry:
       attempts: 3
       delay: 1ms

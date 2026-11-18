@@ -17,7 +17,7 @@ const testDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab
 func TestResolveArtifactsAcceptsGrants(t *testing.T) {
 	m := testManager(t)
 	got, err := m.resolveArtifacts([]ArtifactRef{{
-		Key:         "runs/competitor-watch/run.json",
+		Key:         "runs/page-watch/run.json",
 		SHA256:      testDigest,
 		Bytes:       1024,
 		ContentType: " application/json ",

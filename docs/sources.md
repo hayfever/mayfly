@@ -14,16 +14,16 @@ directories are skipped. Every file is one bundle:
 
 ```yaml
 schemaVersion: 1
-name: competitor-watch
+name: page-watch
 version: 1.0.0
 
 agents:
-  - name: competitor-watch
+  - name: page-watch
     systemPrompt: ...
     schedules:
-      - name: competitor-watch
+      - name: page-watch
         cron: "0 7 * * *"
-        source: competitor-pages
+        source: watch-pages
         prompt: ...
 
 connections:
@@ -31,7 +31,7 @@ connections:
     baseURL: https://api.firecrawl.dev/v2
 
 sources:
-  - name: competitor-pages
+  - name: watch-pages
     type: http.json
     connection: firecrawl
     request:
@@ -52,9 +52,9 @@ mayflyd -check -config /etc/mayfly-config/config.yaml
 
 ```
 agents: 1 schedules: 1 sources: 2 connections: 2 plugins: 0
-agent competitor-watch
-schedule competitor-watch agent=competitor-watch cron="0 7 * * *" source=competitor-pages ttl=30m0s trigger=changed
-plan competitor-watch steps 2 terminal competitor-pages: competitors -> competitor-pages
+agent page-watch
+schedule page-watch agent=page-watch cron="0 7 * * *" source=watch-pages ttl=30m0s trigger=changed
+plan page-watch steps 2 terminal watch-pages: watch-list -> watch-pages
 ```
 
 ## Scopes
@@ -87,7 +87,7 @@ merge. There is no separate `overrides` key.
 
 ```yaml
 sources:
-  - name: competitors
+  - name: watch-list
     type: http.json
     connection: notion
     request:
@@ -95,8 +95,8 @@ sources:
     extract:
       list: results
 
-  - name: competitor-pages
-    extends: competitors
+  - name: watch-pages
+    extends: watch-list
     request:
       path: /scrape
 ```
@@ -201,7 +201,7 @@ request:
       - markdown
       - type: changeTracking
         modes: [git-diff]
-        tag: competitor-watch
+        tag: page-watch
 ```
 
 Template data: `.runID`, `.schedule`, `.source`, `.slot`, `.now`, `.cursor`,
@@ -230,7 +230,7 @@ silently truncated list. Raise `maxPages` or narrow the query.
 
 ```yaml
 fanout:
-  from: competitors
+  from: watch-list
   urls: [pricing, changelog]
 ```
 
@@ -341,17 +341,17 @@ A schedule is a key of an agent manifest.
 
 ```yaml
 agents:
-  - name: competitor-watch
+  - name: page-watch
     systemPrompt: ...
     schedules:
-      - name: competitor-watch
+      - name: page-watch
         cron: "0 7 * * *"
-        source: competitor-pages
+        source: watch-pages
         ttl: 30m
         triggerOn: [changed]
         optionalEnv: [WATCH_CONTEXT]
         context: '{{ env "WATCH_CONTEXT" }}'
-        title: "Competitor watch {{ .Date }}"
+        title: "Page watch {{ .Date }}"
         prompt: |
           {{ range .Changes }}...
 ```
@@ -409,8 +409,8 @@ whether or not it starts a session:
 ```json
 {
   "run_id": "s-...",
-  "schedule": "competitor-watch",
-  "source": "competitor-pages",
+  "schedule": "page-watch",
+  "source": "watch-pages",
   "slot": "2026-11-13T07:00:00Z",
   "generated_at": "2026-11-13T07:00:03Z",
   "totals": {"pages": 4, "changed": 1, "new": 0, "same": 3, "failed": 0},

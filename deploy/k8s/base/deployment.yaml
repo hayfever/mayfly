@@ -84,7 +84,7 @@ spec:
             - name: agents
               mountPath: /etc/mayfly-agents
               readOnly: true
-            # Operator-owned bundles (for example competitor-watch). No
+            # Operator-owned bundles (for example page-watch). No
             # overlay generates mayfly-bundles, so redeploying never removes it.
             - name: bundles
               mountPath: /etc/mayfly-bundles

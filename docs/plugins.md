@@ -485,7 +485,7 @@ by Mayfly and cannot be declared. Unknown fields are rejected.
 
 ```yaml
 agents:
-  - name: competitor-watch
+  - name: page-watch
     systemPrompt: ...
     mcpServers: [firecrawl]
     plugins: [notify, tickets]

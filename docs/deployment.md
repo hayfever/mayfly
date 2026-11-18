@@ -20,11 +20,11 @@ The overlay includes deterministic LLM and MCP stubs and an example agent manife
 
 Agent manifests are mounted from the `mayfly-agents` ConfigMap at `/etc/mayfly-agents`. The local overlay generates that ConfigMap from `examples/agents/triage.yaml`, so `make cluster-up` and `make deploy` replace it every time.
 
-Put your own bundles, such as competitor-watch, in the `mayfly-bundles` ConfigMap instead. It is mounted at `/etc/mayfly-bundles`, the second `agents.dirs` entry. No overlay or chart creates it, and the volume is optional, so a redeploy leaves it alone and a cluster without it still starts:
+Put your own bundles, such as page-watch, in the `mayfly-bundles` ConfigMap instead. It is mounted at `/etc/mayfly-bundles`, the second `agents.dirs` entry. No overlay or chart creates it, and the volume is optional, so a redeploy leaves it alone and a cluster without it still starts:
 
 ```bash
 kubectl -n mayfly create configmap mayfly-bundles \
-  --from-file=competitor-watch.yaml --from-file=competitor-watch-sources.yaml \
+  --from-file=page-watch.yaml --from-file=page-watch-sources.yaml \
   --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n mayfly rollout restart deployment/mayflyd
 ```

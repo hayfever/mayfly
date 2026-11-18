@@ -189,7 +189,7 @@ Drops a buried job without running it. `204`. Unknown job: `404`.
 The schedules compiled from agent files at startup.
 
 ```json
-{"schedules":[{"name":"competitor-watch","agent":"competitor-watch","cron":"0 7 * * *","source":"competitor-pages"}]}
+{"schedules":[{"name":"page-watch","agent":"page-watch","cron":"0 7 * * *","source":"watch-pages"}]}
 ```
 
 ### `POST /api/v1/schedules/{name}/run`

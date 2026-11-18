@@ -80,17 +80,17 @@ A schedule runs a source chain on a cron expression and starts one session when 
 
 ```yaml
 agents:
-  - name: competitor-watch
+  - name: page-watch
     systemPrompt: ...
     schedules:
-      - name: competitor-watch
+      - name: page-watch
         cron: "0 7 * * *"
-        source: competitor-pages
+        source: watch-pages
         ttl: 30m
         triggerOn: [changed]
         optionalEnv: [WATCH_CONTEXT]
         context: '{{ env "WATCH_CONTEXT" }}'
-        title: "Competitor watch {{ .Date }}"
+        title: "Page watch {{ .Date }}"
         prompt: |
           {{ range .Changes }}{{ .Name }} {{ .Label }}
           {{ .Diff }}{{ end }}
