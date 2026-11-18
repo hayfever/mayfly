@@ -93,7 +93,7 @@ A turn is executed as ordered journaled steps. The journal lives in the control 
 ### Everything else
 
 - `deploy/helm/mayfly`, `deploy/k8s`: Helm chart (optional LiteLLM) and kustomize base with a local overlay.
-- `deploy/terraform/civo`: Terraform for a one-node Civo cluster with Cilium, sized for Mayfly and the e2e suite.
+- `deploy/terraform/civo`: example Terraform for a one-node Civo cluster with Cilium, sized for Mayfly and the e2e suite. It is an example, not a supported deployment target.
 - `hack/`: `run-local.sh`, `k3d-up.sh`, `e2e.sh`.
 - `e2e/`: the end-to-end suite (build tag `e2e`), its Helm values, and fixtures. See `docs/testing.md`.
 - `test/integration`: an in-process end-to-end test, `TestWebhookToArtifact`.
