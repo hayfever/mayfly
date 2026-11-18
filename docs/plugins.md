@@ -366,6 +366,10 @@ The plugin's code is not read from the bundle. It comes from `image`.
 
 ## Manifest reference
 
+The manifest format is not frozen. `schemaVersion: 1` may change during 0.x
+until outside users show it is stable. Report a compatibility problem or a
+missing field in a [GitHub issue](https://github.com/hayfever/mayfly/issues).
+
 ```yaml
 schemaVersion: 1
 name: notify
