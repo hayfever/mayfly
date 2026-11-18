@@ -2,9 +2,7 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
-## v0.1.0 - Unreleased (release candidate v0.1.0-rc.1)
-
-First public release.
+## [0.1.0] - Unreleased
 
 ### Added
 
@@ -74,59 +72,10 @@ First public release.
 - `mayflyd -check` loads the config and project bundle, prints the resolved agents, schedules, and source plans, and exits without starting servers.
 - Kubernetes and Helm options for the project bundle and the `mayfly-sources` provider secret.
 
-### Changed
-
-- `sessions.allow_shell` defaults to `false`. Enable the shell tool per deployment or per agent manifest.
-- A session becomes `running` when its runtime connects, not when the container starts.
-- The LLM broker accepts only the model assigned to the session and fills an empty model field with it.
-- The LLM and MCP proxy clients bound connection setup and response-header wait with `llm.timeout`.
-- Webhook rate limits count only verified requests.
-- Webhooks now accept and return before any pod exists; a queue worker creates the session. Responses carry `job_id`, `delivery`, and `duplicate` instead of a session id.
-- Slack slash commands answer `Mayfly session queued.` because the session link does not exist yet.
-- `/readyz` no longer calls the artifact store, and the probes set `timeoutSeconds: 3`.
-- The module path and published images use `github.com/hayfever/mayfly` and `ghcr.io/hayfever`.
-- The S3 store sends checksums only when required, for compatibility with R2, B2, and older MinIO.
-- `mayflyd` rejects unknown configuration fields.
-- `conversation.jsonl` is loaded on runtime start instead of being truncated by a fresh process.
-- The Kubernetes agent writes artifacts under `/artifacts` on the session workspace claim; the old `/var/lib/mayfly` EmptyDir mount is gone.
-- The stub MCP server counts `tools/call` executions and exposes `GET /counts`; the stub LLM calls the MCP tool before writing its report.
-- An assistant message and a tool result are published only when their step is journaled. The live tool call is still emitted, because it is deterministic once the model step is journaled, and the journal publication's copy is deduplicated by its step key.
-- On SIGTERM the runtime stops the turn, closes its logs, and exits non-zero without finalizing unless a close control event was received. Drains, evictions, preemptions, and `kubectl delete` now start a replacement instead of finalizing the session as completed. A session that cannot resume (`sessions.max_restarts: 0`, or a Kubernetes session without a persistent workspace) still finalizes on SIGTERM so its full bundle is exported.
-- A journal apply failure or a `conversation.jsonl` length that does not match its journaled `ConvLen` ends the process so the replacement repairs the conversation from the journal.
-- The journal is deleted when its session finalizes; the artifact bundle is the durable history.
-- Control-plane persistence is on by default in the Helm chart, and the kustomize base mounts `/var/lib/mayfly` from the `mayfly-state` claim, so a restarted control plane keeps its queue, journal, and local artifacts.
-- If the control-plane journal is lost anyway (persistence disabled), adoption of a running session seeds its event sequence at the current time in microseconds, above every key the lost journal could have handed out, and logs a warning. The in-flight turn finishes, and a message posted before its next step can no longer get the same turn key.
-- The journal rejects a step for a turn older than the session's last journaled turn, so a stale container cannot move the resume point back.
-- A replacement retries deleting the pod it replaces (four attempts over about three seconds) before it starts, instead of leaving a live old pod on the workspace claim until cleanup.
-- Session cleanup deletes the ConfigMap before the pod, and `mayflyd` shutdown waits for cleanups in progress. Adoption deletes a session pod whose ConfigMap is gone instead of keeping it, so a control plane that stops mid-cleanup cannot bring a finalized session back as a pod-less replacement.
-- A replayed step records its reply or tool result in `events.jsonl` when the crashed process applied it without logging it. Events already in the log for that step are not written again.
-- The internal events endpoint no longer accepts a batch-level `step_key`. Only the per-event key is used.
-- `sessions.persistent_workspace: false` now disables replacement containers instead of resuming onto an empty workspace.
-- The idle timer no longer finalizes a session while a turn is running, and only resets between turns.
-- Pod failure detection treats a pod that is terminating or Running but not ready as missing, and stops waiting on container configuration errors that cannot recover.
-- Every plugin call and every `mcp.servers` tool call now goes through the tool gateway under the built-in harness. Tool names do not change. `* /internal/v1/mcp/{server}` remains for alternate harnesses.
-- Resume no longer repeats a tool call that was in flight when the container died, unless the tool is marked idempotent. A completed call whose journal step did not land replays its recorded result instead of running again. Before this change an in-flight `mcp_*` call ran again after resume; now it returns an error result that says the effect may already have happened.
-- `mayflyd -check` prints the resolved plugins. It fails on an unknown or invisible plugin, an alternate harness that selects plugins, an inline plugin with secrets under `allowShell`, an image outside `agents.allowed_images`, and a `service.mcpServer` that is missing, not HTTP, or not visible to the agent.
-- The Helm chart renders a second Role and RoleBinding in `config.plugins.namespace` when that namespace differs from the release namespace, and `config.plugins` and `config.runtime.plugin_volume_limit` are chart values.
-
-### Fixed
-
-- `runtime.image_pull_secrets` now reaches session pods, so private agent images pull correctly.
-- `runtime.env` and agent `runtime.env` cannot set `MAYFLY_CONFIG` or `MAYFLY_SESSION_TOKEN`; startup fails and the pod builder drops them.
-- GitHub triggers no longer accept the static `X-Mayfly-Token` header, which could be replayed.
-- `mayflyd -check` now builds the session manager as startup does, so a missing model, a model outside `llm.allow_models`, or an unknown MCP server fails the check instead of the first run.
-- Adopted sessions keep their agent, artifacts, and idempotency key after a control-plane restart.
-- `read_artifact` checks the declared SHA-256 and never splits a UTF-8 character at a window edge.
-- `mayfly transcript` reads only the top-level `conversation.jsonl` and strips terminal control sequences from untrusted text.
-- The `local` runtime starts the agent with a minimal environment instead of mayflyd's.
-- Fanout dedupes identical requests, fails fast on `401` and `403`, and drops filtered-out responses. `maxItems` counts items after `filter`. A `removed` page without a diff counts as changed. `sources.timeout` is enforced.
-- A scheduled slot comes from the cron time, not the wake time, so a late tick keeps the same delivery key.
-- A private definition can no longer extend another agent's private definition.
-
 ### Known limitations
 
 - The control plane runs one replica. Session records and thread history are in memory; artifacts are durable. Finished sessions are dropped after `sessions.retention`.
-- Single tenant. No SSO, per-user authorization, or audit log.
+- Single tenant. There is no SSO or per-user authorization, and no general audit log. The tool gateway logs one record per non-built-in tool call (session, agent, tool, placement, idempotency key, argument hash, outcome), without arguments or results. Built-in tools, API requests, and operator actions are not audited.
 - The admin token is a shared bearer token. The web UI stores it in browser localStorage.
 - No TLS or ingress authentication is provided; put Mayfly behind an authenticated ingress.
 - Native Anthropic and Bedrock APIs are not implemented. Use LiteLLM.

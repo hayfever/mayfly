@@ -112,7 +112,7 @@ A verified webhook becomes one queued job and is answered immediately. Replay pr
 
 ## Known gaps before production
 
-- Single tenant. There is no user identity, per-user authorization, or audit log beyond events.
+- Single tenant. There is no user identity or per-user authorization. The tool gateway logs one record per non-built-in tool call, without arguments or results. Built-in tools, API requests, and operator actions are not audited.
 - No TLS termination or authentication proxy. Put Mayfly behind an ingress with OIDC/SSO and TLS.
 - Admin token is a shared bearer token. Rotate it and mount it from a Secret.
 - Session history is in memory and is dropped after `sessions.retention` (`30m` by default). The journal keeps the completed steps of every turn of an active session in the control-plane database for resume, and is deleted when the session finalizes; the artifact bundle is the durable history. Artifact metadata stays available until the control plane restarts; the live thread does not.
