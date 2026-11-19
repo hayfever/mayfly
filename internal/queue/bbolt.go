@@ -110,13 +110,14 @@ func (s *boltStore) Accept(_ context.Context, job Job) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		seen := tx.Bucket(bucketSeen)
 		ready := tx.Bucket(bucketReady)
-		if job.IdempotencyKey != "" {
-			if raw := seen.Get([]byte(job.ID)); raw != nil {
+		key := dedupeKey(job)
+		if key != "" {
+			if raw := seen.Get([]byte(key)); raw != nil {
 				expiry := time.Unix(0, int64(binary.BigEndian.Uint64(raw)))
 				if now.Before(expiry) {
 					return ErrDuplicate
 				}
-				if err := seen.Delete([]byte(job.ID)); err != nil {
+				if err := seen.Delete([]byte(key)); err != nil {
 					return err
 				}
 			}
@@ -133,14 +134,13 @@ func (s *boltStore) Accept(_ context.Context, job Job) error {
 		if err := ready.Put(readyKey(now, job.ID), nil); err != nil {
 			return err
 		}
-		if job.IdempotencyKey != "" {
+		if key != "" {
 			expiry := make([]byte, 8)
 			binary.BigEndian.PutUint64(expiry, uint64(now.Add(s.cfg.DedupeTTL.Std()).UnixNano()))
-			dedupeKey := []byte(job.ID)
-			if err := seen.Put(dedupeKey, expiry); err != nil {
+			if err := seen.Put([]byte(key), expiry); err != nil {
 				return err
 			}
-			if err := tx.Bucket(bucketSeenExpiry).Put(expiryKey(expiry, dedupeKey), nil); err != nil {
+			if err := tx.Bucket(bucketSeenExpiry).Put(expiryKey(expiry, []byte(key)), nil); err != nil {
 				return err
 			}
 		}

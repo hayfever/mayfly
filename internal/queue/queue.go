@@ -231,6 +231,25 @@ func NewSourceJob(delivery string, src SourceJob, now time.Time) Job {
 	}
 }
 
+// dedupeKey returns the key a store records and compares for a job, or "" when
+// the job has no idempotency key. It is the producer's raw key, scoped by the
+// trigger name the way deriveJobID scopes a derived id, so the same key on
+// another trigger is separate work. A producer that supplies its own job id
+// still dedupes on this key.
+func dedupeKey(job Job) string {
+	if job.IdempotencyKey == "" {
+		return ""
+	}
+	scope := job.Trigger
+	if name := job.Options.Trigger.Name; name != "" {
+		scope = name
+	}
+	if job.JobKind() == KindSource {
+		scope = "schedule"
+	}
+	return scope + "\x00" + job.IdempotencyKey
+}
+
 // Backoff returns the delay before the next attempt: base doubling per attempt,
 // capped at ten minutes.
 func Backoff(attempts int, base time.Duration) time.Duration {

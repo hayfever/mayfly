@@ -164,9 +164,9 @@ func (s *redisStore) checkFormat(ctx context.Context) error {
 	return nil
 }
 
-// dedupeFlag tells the accept script whether this job has a delivery key.
-func dedupeFlag(delivery string) string {
-	if delivery == "" {
+// dedupeFlag tells the accept script whether this job has a dedupe key.
+func dedupeFlag(key string) string {
+	if key == "" {
 		return "0"
 	}
 	return "1"
@@ -177,14 +177,15 @@ func (s *redisStore) Accept(ctx context.Context, job Job) error {
 	if err != nil {
 		return err
 	}
+	key := dedupeKey(job)
 	res, err := s.accept.Run(ctx, s.client,
-		[]string{s.queue, s.jobs, s.seen + job.ID, s.dead},
+		[]string{s.queue, s.jobs, s.seen + key, s.dead},
 		job.ID,
 		payload,
 		s.now().UnixMilli(),
 		s.cfg.MaxJobs,
 		int64(s.cfg.DedupeTTL.Std().Seconds()),
-		dedupeFlag(job.IdempotencyKey),
+		dedupeFlag(key),
 	).Int()
 	if err != nil {
 		return fmt.Errorf("queue accept: %w", err)

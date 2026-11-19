@@ -109,7 +109,9 @@ with later producers:
 `idempotency_key` is the deduplication key. The key is scoped by the job kind
 and the trigger. A repeated message with the same key is accepted once. Later
 copies receive a duplicate answer while `queue.dedupe_ttl` holds the key.
-Without a key every message is a new job.
+Without a key every message is a new job. A producer that supplies its own `id`
+still dedupes on `idempotency_key`: the same key with a different `id` is a
+duplicate.
 
 The job id is deterministic for a key. Mayfly also uses the job id as the
 session idempotency key, so a worker that stops between Create and Ack does not

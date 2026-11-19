@@ -348,6 +348,43 @@ func TestStoreDedupesByIdempotencyKey(t *testing.T) {
 	}
 }
 
+// TestStoreDedupesProducerKeyWithItsOwnID covers a producer that writes the
+// envelope itself: the raw idempotency key dedupes the job even when the
+// producer chose a different job id each time.
+func TestStoreDedupesProducerKeyWithItsOwnID(t *testing.T) {
+	const (
+		first  = `{"version":1,"kind":"session.create","id":"external-1","idempotency_key":"delivery-9","created_at":"2026-11-18T09:00:00Z","prompt":"one","trigger":{"kind":"generic","name":"hooks"}}`
+		second = `{"version":1,"kind":"session.create","id":"external-2","idempotency_key":"delivery-9","created_at":"2026-11-18T09:01:00Z","prompt":"two","trigger":{"kind":"generic","name":"hooks"}}`
+	)
+	var a, b Job
+	if err := json.Unmarshal([]byte(first), &a); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(second), &b); err != nil {
+		t.Fatal(err)
+	}
+	if a.ID == b.ID {
+		t.Fatalf("test jobs share the id %q", a.ID)
+	}
+	for name, store := range backends(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			if err := store.Accept(ctx, a); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Accept(ctx, b); !errors.Is(err, ErrDuplicate) {
+				t.Fatalf("same key under a different id = %v, want ErrDuplicate", err)
+			}
+			if record, ok, err := store.Get(ctx, a.ID); err != nil || !ok || record.Job.ID != a.ID {
+				t.Fatalf("stored job = %+v, %v, %v; want %s", record, ok, err, a.ID)
+			}
+			if _, ok, _ := store.Get(ctx, b.ID); ok {
+				t.Fatalf("duplicate with id %s was stored", b.ID)
+			}
+		})
+	}
+}
+
 func compileJobSchema(t *testing.T) *jsonschema.Schema {
 	t.Helper()
 	path := filepath.Join("..", "..", "api", "job.v1.schema.json")
