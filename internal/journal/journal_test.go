@@ -289,6 +289,15 @@ func TestBoltFormatReadsLegacyJournal(t *testing.T) {
 	if got := journalStoredFormat(t, path); got != "1" {
 		t.Fatalf("stamp after opening a legacy journal = %q, want 1", got)
 	}
+	// A journal that carries the stamp opens like any other.
+	third, err := OpenBolt(path)
+	if err != nil {
+		t.Fatalf("reopen a stamped journal: %v", err)
+	}
+	defer third.Close()
+	if entries, err := third.Turn(ctx, "s1", 3); err != nil || len(entries) != 1 {
+		t.Fatalf("Turn after reopen = %+v, %v", entries, err)
+	}
 }
 
 func TestBoltFormatRejectsNewerJournal(t *testing.T) {

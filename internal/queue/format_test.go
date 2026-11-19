@@ -59,6 +59,14 @@ func TestBoltFormatReadsLegacyDatabase(t *testing.T) {
 	if got := boltStoredFormat(t, cfg.Bolt.Path); got != fmt.Sprint(formatVersion) {
 		t.Fatalf("stamp after opening a legacy database = %q, want %d", got, formatVersion)
 	}
+	// A queue that carries the stamp opens like any other.
+	third, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reopen a stamped queue: %v", err)
+	}
+	if err := third.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestBoltFormatRejectsNewerDatabase(t *testing.T) {
@@ -125,6 +133,14 @@ func TestRedisFormatStampsLegacyQueue(t *testing.T) {
 	defer store.Close()
 	if got := client.Get(ctx, redisStore.format).Val(); got != fmt.Sprint(formatVersion) {
 		t.Fatalf("stamp after opening a legacy queue = %q, want %d", got, formatVersion)
+	}
+	// A queue that carries the stamp opens like any other.
+	third, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reopen a stamped queue: %v", err)
+	}
+	if err := third.Close(); err != nil {
+		t.Fatal(err)
 	}
 	leases, err := store.Claim(ctx, 1)
 	if err != nil {

@@ -80,6 +80,15 @@ func TestBoltStoreReadsLegacyDatabase(t *testing.T) {
 	if got := storedFormat(t, path); got != "1" {
 		t.Fatalf("stamp after opening a legacy database = %q, want 1", got)
 	}
+	// A database that carries the stamp opens like any other.
+	again, err := New(path)
+	if err != nil {
+		t.Fatalf("reopen a stamped database: %v", err)
+	}
+	defer again.Close()
+	if got, ok, err := again.LastSlot(ctx, "hourly"); err != nil || !ok || !got.Equal(slot) {
+		t.Fatalf("LastSlot after reopen = %v, %v, %v", got, ok, err)
+	}
 }
 
 func TestBoltStoreRejectsNewerDatabase(t *testing.T) {

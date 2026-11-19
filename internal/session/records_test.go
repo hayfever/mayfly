@@ -202,41 +202,38 @@ func TestRecordStoreRejectsNewerRecord(t *testing.T) {
 	}
 }
 
-// TestRestartKeepsFinishedSessionsAndArtifacts finalizes a session, closes its
-// record store, and starts a second manager over the same store.
+// TestRestartKeepsFinishedSessionsAndArtifacts creates and finalizes a
+// session, closes its record store, and starts a second manager over the same
+// store.
 func TestRestartKeepsFinishedSessionsAndArtifacts(t *testing.T) {
 	ctx := context.Background()
-	bundleKey := t.TempDir()
-	recordsPath := filepath.Join(bundleKey, "sessions.db")
+	recordsPath := filepath.Join(t.TempDir(), "sessions.db")
 	payload := []byte("retained bundle")
 	sum := sha256.Sum256(payload)
 	digest := hex.EncodeToString(sum[:])
-	key := "sessions/s1/bundle.tar.gz"
 
 	records, err := OpenRecords(config.RecordConfig{Backend: "bbolt", Path: recordsPath})
 	if err != nil {
 		t.Fatal(err)
 	}
 	first := testManager(t)
-	first.SetRecords(records)
-	if _, err := first.store.Put(ctx, key, bytes.NewReader(payload), int64(len(payload)), digest, "application/gzip"); err != nil {
+	first.runner = nopRunner{}
+	if err := first.loadAgents(); err != nil {
 		t.Fatal(err)
 	}
-	created := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
-	closed := created.Add(5 * time.Minute)
-	first.persistRecord(model.Session{
-		ID:           "s1",
-		Title:        "finished",
-		Status:       model.StatusCompleted,
-		Prompt:       "do it",
-		Agent:        "default",
-		CreatedAt:    created,
-		ClosedAt:     &closed,
-		LastActivity: closed,
-		MessageCount: 4,
-		Skills:       []string{"go"},
-	})
-	first.setArtifact("s1", model.ArtifactInfo{Key: key, Size: int64(len(payload)), SHA256: digest, CreatedAt: closed})
+	first.SetRecords(records)
+	sess, err := first.Create(ctx, CreateOptions{Prompt: "do it", Title: "finished"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst, ok := first.instance(sess.ID)
+	if !ok {
+		t.Fatal("created session is not registered")
+	}
+	if _, err := first.UploadArtifact(ctx, sess.ID, inst.token, bytes.NewReader(payload), int64(len(payload)), digest, false); err != nil {
+		t.Fatal(err)
+	}
+	first.finalize(inst, model.StatusCompleted, "closed", "")
 	if err := records.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -254,21 +251,30 @@ func TestRestartKeepsFinishedSessionsAndArtifacts(t *testing.T) {
 	}
 	defer second.Shutdown(context.Background())
 
-	got, ok := second.Get("s1")
+	got, ok := second.Get(sess.ID)
 	if !ok {
 		t.Fatal("finished session is missing after restart")
 	}
-	if got.Status != model.StatusCompleted || got.Title != "finished" || got.MessageCount != 4 || len(got.Skills) != 1 {
+	if got.Status != model.StatusCompleted || got.Title != "finished" || got.Prompt != "do it" {
 		t.Fatalf("restored session = %+v", got)
 	}
-	if got.Artifact == nil || got.Artifact.Key != key {
+	if got.ClosedAt == nil || got.CreatedAt.IsZero() {
+		t.Fatalf("restored timestamps = %+v", got)
+	}
+	if got.Artifact == nil || got.Artifact.SHA256 != digest {
 		t.Fatalf("restored artifact = %+v", got.Artifact)
 	}
 	list := second.List()
-	if len(list) != 1 || list[0].ID != "s1" {
+	found := false
+	for _, item := range list {
+		if item.ID == sess.ID {
+			found = true
+		}
+	}
+	if !found {
 		t.Fatalf("list = %+v", list)
 	}
-	rc, size, err := second.OpenArtifact(ctx, "s1")
+	rc, size, err := second.OpenArtifact(ctx, sess.ID)
 	if err != nil {
 		t.Fatalf("download after restart: %v", err)
 	}
