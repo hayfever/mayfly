@@ -460,3 +460,40 @@ func TestLateWebhookSessionIsCleanedUp(t *testing.T) {
 		t.Errorf("report does not contain %q:\n%s", want, out.String())
 	}
 }
+
+// TestCleanLateJobsDoesNotStallOnOneJob covers a final pass where the first
+// job stays queued. The pass must still read the later jobs, delete the
+// session one of them created, and skip the dead one.
+func TestCleanLateJobsDoesNotStallOnOneJob(t *testing.T) {
+	var mu sync.Mutex
+	var deleted []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/queue/jobs/stuck":
+			io.WriteString(w, `{"job":{"state":"queued"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/queue/jobs/late":
+			io.WriteString(w, `{"job":{"state":"done","session_id":"s-late"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/queue/jobs/dead":
+			io.WriteString(w, `{"job":{"state":"dead","error":"boom"}}`)
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v1/sessions/"):
+			mu.Lock()
+			deleted = append(deleted, strings.TrimPrefix(r.URL.Path, "/api/v1/sessions/"))
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newAPIClient(server.URL, "test-token", "test-secret")
+	cleaned, left := cleanLateJobs(client, []string{"stuck", "late", "dead"}, 5*time.Millisecond, 200*time.Millisecond)
+	if cleaned != 1 || left != 0 {
+		t.Fatalf("cleaned, left = %d, %d; want 1, 0", cleaned, left)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deleted) != 1 || deleted[0] != "s-late" {
+		t.Fatalf("deleted = %v, want [s-late]", deleted)
+	}
+}

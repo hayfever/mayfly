@@ -90,7 +90,7 @@ func runLoad(parent context.Context, cfg loadConfig, client *apiClient, lost <-c
 
 	result := runWorkers(ctx, cfg, client)
 	cancel()
-	lateCleaned, lateLeft := cleanLateJobs(client, result.lateJobs, cfg.pollInterval)
+	lateCleaned, lateLeft := cleanLateJobs(client, result.lateJobs, cfg.pollInterval, cleanupGrace)
 	runtimeSamples := <-samples
 
 	summary := &Summary{
@@ -321,30 +321,49 @@ func deleteSessionBounded(client *apiClient, id string) error {
 	return client.deleteSession(ctx, id)
 }
 
-// cleanLateJobs gives each webhook job whose wait ended without a session id
-// one more bounded chance to report one, and deletes any session the job
-// created after the wait. It runs after the window with its own context. The
-// pass is bounded as a whole, so a large worker count cannot stretch it.
-func cleanLateJobs(client *apiClient, jobs []string, poll time.Duration) (cleaned, left int) {
+// cleanLateJobs gives webhook jobs whose wait ended without a session id a
+// bounded second look, and deletes any session a job created after the wait.
+// It runs after the window with its own context. Each round reads every
+// pending job once, so one job that stays queued cannot use up the grace
+// period for the others. A dead job is dropped. The pass as a whole is
+// bounded by grace, so a large worker count cannot stretch it.
+func cleanLateJobs(client *apiClient, jobs []string, poll, grace time.Duration) (cleaned, left int) {
 	if len(jobs) == 0 {
 		return 0, 0
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), cleanupGrace)
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
-	for _, jobID := range jobs {
-		if ctx.Err() != nil {
+	pending := append([]string(nil), jobs...)
+	for len(pending) > 0 {
+		next := pending[:0]
+		for _, jobID := range pending {
+			job, err := client.readJob(ctx, jobID)
+			switch {
+			case err != nil:
+				if ctx.Err() != nil {
+					return cleaned, left
+				}
+				next = append(next, jobID)
+			case job.SessionID != "":
+				if err := deleteSessionBounded(client, job.SessionID); err != nil {
+					left++
+				} else {
+					cleaned++
+				}
+			case job.State == "dead":
+			default:
+				next = append(next, jobID)
+			}
+		}
+		pending = next
+		if len(pending) == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
 			return cleaned, left
+		case <-time.After(poll):
 		}
-		id, err := client.waitJob(ctx, jobID, poll, cleanupGrace)
-		if err != nil {
-			// The job is dead, or it still has no session. Nothing to delete.
-			continue
-		}
-		if err := deleteSessionBounded(client, id); err != nil {
-			left++
-			continue
-		}
-		cleaned++
 	}
 	return cleaned, left
 }
@@ -477,38 +496,50 @@ func (c *apiClient) waitSession(ctx context.Context, id string, poll, timeout ti
 	}
 }
 
+// jobStatus is the part of a queue job the harness reads.
+type jobStatus struct {
+	State     string `json:"state"`
+	SessionID string `json:"session_id"`
+	Error     string `json:"error"`
+}
+
+// readJob reads one queue job once.
+func (c *apiClient) readJob(ctx context.Context, id string) (jobStatus, error) {
+	code, data, err := c.request(ctx, http.MethodGet, "/api/v1/queue/jobs/"+url.PathEscape(id), nil, nil)
+	if err != nil {
+		return jobStatus{}, err
+	}
+	if code != http.StatusOK {
+		return jobStatus{}, fmt.Errorf("read job %s: %s", id, errorText(code, data))
+	}
+	var resp struct {
+		Job jobStatus `json:"job"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return jobStatus{}, fmt.Errorf("decode job %s: %w", id, err)
+	}
+	return resp.Job, nil
+}
+
 func (c *apiClient) waitJob(ctx context.Context, id string, poll, timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	for {
-		code, data, err := c.request(ctx, http.MethodGet, "/api/v1/queue/jobs/"+url.PathEscape(id), nil, nil)
+		job, err := c.readJob(ctx, id)
 		if err != nil {
 			return "", err
 		}
-		if code != http.StatusOK {
-			return "", fmt.Errorf("read job %s: %s", id, errorText(code, data))
+		if job.SessionID != "" {
+			return job.SessionID, nil
 		}
-		var resp struct {
-			Job struct {
-				State     string `json:"state"`
-				SessionID string `json:"session_id"`
-				Error     string `json:"error"`
-			} `json:"job"`
-		}
-		if err := json.Unmarshal(data, &resp); err != nil {
-			return "", fmt.Errorf("decode job %s: %w", id, err)
-		}
-		if resp.Job.SessionID != "" {
-			return resp.Job.SessionID, nil
-		}
-		if resp.Job.State == "dead" {
-			reason := resp.Job.Error
+		if job.State == "dead" {
+			reason := job.Error
 			if reason == "" {
 				reason = "job is dead"
 			}
 			return "", fmt.Errorf("job %s did not create a session: %s", id, reason)
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("job %s created no session within %s (last state %q)", id, timeout, resp.Job.State)
+			return "", fmt.Errorf("job %s created no session within %s (last state %q)", id, timeout, job.State)
 		}
 		select {
 		case <-ctx.Done():

@@ -130,7 +130,7 @@ control plane runtime (24 samples)
 
 The request table covers the primary requests only: `session create` and `webhook delivery`. Percentiles use the nearest rank, so each value is one observed request. Error rate is failed primary requests divided by attempted primary requests. Session throughput is finalized sessions per second over the actual window. Session lifecycle runs from the create request, or from the webhook delivery, to the terminal state.
 
-A webhook job can create its session after the harness stops waiting for that job. After the window, the harness checks each such job again for up to 10 seconds and deletes the session it finds. The sessions block then reports `late sessions cleaned up: N, left behind: M`. `left behind` counts a delete that failed.
+A webhook job can create its session after the harness stops waiting for that job. After the window, the harness reads each such job again, round by round, for up to 10 seconds in total, and deletes the session it finds. The sessions block then reports `late sessions cleaned up: N, left behind: M`. `left behind` counts a delete that failed.
 
 The runtime block reads `go_goroutines` and `process_resident_memory_bytes` from the Prometheus endpoint. Samples that fail are skipped for the series and counted at the bottom of the block.
 
