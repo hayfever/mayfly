@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"path"
@@ -42,8 +43,17 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 // Std returns the standard library duration.
 func (d Duration) Std() time.Duration { return time.Duration(d) }
 
+// CurrentVersion is the config file format this build reads. A file without a
+// version field is read as version 1. Any other value is an error, so a
+// downgrade fails at startup instead of silently ignoring keys it does not
+// understand.
+const CurrentVersion = 1
+
 // Config is the root configuration document.
 type Config struct {
+	// Version is the config file format version. Load writes CurrentVersion
+	// when the file omits the field.
+	Version   int             `yaml:"version"`
 	Server    ServerConfig    `yaml:"server"`
 	Sessions  SessionsConfig  `yaml:"sessions"`
 	Runtime   RuntimeConfig   `yaml:"runtime"`
@@ -403,6 +413,7 @@ type RateLimitConfig struct {
 // Default returns a configuration with safe defaults applied.
 func Default() *Config {
 	return &Config{
+		Version: CurrentVersion,
 		Server: ServerConfig{
 			Addr:            ":8080",
 			PublicURL:       "http://localhost:8080",
@@ -496,6 +507,9 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	cfg := Default()
+	// Zero the version so a file that omits the field is distinguishable from
+	// one that sets it to the current version.
+	cfg.Version = 0
 	decoder := yaml.NewDecoder(bytes.NewReader(raw))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
@@ -508,6 +522,15 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config %s: multiple YAML documents are not supported", path)
 	} else if !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	switch cfg.Version {
+	case 0:
+		cfg.Version = CurrentVersion
+		slog.Warn("config has no version field; assuming the current version",
+			"path", path, "version", CurrentVersion)
+	case CurrentVersion:
+	default:
+		return nil, fmt.Errorf("config %s: version %d is not supported by this build, which reads version %d", path, cfg.Version, CurrentVersion)
 	}
 	cfg.applyDefaults()
 	if err := cfg.resolveSecrets(); err != nil {

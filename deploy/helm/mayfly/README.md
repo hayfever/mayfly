@@ -108,6 +108,7 @@ For Bedrock on EKS, annotate `litellm.serviceAccount.annotations` with your IRSA
 | `imagePullSecrets` | empty | Secrets for control-plane, LiteLLM, and session images |
 | `existingSecret` | empty | Secret with control-plane env |
 | `secret.create` | false | Create the Secret from `secret.literals` |
+| `config.version` | `1` | Config file format version. `mayflyd` reads version 1 |
 | `config.server.public_url` | `http://localhost:8080` | External URL |
 | `config.llm.base_url` | empty | OpenAI by default; LiteLLM URL when enabled |
 | `config.agents.allowed_images` | empty | Image allowlist for manifests |

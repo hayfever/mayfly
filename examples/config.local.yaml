@@ -1,3 +1,5 @@
+version: 1
+
 server:
   addr: ":8080"
   public_url: "http://localhost:8080"

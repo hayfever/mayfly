@@ -53,7 +53,9 @@ secret:
 
 # Mayfly configuration. The chart fills runtime.image, service accounts,
 # platform labels, internal URL, and LiteLLM defaults when empty.
+# The version key selects the config file format; mayflyd reads version 1.
 config:
+  version: 1
   server:
     public_url: "http://localhost:8080"
     token_env: MAYFLY_API_TOKEN
