@@ -39,7 +39,6 @@ type session struct {
 	Agent    string        `json:"agent"`
 	Harness  string        `json:"harness"`
 	Trigger  triggerInfo   `json:"trigger"`
-	PodName  string        `json:"pod_name"`
 	Artifact *artifactInfo `json:"artifact"`
 	Error    string        `json:"error"`
 }
