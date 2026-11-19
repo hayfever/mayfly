@@ -37,6 +37,7 @@ make cluster-down
 | `examples/litellm` | LiteLLM gateway configuration and deployment example |
 | `test/integration` | webhook → queue → worker → real agent process → MCP → WebSocket → close → artifact |
 | `e2e` (`make e2e`) | released images and chart on a real cluster: webhooks, queue durability, dead letters, isolation, lifecycle; see [testing.md](testing.md) |
+| `e2e` upgrade test | the last published release upgraded to HEAD; set `MAYFLY_E2E_UPGRADE_FROM` and see [testing.md](testing.md#upgrade-test) |
 
 Run one test:
 
