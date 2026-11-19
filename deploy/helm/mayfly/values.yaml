@@ -14,7 +14,6 @@ agentImage:
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
-replicaCount: 1
 logLevel: info
 
 serviceAccount:
@@ -53,7 +52,9 @@ secret:
 
 # Mayfly configuration. The chart fills runtime.image, service accounts,
 # platform labels, internal URL, and LiteLLM defaults when empty.
+# The version key selects the config file format; mayflyd reads version 1.
 config:
+  version: 1
   server:
     public_url: "http://localhost:8080"
     token_env: MAYFLY_API_TOKEN
@@ -167,7 +168,9 @@ litellm:
   enabled: false
   image:
     repository: ghcr.io/berriai/litellm
-    tag: main-stable
+    # A release tag, not a rolling tag. LiteLLM deprecates main-stable and
+    # publishes vX.Y.Z tags that it never overwrites. Bump this deliberately.
+    tag: v1.110.0
     digest: ""
   existingSecret: litellm-secrets
   masterKeyEnv: LITELLM_MASTER_KEY

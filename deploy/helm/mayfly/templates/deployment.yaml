@@ -12,7 +12,10 @@ metadata:
     {{- include "mayfly.labels" . | nindent 4 }}
     app.kubernetes.io/component: control-plane
 spec:
-  replicas: {{ .Values.replicaCount }}
+  # One replica. The control plane keeps its queue, session records, and turn
+  # journal on one ReadWriteOnce state volume, so a second replica would
+  # compete for the same files.
+  replicas: 1
   strategy:
     type: Recreate
   selector:

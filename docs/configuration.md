@@ -4,6 +4,14 @@
 
 Complete example: [examples/config.local.yaml](../examples/config.local.yaml). Kubernetes example: [deploy/k8s/base/configmap.yaml](../deploy/k8s/base/configmap.yaml).
 
+## version
+
+| Key | Default | Meaning |
+|---|---|---|
+| `version` | `1` | Config file format version. This build reads version 1 |
+
+Set `version: 1` in every file. A file without the key is read as version 1, and `mayflyd` logs a warning at startup. Any other value fails the load with an error that names the rejected version and the supported version, and the process exits with code 2.
+
 ## server
 
 | Key | Default | Meaning |
