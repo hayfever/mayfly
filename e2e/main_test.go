@@ -18,9 +18,9 @@ import (
 	"os"
 	"os/exec"
 	"path"
-	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -70,7 +70,11 @@ type cluster struct {
 
 	mu   sync.Mutex
 	base string
-	pf   func()
+	pf   *portForward
+
+	// forwardMu serializes replacement of the port-forward without holding
+	// mu, so reading base never waits for kubectl.
+	forwardMu sync.Mutex
 }
 
 func getenv(key, fallback string) string {
@@ -194,7 +198,7 @@ func connect() (*cluster, error) {
 
 	if c.fixedURL != "" {
 		c.base = c.fixedURL
-	} else if err := c.startPortForward(); err != nil {
+	} else if _, err := c.startPortForward(); err != nil {
 		return nil, err
 	}
 	if err := c.waitReady(90 * time.Second); err != nil {
@@ -279,36 +283,99 @@ func (c *cluster) execIn(t *testing.T, pod string, command ...string) (int, stri
 	return -1, ""
 }
 
-var forwardingRE = regexp.MustCompile(`Forwarding from 127\.0\.0\.1:(\d+)`)
+// portForward is one kubectl port-forward process. kubectl resolves a
+// Service to a single pod when it starts and exits when that pod goes away,
+// so the process exit is the signal that the local port is stale.
+type portForward struct {
+	base     string
+	cmd      *exec.Cmd
+	exited   chan struct{}
+	stopped  atomic.Bool
+	stopOnce sync.Once
+}
 
-// startPortForward forwards a random local port to the control plane Service.
-// It must be restarted whenever the control plane pod is replaced.
-func (c *cluster) startPortForward() error {
-	base, stop, err := c.forward("svc/"+c.service, 8080, 60*time.Second)
+func (p *portForward) alive() bool {
+	if p.stopped.Load() {
+		return false
+	}
+	select {
+	case <-p.exited:
+		return false
+	default:
+		return true
+	}
+}
+
+func (p *portForward) stop() {
+	p.stopOnce.Do(func() {
+		p.stopped.Store(true)
+		if p.cmd.Process != nil {
+			_ = p.cmd.Process.Kill()
+		}
+		select {
+		case <-p.exited:
+		case <-time.After(10 * time.Second):
+			fmt.Fprintf(os.Stderr, "e2e: port-forward to %s did not exit after SIGKILL\n", p.base)
+		}
+	})
+}
+
+// startPortForward replaces any existing forward with a new one to the
+// control plane Service. It must run after the control plane pod is replaced.
+func (c *cluster) startPortForward() (string, error) {
+	return c.startForward(60 * time.Second)
+}
+
+// startForward is startPortForward with the caller's deadline.
+func (c *cluster) startForward(deadline time.Duration) (string, error) {
+	p, err := c.forward("svc/"+c.service, 8080, deadline)
 	if err != nil {
-		return err
+		return "", err
 	}
 	c.mu.Lock()
-	c.base = base
-	c.pf = stop
+	old := c.pf
+	c.pf = p
+	c.base = p.base
 	c.mu.Unlock()
-	return nil
+	if old != nil && old != p {
+		old.stop()
+	}
+	return p.base, nil
+}
+
+// liveForward returns a base URL whose port-forward is still alive, replacing
+// a forward whose kubectl process exited. kubectl exits when the pod it
+// resolved at startup is deleted, so a control-plane restart leaves the local
+// port refusing connections until the forward is replaced.
+func (c *cluster) liveForward(deadline time.Duration) (string, error) {
+	if c.fixedURL != "" {
+		return c.fixedURL, nil
+	}
+	c.forwardMu.Lock()
+	defer c.forwardMu.Unlock()
+	c.mu.Lock()
+	pf := c.pf
+	c.mu.Unlock()
+	if pf != nil && pf.alive() {
+		return pf.base, nil
+	}
+	return c.startForward(deadline)
 }
 
 // forward retries kubectl until it reports a local port or the deadline
 // passes. kubectl resolves the Service to a ready pod once, at startup, and
 // exits when it finds none, so a replacement control plane whose endpoint is
 // not published yet is retried instead of failing the test.
-func (c *cluster) forward(target string, remotePort int, deadline time.Duration) (string, func(), error) {
+func (c *cluster) forward(target string, remotePort int, deadline time.Duration) (*portForward, error) {
 	var last error
 	for end := time.Now().Add(deadline); ; {
-		base, stop, err := c.forwardOnce(target, remotePort)
+		p, err := c.forwardOnce(target, remotePort)
 		if err == nil {
-			return base, stop, nil
+			return p, nil
 		}
 		last = err
 		if time.Now().After(end) {
-			return "", nil, last
+			return nil, last
 		}
 		time.Sleep(2 * time.Second)
 	}
@@ -316,36 +383,42 @@ func (c *cluster) forward(target string, remotePort int, deadline time.Duration)
 
 // forwardOnce starts one kubectl port-forward and waits for the local port it
 // reports, or for kubectl to exit.
-func (c *cluster) forwardOnce(target string, remotePort int) (string, func(), error) {
+func (c *cluster) forwardOnce(target string, remotePort int) (*portForward, error) {
 	cmd := exec.Command("kubectl", c.kubectlArgs("port-forward", target, fmt.Sprintf(":%d", remotePort))...)
-	stdout, err := cmd.StdoutPipe()
+	// The read end of a pipe of our own, not of StdoutPipe: Wait closes a
+	// StdoutPipe, and calling Wait while the scanner reads it is a race.
+	read, write, err := os.Pipe()
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
+	cmd.Stdout = write
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return "", nil, fmt.Errorf("start port-forward to %s: %w", target, err)
+		_ = read.Close()
+		_ = write.Close()
+		return nil, fmt.Errorf("start port-forward to %s: %w", target, err)
 	}
-	stop := func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		}
-	}
-	// Keep reading after the port is reported: kubectl blocks once its stdout
-	// pipe fills, so abandoning the stream could stall the forward later.
+	_ = write.Close()
+	p := &portForward{cmd: cmd, exited: make(chan struct{})}
+	go func() {
+		_ = cmd.Wait()
+		close(p.exited)
+		_ = read.Close()
+	}()
+	// Keep reading after the port is reported: kubectl blocks once its output
+	// fills, so abandoning the stream could stall the forward later.
 	found := make(chan string, 1)
 	go func() {
-		scanner := bufio.NewScanner(stdout)
+		scanner := bufio.NewScanner(read)
 		reported := false
 		for scanner.Scan() {
 			if reported {
 				continue
 			}
-			if m := forwardingRE.FindStringSubmatch(scanner.Text()); m != nil {
+			if port, ok := forwardPort(scanner.Text()); ok {
 				reported = true
-				found <- m[1]
+				found <- port
 			}
 		}
 		if !reported {
@@ -355,13 +428,14 @@ func (c *cluster) forwardOnce(target string, remotePort int) (string, func(), er
 	select {
 	case port, ok := <-found:
 		if !ok {
-			stop()
-			return "", nil, fmt.Errorf("port-forward to %s exited: %s", target, strings.TrimSpace(stderr.String()))
+			p.stop()
+			return nil, fmt.Errorf("port-forward to %s exited: %s", target, strings.TrimSpace(stderr.String()))
 		}
-		return "http://127.0.0.1:" + port, stop, nil
+		p.base = "http://127.0.0.1:" + port
+		return p, nil
 	case <-time.After(15 * time.Second):
-		stop()
-		return "", nil, fmt.Errorf("port-forward to %s did not start within 15s", target)
+		p.stop()
+		return nil, fmt.Errorf("port-forward to %s did not start within 15s", target)
 	}
 }
 
@@ -369,23 +443,46 @@ func (c *cluster) stopPortForward() {
 	c.mu.Lock()
 	pf := c.pf
 	c.pf = nil
+	c.base = ""
 	c.mu.Unlock()
 	if pf != nil {
-		pf()
+		pf.stop()
 	}
 }
 
+// url returns an absolute URL for path. It replaces a port-forward whose
+// kubectl process exited, so a test that fails after a restart cannot leave a
+// stale forward behind for the next test.
 func (c *cluster) url(path string) string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.base + path
+	base, err := c.liveForward(60 * time.Second)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "e2e: reconnect the port-forward:", err)
+		c.mu.Lock()
+		base = c.base
+		c.mu.Unlock()
+	}
+	return base + path
 }
 
 func (c *cluster) waitReady(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var last string
-	for time.Now().Before(deadline) {
-		resp, err := c.http.Get(c.url("/readyz"))
+	reported := false
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		if remaining > 60*time.Second {
+			remaining = 60 * time.Second
+		}
+		base, err := c.liveForward(remaining)
+		if err != nil {
+			last = "reconnect the port-forward: " + err.Error()
+			time.Sleep(time.Second)
+			continue
+		}
+		resp, err := c.http.Get(base + "/readyz")
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -394,6 +491,13 @@ func (c *cluster) waitReady(timeout time.Duration) error {
 			last = resp.Status
 		} else {
 			last = err.Error()
+			if forwardBroken(err) && !reported {
+				// kubectl keeps the local port open while the remote process
+				// is not listening, so a refused request does not prove the
+				// forward is stale. Report it once and keep retrying.
+				fmt.Fprintf(os.Stderr, "e2e: /readyz through the port-forward: %v\n", err)
+				reported = true
+			}
 		}
 		time.Sleep(time.Second)
 	}
@@ -440,8 +544,7 @@ func (c *cluster) restartDeployment(t *testing.T, force bool) {
 		t.Fatal(err)
 	}
 	if c.fixedURL == "" {
-		c.stopPortForward()
-		if err := c.startPortForward(); err != nil {
+		if _, err := c.startPortForward(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -488,11 +591,11 @@ func (c *cluster) waitNoSessionObjects(timeout time.Duration) error {
 // stubs, which are not exposed through the control plane.
 func (c *cluster) forwardService(t *testing.T, service string, remotePort int) (string, func()) {
 	t.Helper()
-	base, stop, err := c.forward("svc/"+service, remotePort, 30*time.Second)
+	pf, err := c.forward("svc/"+service, remotePort, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return base, stop
+	return pf.base, pf.stop
 }
 
 // podNames lists the pods currently labeled for a session.

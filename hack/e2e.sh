@@ -6,6 +6,9 @@
 # By default it creates a k3d cluster, builds and imports local images, and
 # installs the local Helm chart. Set E2E_KUBECONTEXT to run against an existing
 # cluster instead; images are then pushed to E2E_REGISTRY.
+#
+# MAYFLY_E2E_UPGRADE_FROM and MAYFLY_E2E_PULL_SECRET reach the tests unchanged
+# and enable the upgrade test; docs/testing.md describes that run.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"

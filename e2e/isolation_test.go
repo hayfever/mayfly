@@ -189,7 +189,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      mayfly.io/session: %s
+      mayfly.io/session: %q
   policyTypes: [%s]
   %s:
     - {}

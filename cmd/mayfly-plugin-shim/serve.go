@@ -474,6 +474,7 @@ func (s *serveServer) handleList(w http.ResponseWriter, r *http.Request, id, par
 	result, rpcErr, err := child.request(r.Context(), "tools/list", params, nil)
 	switch {
 	case err != nil:
+		s.childFailed(child)
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 	case len(rpcErr) > 0:
 		writeRPCRawError(w, id, rpcErr)
@@ -548,6 +549,7 @@ func (s *serveServer) handleCall(w http.ResponseWriter, r *http.Request, id, par
 		if r.Context().Err() != nil {
 			return
 		}
+		s.childFailed(child)
 		writeToolFailure(w, id, err.Error())
 	case len(rpcErr) > 0:
 		s.calls.fail(claims.Key)
@@ -624,6 +626,25 @@ func (s *serveServer) setChild(child *child, init json.RawMessage) {
 	s.child = child
 	s.init = init
 	s.ready = true
+}
+
+// childFailed drops readiness as soon as a failed request proves the child
+// exited. The supervisor does the same when it observes the exit, but a
+// readiness probe must not pass in the window between the exit and that
+// observation.
+func (s *serveServer) childFailed(child *child) {
+	select {
+	case <-child.done:
+	default:
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.child == child {
+		s.child = nil
+		s.init = nil
+		s.ready = false
+	}
 }
 
 // clearChild drops readiness and the child reference.

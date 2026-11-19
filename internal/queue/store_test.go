@@ -27,7 +27,10 @@ func testConfig(t *testing.T) config.QueueConfig {
 	cfg.MaxJobs = 10
 	cfg.MaxAttempts = 2
 	cfg.RetryBase = config.Duration(20 * time.Millisecond)
-	cfg.VisibilityTimeout = config.Duration(50 * time.Millisecond)
+	// A claim stays leased for this long. Expiry tests use shortLeaseConfig:
+	// the default must outlive an assertion on a loaded -race run, because
+	// Stats reports an expired lease as pending again.
+	cfg.VisibilityTimeout = config.Duration(time.Minute)
 	cfg.DedupeTTL = config.Duration(time.Hour)
 	return cfg
 }
@@ -43,6 +46,15 @@ func testJob(delivery string) Job {
 func backends(t *testing.T) map[string]Store {
 	t.Helper()
 	return backendsWith(t, testConfig(t))
+}
+
+// shortLeaseConfig makes a claim expire quickly, for tests that wait for a
+// lease to time out.
+func shortLeaseConfig(t *testing.T) config.QueueConfig {
+	t.Helper()
+	cfg := testConfig(t)
+	cfg.VisibilityTimeout = config.Duration(50 * time.Millisecond)
+	return cfg
 }
 
 // backendsWith returns every available store for the conformance suite. Redis
@@ -183,7 +195,7 @@ func TestStoreDedupeIsPerTrigger(t *testing.T) {
 }
 
 func TestStoreVisibilityExpiryReclaims(t *testing.T) {
-	for name, store := range backends(t) {
+	for name, store := range backendsWith(t, shortLeaseConfig(t)) {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			if err := store.Accept(ctx, testJob("lease-me")); err != nil {
@@ -462,7 +474,7 @@ func claimOne(t *testing.T, store Store) Lease {
 }
 
 func TestStoreStaleLeaseCannotSettle(t *testing.T) {
-	for name, store := range backends(t) {
+	for name, store := range backendsWith(t, shortLeaseConfig(t)) {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			if err := store.Accept(ctx, testJob("stale")); err != nil {
@@ -613,7 +625,7 @@ func TestStoreExpiresDoneTombstones(t *testing.T) {
 }
 
 func TestStoreExtendKeepsLease(t *testing.T) {
-	for name, store := range backends(t) {
+	for name, store := range backendsWith(t, shortLeaseConfig(t)) {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			if err := store.Accept(ctx, testJob("extend")); err != nil {

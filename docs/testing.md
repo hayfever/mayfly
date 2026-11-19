@@ -27,6 +27,8 @@ Plugin behavior is covered in the first two layers:
 4. runs the Go tests in [e2e/](../e2e) (build tag `e2e`) against the release over a port-forward,
 5. deletes the cluster.
 
+Step 4 keeps one `kubectl port-forward` to the control plane Service. The forward pins the pod it resolved at startup, so the suite starts a new forward after a control-plane restart and replaces one whose kubectl process exited before each request. A failed restart does not leave a broken tunnel for the tests that follow.
+
 No API keys are needed: `llmstub` answers every model call. A full run takes about 8 minutes from scratch, about 2 of them in tests.
 
 ### Scenarios
@@ -49,6 +51,7 @@ No API keys are needed: `llmstub` answers every model call. A full run takes abo
 | `TestSlackWebhook` | Slack signing, the URL verification challenge, rejection of requests older than 5 minutes, and a slash command that starts a session |
 | `TestDatadogWebhook` | A signed Datadog alert starts a titled session |
 | `TestWebhookRateLimit` | Only verified requests spend a trigger's budget; over the limit answers 429 with `Retry-After` |
+| `TestUpgradeFromLastRelease` | The last released chart and images are upgraded to the chart and images built from HEAD; the old sessions stay readable and listed, a queued job survives, and the upgraded control plane runs it |
 
 After the tests pass, the suite checks that no session pods, Secrets, ConfigMaps, or NetworkPolicies are left in the namespace.
 
@@ -72,6 +75,31 @@ make e2e-down
 `make e2e-up` rebuilds the images and restarts the control plane, so code changes are picked up. Logs and, on failure, cluster diagnostics go to `.e2e/` (`E2E_ARTIFACTS` to change).
 
 Requirements: Docker, k3d, kubectl, Helm 3, Go, and openssl. The k3d cluster uses about 3 GB of memory.
+
+### Upgrade test
+
+`TestUpgradeFromLastRelease` proves that a live install survives an upgrade. It installs the chart and images of a released version in the `mayfly-upgrade` namespace, with its own copy of the stubs, fills the session slots, and queues a webhook job. It then runs `helm upgrade` to the local chart with the images built from HEAD and checks three things:
+
+1. the old sessions are still readable and listed, with their titles and the adopted trigger,
+2. the queued job record is still present,
+3. the upgraded control plane runs that job when a slot frees.
+
+The test skips unless `MAYFLY_E2E_UPGRADE_FROM` names a released chart version. The release packages are private, so Helm and the cluster need credentials:
+
+```bash
+helm registry login ghcr.io -u <github-user>
+
+kubectl create namespace mayfly-upgrade
+kubectl -n mayfly-upgrade create secret docker-registry ghcr-pull \
+  --docker-server=ghcr.io --docker-username=<github-user> --docker-password=<token>
+
+make e2e-up
+MAYFLY_E2E_UPGRADE_FROM=0.1.0-rc.2 MAYFLY_E2E_PULL_SECRET=ghcr-pull \
+  E2E_GO_TEST_FLAGS="-run TestUpgradeFromLastRelease" make e2e-test
+make e2e-down
+```
+
+`MAYFLY_E2E_CHART_REPOSITORY` and `MAYFLY_E2E_IMAGE_PREFIX` override the default `ghcr.io/hayfever` package locations. `MAYFLY_E2E_UPGRADE_NAMESPACE` overrides the namespace. The test deletes the namespace when it passes and keeps it for inspection when it fails. The test installs both releases with the bbolt queue from [e2e/upgrade-values.yaml](../e2e/upgrade-values.yaml) and the single-agent [e2e/upgrade-agents.yaml](../e2e/upgrade-agents.yaml); both files must stay valid for every release under test. The Redis e2e variant does not run it. A run takes a few minutes because the released images are pulled from the registry.
 
 ### Against a real cluster
 
@@ -101,4 +129,6 @@ E2E_KUBECONTEXT=mayfly E2E_REGISTRY=ttl.sh/mayfly-e2e-$(openssl rand -hex 8) E2E
 
 ### CI
 
-[.github/workflows/e2e.yml](../.github/workflows/e2e.yml) runs `make e2e` on k3d for pushes to `main`, pull requests, and manual dispatch, once per queue backend (bbolt and Redis). Diagnostics are uploaded when it fails.
+[.github/workflows/e2e.yml](../.github/workflows/e2e.yml) runs `make e2e` on k3d for pushes to `main`, pull requests, and manual dispatch, once per queue backend (bbolt and Redis).
+
+The `upgrade` job resolves the last `v*` tag, logs in to `ghcr.io` with the workflow token, creates a pull secret for the released images, and runs only `TestUpgradeFromLastRelease` from that release to HEAD. Diagnostics are uploaded when either job fails.
