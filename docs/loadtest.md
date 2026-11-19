@@ -63,7 +63,22 @@ The install must use the stub backend:
 - The `llmstub` Deployment runs the `llmstub` image from the Dockerfile.
 - A `generic` trigger exists for webhook mode.
 
-`deploy/k8s/overlays/local` and `e2e/values.yaml` are working examples. The Helm chart replaces the `triggers` list as a whole, so write the complete list in your values file.
+`deploy/k8s/overlays/local` and `e2e/values.yaml` show the stub wiring, but they are not load test configurations. Their session timeouts suit interactive use and the e2e suite: a stub session stays open until `idle_timeout` (15m), so the harness waits out `-session-timeout` (5m) and reports wait failures instead of completed sessions. The Helm chart replaces the `triggers` list as a whole, so write the complete list in your values file.
+
+Set these session values for a load run. They completed every session in a 10-minute, 6-worker `both` run on a one-node Civo cluster:
+
+```yaml
+config:
+  sessions:
+    idle_timeout: 45s     # a finished stub session closes instead of idling for 15m
+    close_grace: 30s
+    connect_timeout: 5m   # covers volume attach on a cloud provider
+    max_concurrent: 8     # above -n
+```
+
+Pass `-session-timeout 8m` to the harness so the wait covers the connect timeout plus the idle close.
+
+On a cloud provider, every session pod waits for its volume to attach. On Civo that adds 1 to 2 minutes per session, so session lifecycle percentiles there measure the storage provider more than Mayfly. With the default `connect_timeout` of 2m, slow attaches fail as `runtime did not connect`.
 
 ## Flags
 
