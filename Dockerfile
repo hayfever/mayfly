@@ -42,6 +42,11 @@ FROM node:26-bookworm-slim AS mayfly-agent
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates git curl jq ripgrep \
  && rm -rf /var/lib/apt/lists/*
+# The npm bundled with the base image can lag behind fixes in its own
+# dependencies (undici, brace-expansion); the release scan fails on those.
+RUN npm install -g npm@12.2.3 \
+ && npm cache clean --force \
+ && rm -rf /root/.npm
 RUN groupadd --gid 65532 mayfly \
  && useradd --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin mayfly
 COPY --from=build /out/mayfly-agent /usr/local/bin/mayfly-agent
