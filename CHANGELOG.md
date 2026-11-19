@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
+## [0.3.0] - Unreleased
+
+### Added
+
+- Persisted-format compatibility fixtures under `test/compat`. One set holds the 0.2.0 layout of the queue (bbolt and redis), journal, schedule watermark, and session records, and tests open every set with the current build. `go run ./test/compat/gen` writes the set for a release, and [docs/development.md](docs/development.md#persisted-formats-and-migrations) describes how a layout change adds a migration case.
+
 ## [0.2.0] - 2026-11-19
 
 Operators moving from 0.1.x or a release candidate should read
