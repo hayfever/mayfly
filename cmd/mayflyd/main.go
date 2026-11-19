@@ -286,15 +286,29 @@ func main() {
 
 	<-ctx.Done()
 	logger.Info("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	_ = server.Shutdown(shutdownCtx)
+	// One budget covers the whole stop sequence, and each stage gets its own
+	// deadline inside it. A stage that runs long cannot hand the next stage an
+	// expired context.
+	budget := cfg.Server.ShutdownBudget.Std()
+	httpShare, workerShare, managerShare := cfg.Server.ShutdownShares()
+	deadline := time.Now().Add(budget)
+	logger.Info("shutdown budget", "budget", budget.String(), "http", httpShare.String(), "worker", workerShare.String(), "manager", managerShare.String())
+
+	httpCtx, cancelHTTP := context.WithDeadline(context.Background(), deadline.Add(-(workerShare + managerShare)))
+	_ = server.Shutdown(httpCtx)
+	cancelHTTP()
+
+	workerCtx, cancelWorker := context.WithDeadline(context.Background(), deadline.Add(-managerShare))
 	select {
 	case <-workerDone:
-	case <-time.After(20 * time.Second):
+	case <-workerCtx.Done():
 		logger.Warn("queue worker did not stop in time; in-flight jobs will be retried")
 	}
-	mgr.Shutdown(shutdownCtx)
+	cancelWorker()
+
+	managerCtx, cancelManager := context.WithDeadline(context.Background(), deadline)
+	mgr.Shutdown(managerCtx)
+	cancelManager()
 }
 
 // startServices starts the service plugin workloads and returns the gateway's

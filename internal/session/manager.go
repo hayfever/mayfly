@@ -326,7 +326,19 @@ func (m *Manager) Shutdown(ctx context.Context) {
 			}
 		}
 	}
-	m.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		// The pod is about to be killed. Cleanup that has not finished keeps
+		// running until the process exits, and the next control plane adopts
+		// or collects whatever it left behind.
+		m.logger.Warn("shutdown budget reached before cleanup finished")
+	}
 }
 
 // dispatch runs work in the background and keeps Shutdown waiting for it. It
