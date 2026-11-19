@@ -93,7 +93,7 @@ The token needs the `admin` scope, because the harness reads `/metrics` on the m
 
 ## Output
 
-The report ends with four blocks:
+The report has three sections:
 
 ```text
 requests
