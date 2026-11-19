@@ -380,3 +380,16 @@ func validateJobJSON(t *testing.T, schema *jsonschema.Schema, job Job) {
 		t.Fatalf("producer output does not match api/job.v1.schema.json: %v\n%s", err, raw)
 	}
 }
+
+// TestEnvelopeDecodesPreKindSession covers a job written before jobs carried a
+// kind. The empty kind means a session job.
+func TestEnvelopeDecodesPreKindSession(t *testing.T) {
+	raw := []byte(`{"id":"d-old","delivery":"delivery-old","trigger":"generic","options":{"Prompt":"old prompt"},"accepted_at":"2026-01-02T03:04:05Z"}`)
+	var job Job
+	if err := json.Unmarshal(raw, &job); err != nil {
+		t.Fatalf("legacy decode: %v", err)
+	}
+	if job.JobKind() != KindSession || job.Options.Prompt != "old prompt" || job.ID != "d-old" {
+		t.Fatalf("pre-kind job = %+v", job)
+	}
+}
