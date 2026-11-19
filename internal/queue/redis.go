@@ -316,7 +316,7 @@ func (s *redisStore) Get(ctx context.Context, id string) (Record, bool, error) {
 	if err == nil {
 		var job Job
 		if err := json.Unmarshal(payload, &job); err != nil {
-			return Record{}, false, err
+			return Record{}, false, &UnreadableError{ID: id, Cause: err}
 		}
 		record := Record{Job: job, State: StateQueued}
 		if score, err := s.client.ZScore(ctx, s.queue, id).Result(); err == nil {
@@ -344,7 +344,7 @@ func (s *redisStore) Get(ctx context.Context, id string) (Record, bool, error) {
 	}
 	var done doneRecord
 	if err := json.Unmarshal(payload, &done); err != nil {
-		return Record{}, false, err
+		return Record{}, false, &UnreadableError{ID: id, Cause: err}
 	}
 	return Record{Job: done.Job, State: StateDone, SessionID: done.SessionID, FinishedAt: done.FinishedAt}, true, nil
 }

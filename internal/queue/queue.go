@@ -27,7 +27,28 @@ var (
 	ErrLeaseLost = errors.New("queue lease lost")
 	// ErrNotFound means the job is unknown, or its record has expired.
 	ErrNotFound = errors.New("job not found")
+	// ErrUnreadable means a stored job payload does not decode with this
+	// build. The job stays in place so an operator can inspect or delete it.
+	ErrUnreadable = errors.New("job payload is unreadable")
 )
+
+// UnreadableError reports one stored job whose payload does not decode. Its
+// cause is the decoder error, so the message names the field or version that
+// failed.
+type UnreadableError struct {
+	ID    string
+	Cause error
+}
+
+func (e *UnreadableError) Error() string {
+	return "job " + e.ID + " payload is unreadable: " + e.Cause.Error()
+}
+
+// Unwrap returns the decoder error.
+func (e *UnreadableError) Unwrap() error { return e.Cause }
+
+// Is reports ErrUnreadable, so callers can match without the decoder error.
+func (e *UnreadableError) Is(target error) bool { return target == ErrUnreadable }
 
 // clock reports the current time. Each store reads one clock for every lease,
 // retry, and expiry decision, so a test can move time forward without waiting

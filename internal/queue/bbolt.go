@@ -330,7 +330,7 @@ func (s *boltStore) Get(_ context.Context, id string) (Record, bool, error) {
 		if payload := tx.Bucket(bucketJobs).Get([]byte(id)); payload != nil {
 			var job Job
 			if err := json.Unmarshal(payload, &job); err != nil {
-				return err
+				return &UnreadableError{ID: id, Cause: err}
 			}
 			record = Record{Job: job, State: StateQueued}
 			if deadline, ok := readyFor(tx.Bucket(bucketReady), id); ok && deadline.After(now) {
@@ -348,7 +348,7 @@ func (s *boltStore) Get(_ context.Context, id string) (Record, bool, error) {
 		if payload := tx.Bucket(bucketDone).Get([]byte(id)); payload != nil {
 			var done doneRecord
 			if err := json.Unmarshal(payload, &done); err != nil {
-				return err
+				return &UnreadableError{ID: id, Cause: err}
 			}
 			record = Record{Job: done.Job, State: StateDone, SessionID: done.SessionID, FinishedAt: done.FinishedAt}
 			found = true
