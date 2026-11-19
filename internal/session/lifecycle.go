@@ -408,6 +408,7 @@ func (m *Manager) finalize(inst *instance, status model.SessionStatus, reason, e
 	hash := inst.tokenHash
 	inst.mu.Unlock()
 	m.persistInstance(inst)
+	m.notifyFinished(final)
 
 	m.removeToken(hash)
 	text := "Session " + string(final) + "."

@@ -864,3 +864,53 @@ func TestShutdownStopsAtItsDeadline(t *testing.T) {
 		t.Fatalf("Shutdown took %v with a 20ms budget", elapsed)
 	}
 }
+
+type recordingObserver struct {
+	created  int
+	finished []model.SessionStatus
+}
+
+func (o *recordingObserver) SessionCreated() { o.created++ }
+
+func (o *recordingObserver) SessionFinished(status model.SessionStatus) {
+	o.finished = append(o.finished, status)
+}
+
+func TestObserverAndStatusCountsFollowLifecycle(t *testing.T) {
+	ctx := context.Background()
+	m := testManager(t)
+	m.runner = nopRunner{}
+	if err := m.loadAgents(); err != nil {
+		t.Fatal(err)
+	}
+	observer := &recordingObserver{}
+	m.SetObserver(observer)
+
+	sess, err := m.Create(ctx, CreateOptions{Prompt: "hello", IdempotencyKey: "k1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Create(ctx, CreateOptions{Prompt: "hello", IdempotencyKey: "k1"}); err != nil {
+		t.Fatal(err)
+	}
+	if observer.created != 1 {
+		t.Fatalf("created = %d, want 1 for a repeated create", observer.created)
+	}
+	if counts := m.StatusCounts(); counts[model.StatusPending] != 1 {
+		t.Fatalf("pending = %d, want 1", counts[model.StatusPending])
+	}
+
+	inst, ok := m.instance(sess.ID)
+	if !ok {
+		t.Fatal("created session is not registered")
+	}
+	m.finalize(inst, model.StatusCompleted, "done", "")
+
+	if len(observer.finished) != 1 || observer.finished[0] != model.StatusCompleted {
+		t.Fatalf("finished = %v, want one completed", observer.finished)
+	}
+	counts := m.StatusCounts()
+	if counts[model.StatusCompleted] != 1 || counts[model.StatusPending] != 0 {
+		t.Fatalf("counts = %v", counts)
+	}
+}

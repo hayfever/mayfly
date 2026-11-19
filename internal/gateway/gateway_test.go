@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -683,5 +684,64 @@ func TestSidecarTokensUsePerPluginKeys(t *testing.T) {
 	}
 	if _, err := VerifyToken(betaKey, resp.Dispatch.Token, TokenScope{SessionID: "s1", Plugin: "beta", Tool: "status"}, time.Now()); err == nil {
 		t.Fatal("alpha's call token verified with beta's key")
+	}
+}
+
+type recordingCallObserver struct {
+	calls []string
+}
+
+func (o *recordingCallObserver) ToolCall(tool, result string) {
+	o.calls = append(o.calls, tool+":"+result)
+}
+
+func TestObserverSeesCompletedAndDeniedCalls(t *testing.T) {
+	observer := &recordingCallObserver{}
+	g, _ := newTestGateway(t, Options{Observer: observer}, inlineTool(getTool, "alpha", "get", true))
+
+	if _, err := begin(g, "not_granted", 1, 1, `{}`); statusOf(err) != http.StatusForbidden {
+		t.Fatalf("ungranted tool error = %v", err)
+	}
+	if _, err := begin(g, getTool, 1, 2, `{}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Complete(context.Background(), "s1", CompleteRequest{Key: "s1/1/2", Content: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	// A ledger replay answers from the record and must not count again.
+	if _, err := begin(g, getTool, 1, 2, `{}`); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"not_granted:denied", getTool + ":ok"}
+	if len(observer.calls) != len(want) {
+		t.Fatalf("observed %v, want %v", observer.calls, want)
+	}
+	for i, call := range want {
+		if observer.calls[i] != call {
+			t.Fatalf("observed %v, want %v", observer.calls, want)
+		}
+	}
+}
+
+func TestObserverSeesRefusals(t *testing.T) {
+	manifests := func() []plugin.Manifest {
+		return []plugin.Manifest{{
+			Name:   "alpha",
+			Limits: plugin.Limits{Rate: &plugin.Rate{Requests: 1, Interval: "1m", Burst: 1}},
+		}}
+	}
+	observer := &recordingCallObserver{}
+	g, _ := newTestGateway(t, Options{Manifests: manifests, MaxInflight: 1, Observer: observer},
+		inlineTool(getTool, "alpha", "get", true))
+	if _, err := begin(g, getTool, 1, 1, `{}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := begin(g, getTool, 1, 2, `{}`); statusOf(err) != http.StatusTooManyRequests {
+		t.Fatalf("second begin error = %v", err)
+	}
+	want := []string{getTool + ":rate_limited"}
+	if len(observer.calls) != 1 || observer.calls[0] != want[0] {
+		t.Fatalf("observed %v, want %v", observer.calls, want)
 	}
 }
