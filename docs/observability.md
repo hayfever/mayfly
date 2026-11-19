@@ -38,6 +38,8 @@ A tool call that the gateway answers from the call ledger is a replay, not a new
 
 `mayfly_sessions_finished_total` counts the sessions this process saw finish. A session that a restart settles as failed, because its runtime never came back, appears in `mayfly_sessions` with state `failed` but not in the finished counter, because this process never created it.
 
+The registry also includes the standard Prometheus Go and process collectors. They publish `go_goroutines`, the `go_memstats_*` and `go_gc_*` series, `process_cpu_seconds_total`, `process_resident_memory_bytes`, and the other `process_*` series for the control-plane process. [loadtest.md](loadtest.md) reads `go_goroutines` and `process_resident_memory_bytes` to report runtime growth.
+
 ## Request logs
 
 Every request writes one line at info level with these fields:

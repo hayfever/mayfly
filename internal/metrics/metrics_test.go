@@ -206,6 +206,9 @@ func TestHandlerServesTextFormat(t *testing.T) {
 	if body := rec.Body.String(); !strings.Contains(body, "mayfly_build_info{") || !strings.Contains(body, `version="test"`) {
 		t.Fatalf("body does not expose the registry:\n%s", body)
 	}
+	if body := rec.Body.String(); !strings.Contains(body, "go_goroutines ") || !strings.Contains(body, "process_resident_memory_bytes ") {
+		t.Fatalf("body does not expose the runtime collectors:\n%s", body)
+	}
 	rec = httptest.NewRecorder()
 	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/metrics", nil))
 	if rec.Code != http.StatusMethodNotAllowed {

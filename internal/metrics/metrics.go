@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/hayfever/mayfly/internal/model"
@@ -135,6 +136,11 @@ func New(src Sources, build BuildInfo) *Metrics {
 	buildInfo.WithLabelValues(build.Version, build.Commit, build.Date, runtime.Version()).Set(1)
 
 	m.registry.MustRegister(
+		// The standard collectors expose go_goroutines, go_memstats_*, and
+		// process_* so a soak test can watch runtime growth without a
+		// separate profile endpoint.
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.sessionsCreated,
 		m.sessionsFinished,
 		m.queueAttempts,
