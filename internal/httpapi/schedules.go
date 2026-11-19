@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sort"
 
+	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/workflow"
 )
 
@@ -64,5 +65,17 @@ func (s *Server) runSchedule(w http.ResponseWriter, r *http.Request) {
 		s.writeScheduleError(w, name, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"job_id": jobID})
+	// A manual run uses a random delivery key, so it is never a duplicate.
+	// Read the accepted job back for the delivery key when the queue is
+	// reachable; the job is already durable, so a lookup failure must not
+	// turn an accepted run into an error.
+	job := acceptedJob{Accepted: true, JobID: jobID, Status: string(queue.StateQueued)}
+	if s.queue != nil {
+		if record, ok, err := s.queue.Get(r.Context(), jobID); err == nil && ok {
+			job.Delivery = record.Job.IdempotencyKey
+		} else if err != nil {
+			s.logger.Warn("read accepted schedule job", "job", jobID, "error", err)
+		}
+	}
+	writeJSON(w, http.StatusAccepted, job)
 }

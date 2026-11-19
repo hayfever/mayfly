@@ -310,17 +310,32 @@ func (m *Manager) Close(id, reason string) error {
 // the record store has no runtime to stop, so Delete removes what the previous
 // control plane left behind (a stray pod, supporting objects, and the journal)
 // and drops its record. That also settles a session adoption gave up on.
+//
+// Delete and adoption register under the same lock. The tombstone below makes
+// the outcome one of two: Delete removes a session that adoption already
+// registered, or adoption refuses to register a session Delete removed. A
+// retry in flight therefore cannot resurrect a deleted session.
 func (m *Manager) Delete(id string) error {
-	inst, ok := m.instance(id)
-	if !ok {
-		_, stored := m.historySession(id)
-		if !stored && !m.pendingAdoption(id) {
+	m.mu.Lock()
+	inst := m.sessions[id]
+	if inst == nil {
+		_, stored := m.history[id]
+		_, pending := m.adoptPending[id]
+		if !stored && !pending {
+			m.mu.Unlock()
 			return ErrNotFound
 		}
-		m.cleanupStored(id)
-		m.dropHistory(id)
+		m.deleted[id] = time.Now().UTC()
+		delete(m.adoptPending, id)
+		delete(m.history, id)
+		m.mu.Unlock()
+		m.deleteRecord(id)
+		m.cleanupLeftovers(id)
 		return nil
 	}
+	m.deleted[id] = time.Now().UTC()
+	m.mu.Unlock()
+
 	inst.mu.Lock()
 	already := inst.finalized
 	inst.mu.Unlock()
@@ -331,12 +346,19 @@ func (m *Manager) Delete(id string) error {
 	return nil
 }
 
-// cleanupStored removes a restored session this control plane does not run:
-// retries stop, its pods and supporting objects are deleted, and its journal
-// is dropped.
-func (m *Manager) cleanupStored(id string) {
-	m.clearAdoptPending(id)
-	m.cleanupLeftovers(id)
+// registerAdopted adds an instance that adoption rebuilt. It refuses an ID
+// that DELETE removed while the pass was reading the cluster, so the retry
+// cannot bring the session back.
+func (m *Manager) registerAdopted(inst *instance) bool {
+	id := inst.sess.ID
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, gone := m.deleted[id]; gone {
+		return false
+	}
+	m.sessions[id] = inst
+	m.tokenIndex[inst.tokenHash] = id
+	return true
 }
 
 // cleanupLeftovers removes the pods, supporting objects, and journal of a
@@ -822,10 +844,12 @@ func (m *Manager) adoptPods(ctx context.Context, pods []corev1.Pod, only map[str
 		if empty {
 			m.logger.Warn("adopt: session has no journal state; was the control-plane volume persisted?", "session", id)
 		}
-		m.mu.Lock()
-		m.sessions[id] = inst
-		m.tokenIndex[inst.tokenHash] = id
-		m.mu.Unlock()
+		if !m.registerAdopted(inst) {
+			// DELETE removed the session while this pass read its objects.
+			delete(live, id)
+			m.logger.Info("adopt: session was deleted during the pass", "session", id)
+			continue
+		}
 		m.registerGrant(inst)
 		m.hub.Create(id)
 		m.persistInstance(inst)
@@ -925,10 +949,12 @@ func (m *Manager) adoptPodless(ctx context.Context, id string, objs k8s.OrphanOb
 	if empty {
 		m.logger.Warn("adopt: session has no journal state; was the control-plane volume persisted?", "session", id)
 	}
-	m.mu.Lock()
-	m.sessions[id] = inst
-	m.tokenIndex[inst.tokenHash] = id
-	m.mu.Unlock()
+	if !m.registerAdopted(inst) {
+		// DELETE removed the session while this pass read its objects.
+		m.hub.Remove(id)
+		m.logger.Info("adopt: session was deleted during the pass", "session", id)
+		return nil, false
+	}
 	m.registerGrant(inst)
 	m.hub.Create(id)
 	m.persistInstance(inst)

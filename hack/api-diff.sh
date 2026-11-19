@@ -39,6 +39,17 @@ elif ! git show "$base:$schema" | cmp -s - "$schema"; then
   exit 1
 fi
 if ! git cat-file -e "$base:$spec" 2>/dev/null; then
+  # Before the first tag carries a spec there is no baseline to fail on, but
+  # the intended change must still be visible in the pull request. Report it
+  # against origin/main without failing: a pre-1.0 release may break a client
+  # when the PR lists the break.
+  if git rev-parse --verify --quiet "origin/main:$spec" >/dev/null; then
+    echo "api-diff: $base has no $spec; reporting changes against origin/main" >&2
+    go run "github.com/oasdiff/oasdiff@$oasdiff_version" breaking \
+      --color never \
+      "origin/main:$spec" "$spec" || true
+    exit 0
+  fi
   echo "api-diff: $base has no $spec; skipping the spec comparison" >&2
   exit 0
 fi

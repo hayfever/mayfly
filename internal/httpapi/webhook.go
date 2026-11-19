@@ -88,13 +88,3 @@ func (s *Server) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	writeAccepted(w, job, false)
 }
-
-func writeAccepted(w http.ResponseWriter, job queue.Job, duplicate bool) {
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"accepted":  true,
-		"duplicate": duplicate,
-		"job_id":    job.ID,
-		"delivery":  job.IdempotencyKey,
-		"status":    "queued",
-	})
-}
