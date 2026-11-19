@@ -114,6 +114,10 @@ For Bedrock on EKS, annotate `litellm.serviceAccount.annotations` with your IRSA
 | `config.queue.backend` | `bbolt` | `memory`, `bbolt`, or `redis`; see [docs/configuration.md](../../../docs/configuration.md#queue) |
 | `persistence.enabled` | true | Put `/var/lib/mayfly` (queue database, turn journal, local artifacts) on a PersistentVolume; disabling loses accepted work and in-flight turns across a control-plane restart |
 | `persistence.size` | `2Gi` | Volume size |
+| `metrics.enabled` | true | Serve Prometheus metrics; see [docs/observability.md](../../../docs/observability.md) |
+| `metrics.address` | empty | Separate metrics listen address, such as `:9090`; empty serves `/metrics` on the main port |
+| `metrics.prometheusAnnotations` | false | Add scrape annotations to the control-plane pod |
+| `metrics.serviceMonitor.enabled` | false | Create a Prometheus Operator `ServiceMonitor`; needs a bearer token Secret or an unauthenticated separate address |
 | `ingress.enabled` | false | Create an Ingress |
 | `controlPlane.resources` | small | Control-plane resources |
 | `litellm.enabled` | false | Deploy LiteLLM |

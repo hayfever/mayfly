@@ -28,6 +28,11 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/skills: {{ include (print $.Template.BasePath "/skills-configmap.yaml") . | sha256sum }}
         checksum/agents: {{ include (print $.Template.BasePath "/agents-configmap.yaml") . | sha256sum }}
+        {{- if .Values.metrics.prometheusAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: {{ if .Values.metrics.address }}{{ .Values.metrics.port | quote }}{{ else }}{{ .Values.service.port | quote }}{{ end }}
+        {{- end }}
         {{- with .Values.controlPlane.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -67,6 +72,10 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}
+            {{- if and .Values.metrics.enabled .Values.metrics.address }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+            {{- end }}
           securityContext:
             {{- toYaml .Values.controlPlane.securityContext | nindent 12 }}
           resources:

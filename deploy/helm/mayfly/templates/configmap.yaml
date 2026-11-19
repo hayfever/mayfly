@@ -26,6 +26,19 @@
 {{- if .Values.litellm.enabled -}}
 {{- $_ := set $config.llm "api_key_env" .Values.litellm.masterKeyEnv -}}
 {{- end -}}
+{{- if .Values.metrics.address -}}
+{{- if not (hasSuffix (printf ":%v" (int .Values.metrics.port)) .Values.metrics.address) -}}
+{{- fail "metrics.address must end with metrics.port" -}}
+{{- end -}}
+{{- end -}}
+{{- $metrics := dict "enabled" .Values.metrics.enabled -}}
+{{- if .Values.metrics.address -}}
+{{- $_ := set $metrics "address" .Values.metrics.address -}}
+{{- end -}}
+{{- if not (kindIs "invalid" .Values.metrics.requireAuth) -}}
+{{- $_ := set $metrics "require_auth" .Values.metrics.requireAuth -}}
+{{- end -}}
+{{- $_ := set $config.server "metrics" $metrics -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
