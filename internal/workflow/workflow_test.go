@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"github.com/hayfever/mayfly/internal/project"
 	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/session"
+	"github.com/hayfever/mayfly/internal/sources"
 	"github.com/hayfever/mayfly/internal/state"
 )
 
@@ -321,6 +323,9 @@ func TestHandleWritesArtifactAndTriggersOnlyOnChange(t *testing.T) {
 	if artifact.Totals.Pages != 2 || artifact.Totals.New != 2 {
 		t.Fatalf("totals = %+v", artifact.Totals)
 	}
+	if artifact.Version != sources.FormatVersion {
+		t.Fatalf("artifact version = %d, want %d", artifact.Version, sources.FormatVersion)
+	}
 
 	// Second run: pricing changed, changelog unchanged.
 	run()
@@ -473,5 +478,50 @@ func TestBudgetDiffTruncatesPerDocumentAndOverall(t *testing.T) {
 	}
 	if got := budgetDiff("", &budget); got != "" {
 		t.Fatalf("empty diff = %q", got)
+	}
+}
+
+// TestLoadArtifactFormatVersions covers an artifact written before the stamp
+// existed and one written by a newer build.
+func TestLoadArtifactFormatVersions(t *testing.T) {
+	ctx := context.Background()
+	store := &memArtifacts{values: map[string][]byte{}}
+	runner := &Runner{store: store, maxBytes: 1 << 20}
+	key := runKey("watch", "run-1")
+	write := func(version int) {
+		t.Helper()
+		payload := runArtifact{
+			Version:   version,
+			RunID:     "run-1",
+			Schedule:  "watch",
+			Source:    "pages",
+			Documents: []sources.Document{{Source: "pages", Name: "a", Status: "new"}},
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Put(ctx, key, bytes.NewReader(raw), int64(len(raw)), "", "application/json"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(0)
+	result, _, _, found, err := runner.loadArtifact(ctx, key, "watch", "run-1")
+	if err != nil || !found {
+		t.Fatalf("legacy artifact: found=%v err=%v", found, err)
+	}
+	if len(result.Documents) != 1 {
+		t.Fatalf("documents = %+v", result.Documents)
+	}
+
+	write(sources.FormatVersion)
+	if _, _, _, _, err := runner.loadArtifact(ctx, key, "watch", "run-1"); err != nil {
+		t.Fatalf("current artifact: %v", err)
+	}
+
+	write(sources.FormatVersion + 1)
+	if _, _, _, _, err := runner.loadArtifact(ctx, key, "watch", "run-1"); err == nil || !strings.Contains(err.Error(), "format version") {
+		t.Fatalf("newer artifact error = %v, want a format version error", err)
 	}
 }

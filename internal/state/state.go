@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -21,7 +22,15 @@ type Store interface {
 	Close() error
 }
 
-var slotsBucket = []byte("slots")
+// formatVersion is the on-disk layout this build reads and writes. Version 1
+// is the first stamped layout and matches what v0.1.0 wrote.
+const formatVersion = 1
+
+var (
+	slotsBucket = []byte("slots")
+	metaBucket  = []byte("meta")
+	keyFormat   = []byte("format_version")
+)
 
 // New opens the watermark store. An empty path keeps the watermark in memory.
 func New(path string) (Store, error) {
@@ -40,13 +49,49 @@ func New(path string) (Store, error) {
 		return nil, fmt.Errorf("open state %s: %w", abs, err)
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(slotsBucket)
-		return err
+		if _, err := tx.CreateBucketIfNotExists(slotsBucket); err != nil {
+			return err
+		}
+		return checkFormat(tx)
 	}); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("create state bucket: %w", err)
 	}
 	return &boltStore{db: db}, nil
+}
+
+// checkFormat stamps a database written before the stamp existed as version 1
+// and rejects a database written by a newer build. An unstamped database holds
+// watermarks in the version 1 layout, so it loads unchanged.
+func checkFormat(tx *bolt.Tx) error {
+	meta, err := tx.CreateBucketIfNotExists(metaBucket)
+	if err != nil {
+		return err
+	}
+	raw := meta.Get(keyFormat)
+	if raw == nil {
+		return meta.Put(keyFormat, []byte(strconv.Itoa(formatVersion)))
+	}
+	stored, err := strconv.Atoi(string(raw))
+	if err != nil {
+		return fmt.Errorf("state format version %q is not a number", raw)
+	}
+	if stored > formatVersion {
+		return fmt.Errorf("state format version %d is newer than this build reads (%d); upgrade mayflyd", stored, formatVersion)
+	}
+	return migrateFormat(stored)
+}
+
+// migrateFormat moves a store written by an older build to formatVersion. Each
+// case rewrites one version's difference. Version 1 is the first stamped
+// layout, so there is nothing to rewrite yet; a later version adds its case
+// before raising formatVersion.
+func migrateFormat(from int) error {
+	switch from {
+	case 1:
+		return nil
+	}
+	return fmt.Errorf("state format version %d has no migration path", from)
 }
 
 type boltStore struct {
