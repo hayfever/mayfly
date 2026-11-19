@@ -2,6 +2,16 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
+## [0.3.0] - Unreleased
+
+### Added
+
+- Configurable webhook body limit. `server.webhook_max_body_bytes` sets the default at 1 MiB, and `triggers[].max_body_bytes` overrides it for one trigger. A body over the limit returns `413 payload_too_large` before signature verification, so it spends no rate-limit token. The chart exposes both keys under `config`.
+
+### Changed
+
+- `Trigger.kind` and the `kind` field of a `user_message` event are documented as open strings. Clients must ignore a value this build does not know.
+
 ## [0.2.0] - 2026-11-19
 
 Operators moving from 0.1.x or a release candidate should read

@@ -90,6 +90,9 @@ config:
     tokens: []
     attach_ticket_ttl: 60s
     max_body_bytes: 4194304
+    # Webhook bodies carry one signed event. A trigger lowers or raises this
+    # with its own max_body_bytes.
+    webhook_max_body_bytes: 1048576
   sessions:
     namespace: "" # defaults to the release namespace
     default_ttl: 30m
