@@ -1017,7 +1017,10 @@ components:
       properties:
         kind:
           type: string
-          description: "Trigger kind: api, generic, github, slack, or datadog."
+          description: >
+            Trigger kind. Known values are `api`, `generic`, `github`,
+            `slack`, and `datadog`. Treat the field as open: ignore a value
+            that this build does not know.
         name:
           type: string
         event:
