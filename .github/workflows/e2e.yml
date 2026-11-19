@@ -74,19 +74,33 @@ jobs:
           # sha256 of k3d-linux-amd64 from the release's checksums.txt.
           echo "06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0  /tmp/k3d" | sha256sum -c -
           sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
+      # The chart and images of the last release are private GHCR packages.
+      - name: log in to ghcr.io
+        run: echo "${{ github.token }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: previous release
         id: previous
+        env:
+          OWNER: ${{ github.repository_owner }}
         run: |
-          tag="$(git -c versionsort.suffix=-rc tag --list 'v*' --sort=-v:refname | head -n1)"
+          # A tag whose release workflow failed (for example at the image scan)
+          # has no chart or images. The chart is pushed only after every image
+          # is tagged and signed, so the newest tag with a chart is the last
+          # published release.
+          owner="${OWNER,,}"
+          tag=""
+          for t in $(git -c versionsort.suffix=-rc tag --list 'v*' --sort=-v:refname); do
+            if helm show chart "oci://ghcr.io/${owner}/charts/mayfly" --version "${t#v}" >/dev/null 2>&1; then
+              tag="$t"
+              break
+            fi
+            echo "skipping $t: no published chart"
+          done
           if [[ -z "$tag" ]]; then
-            echo "no v* release tag; the upgrade job needs a published release" >&2
+            echo "no published v* release; the upgrade job needs one" >&2
             exit 1
           fi
           echo "testing the upgrade from $tag"
           echo "from=${tag#v}" >> "$GITHUB_OUTPUT"
-      # The chart and images of the last release are private GHCR packages.
-      - name: log in to ghcr.io
-        run: echo "${{ github.token }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: release under test
         env:
           E2E_ARTIFACTS: ${{ runner.temp }}/e2e
