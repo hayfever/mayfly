@@ -275,6 +275,11 @@ func (s *Server) recoverPanics(next http.Handler) http.Handler {
 		defer func() {
 			if rec := recover(); rec != nil {
 				s.logger.Error("panic serving request", "path", r.URL.Path, "panic", rec)
+				// The runtime protocol keeps its plain body and status.
+				if strings.HasPrefix(r.URL.Path, "/internal/") {
+					http.Error(w, "internal server error", http.StatusInternalServerError)
+					return
+				}
 				writeError(w, http.StatusInternalServerError, codeInternal, "internal server error")
 			}
 		}()
