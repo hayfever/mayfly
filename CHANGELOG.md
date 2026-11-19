@@ -2,7 +2,7 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 2026-11-19
 
 Operators moving from 0.1.x or a release candidate should read
 [docs/migrating-to-0.2.md](docs/migrating-to-0.2.md).
@@ -49,6 +49,9 @@ Operators moving from 0.1.x or a release candidate should read
 
 ### Fixed
 
+- [docs/loadtest.md](docs/loadtest.md) no longer presents `e2e/values.yaml` as a load test configuration. It lists the session timeouts that complete stub sessions and the volume attach delay on cloud providers.
+- Images are built with `golang.org/x/net` 0.62.0 (CVE-2026-78661) and the agent image ships npm 12.2.3 (undici and brace-expansion CVEs).
+- The release workflow signs the Helm chart by digest.
 - The plugin shim drops readiness as soon as a child request fails, so `/readyz` no longer passes after the child has exited.
 - Adoption reports the current attempt count and the correct singular or plural in the failure message. `DELETE` is safe against an adoption retry in flight.
 
