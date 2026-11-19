@@ -345,6 +345,18 @@ func (w *errorShapedWriter) Flush() {
 	}
 }
 
+// ReadFrom keeps an artifact download on the underlying writer's fast path
+// instead of copying through an extra buffer.
+func (w *errorShapedWriter) ReadFrom(r io.Reader) (int64, error) {
+	if w.shaped {
+		return io.Copy(io.Discard, r)
+	}
+	if readerFrom, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		return readerFrom.ReadFrom(r)
+	}
+	return io.Copy(struct{ io.Writer }{w}, r)
+}
+
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
