@@ -827,7 +827,7 @@ components:
         details:
           type: object
           additionalProperties: true
-          description: Code-specific context, such as `session_id`.
+          description: Code-specific context, such as `session_id`. Every error carries `request_id`, which matches the `X-Request-Id` response header.
     CreateSessionRequest:
       type: object
       required: [prompt]

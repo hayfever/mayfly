@@ -22,6 +22,7 @@ import (
 	"github.com/hayfever/mayfly/internal/hub"
 	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/k8s"
+	"github.com/hayfever/mayfly/internal/metrics"
 	"github.com/hayfever/mayfly/internal/plugin"
 	"github.com/hayfever/mayfly/internal/pluginsvc"
 	"github.com/hayfever/mayfly/internal/project"
@@ -166,6 +167,20 @@ func main() {
 	// Records load at Start, so the store is attached before it.
 	mgr.SetRecords(records)
 
+	// The registry reads live state at scrape time, so the gauges are never
+	// stale and no polling goroutine is needed.
+	registry := metrics.New(metrics.Sources{
+		Sessions: mgr.StatusCounts,
+		Queue: func(ctx context.Context) (metrics.QueueDepth, error) {
+			depth, err := queueStore.Stats(ctx)
+			if err != nil {
+				return metrics.QueueDepth{}, err
+			}
+			return metrics.QueueDepth{Pending: depth.Pending, Leased: depth.Leased, Dead: depth.Dead}, nil
+		},
+	}, metrics.BuildInfo{Version: version.Version, Commit: version.Commit, Date: version.Date})
+	mgr.SetObserver(registry)
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
@@ -207,6 +222,7 @@ func main() {
 		MaxInflight: cfg.Plugins.MaxInflightCalls,
 		Audit:       audit,
 		Logger:      logger,
+		Observer:    registry,
 	})
 	// Grant registration happens at session create and adoption, so the
 	// manager needs the gateway before it starts.
@@ -242,7 +258,7 @@ func main() {
 	if concurrency <= 0 {
 		concurrency = 8
 	}
-	handler := queue.Composite(queue.SessionHandler(mgr.Create), workflowRunner.Handle)
+	handler := instrumentQueue(registry, queue.Composite(queue.SessionHandler(mgr.Create), workflowRunner.Handle))
 	worker := queue.NewWorker(queueStore, handler, concurrency, mgr.FreeSlots, cfg.Queue.PollInterval.Std(), logger)
 	worker.SetTimeout(queue.KindSource, cfg.Sources.JobTimeout.Std())
 	workerDone := make(chan struct{})
@@ -251,14 +267,16 @@ func main() {
 		worker.Run(ctx)
 	}()
 
+	api := httpapi.New(cfg, mgr, queueStore, logger,
+		httpapi.WithBroker(upstreamBroker),
+		httpapi.WithSchedules(scheduleAPI),
+		httpapi.WithGateway(toolGateway),
+		httpapi.WithReadyCheck(readyCheck),
+		httpapi.WithMetrics(registry),
+	)
 	server := &http.Server{
-		Addr: cfg.Server.Addr,
-		Handler: httpapi.New(cfg, mgr, queueStore, logger,
-			httpapi.WithBroker(upstreamBroker),
-			httpapi.WithSchedules(scheduleAPI),
-			httpapi.WithGateway(toolGateway),
-			httpapi.WithReadyCheck(readyCheck),
-		).Handler(),
+		Addr:              cfg.Server.Addr,
+		Handler:           api.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -277,6 +295,25 @@ func main() {
 		}
 	}()
 
+	// A separate metrics address keeps the endpoint off the public listener.
+	// With no address, /metrics is served on the main listener instead.
+	var metricsServer *http.Server
+	if cfg.Server.MetricsEnabled() && cfg.Server.Metrics.Address != "" {
+		metricsServer = &http.Server{
+			Addr:              cfg.Server.Metrics.Address,
+			Handler:           api.MetricsHandler(),
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
+		go func() {
+			logger.Info("metrics listening", "addr", cfg.Server.Metrics.Address, "require_auth", cfg.Server.MetricsRequireAuth())
+			if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("metrics server", "error", err)
+				stop()
+			}
+		}()
+	}
+
 	<-ctx.Done()
 	logger.Info("shutting down")
 	// One budget covers the whole stop sequence, and each stage gets its own
@@ -289,6 +326,9 @@ func main() {
 
 	httpCtx, cancelHTTP := context.WithDeadline(context.Background(), deadline.Add(-(workerShare + managerShare)))
 	_ = server.Shutdown(httpCtx)
+	if metricsServer != nil {
+		_ = metricsServer.Shutdown(httpCtx)
+	}
 	cancelHTTP()
 
 	workerCtx, cancelWorker := context.WithDeadline(context.Background(), deadline.Add(-managerShare))
@@ -367,6 +407,24 @@ func startServices(ctx context.Context, cfg *config.Config, kube *k8s.Client, mg
 		return local.ServiceURL, nil
 	default:
 		return nil, nil
+	}
+}
+
+// instrumentQueue counts one queue job attempt per handler run. The worker
+// owns retries, so this decorator sees every attempt without changing the
+// queue.
+func instrumentQueue(registry *metrics.Metrics, next queue.Handler) queue.Handler {
+	return func(ctx context.Context, job queue.Job) (queue.Result, error) {
+		result, err := next(ctx, job)
+		switch {
+		case err == nil:
+			registry.QueueJobAttempt(metrics.AttemptSucceeded)
+		case errors.Is(err, queue.ErrRetryLater):
+			registry.QueueJobAttempt(metrics.AttemptRetryLater)
+		default:
+			registry.QueueJobAttempt(metrics.AttemptFailed)
+		}
+		return result, err
 	}
 }
 

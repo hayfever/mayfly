@@ -163,6 +163,7 @@ type Manager struct {
 	defaultAgent string
 	stateDir     string
 	gateway      GrantRegistry
+	observer     atomic.Pointer[Observer]
 
 	// records keeps session records and the artifact index across restarts.
 	records RecordStore
@@ -202,6 +203,31 @@ type GrantRegistry interface {
 // SetGateway attaches the tool gateway. Call it before Start so adopted
 // sessions get their grants.
 func (m *Manager) SetGateway(g GrantRegistry) { m.gateway = g }
+
+// Observer receives session lifecycle transitions for metrics. The manager
+// calls it synchronously on the create and finalize paths, so an
+// implementation must not block.
+type Observer interface {
+	// SessionCreated reports one accepted session.
+	SessionCreated()
+	// SessionFinished reports one session that reached a terminal status.
+	SessionFinished(status model.SessionStatus)
+}
+
+// SetObserver attaches the lifecycle observer. Call it before Start.
+func (m *Manager) SetObserver(o Observer) { m.observer.Store(&o) }
+
+func (m *Manager) notifyCreated() {
+	if o := m.observer.Load(); o != nil && *o != nil {
+		(*o).SessionCreated()
+	}
+}
+
+func (m *Manager) notifyFinished(status model.SessionStatus) {
+	if o := m.observer.Load(); o != nil && *o != nil {
+		(*o).SessionFinished(status)
+	}
+}
 
 // New builds a manager. kube may be nil for the local backend.
 func New(cfg *config.Config, bundle *project.Bundle, store artifact.Store, h *hub.Hub, js journal.Durable, r runner.Runner, kube *k8s.Client, logger *slog.Logger) (*Manager, error) {
@@ -619,6 +645,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 	m.registerGrant(inst)
 	m.hub.Create(id)
 	m.persistInstance(inst)
+	m.notifyCreated()
 	m.appendEvent(inst, model.Event{
 		Type:  model.EventUserMessage,
 		Actor: "trigger",
@@ -665,6 +692,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		m.persistInstance(inst)
 		m.hub.Append(id, model.Event{Type: model.EventError, Actor: "mayfly", Text: "Failed to start session: " + err.Error()})
 		m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session failed.", Data: model.StatusData{Status: model.StatusFailed}})
+		m.notifyFinished(model.StatusFailed)
 		snapshot := m.copySession(inst)
 		return &snapshot, err
 	}
@@ -1316,6 +1344,37 @@ func (m *Manager) List() []model.Session {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out
+}
+
+// StatusCounts returns the number of sessions in each status, including
+// finished sessions restored from the record store. A live instance counts
+// once, by its own status.
+func (m *Manager) StatusCounts() map[model.SessionStatus]int {
+	m.mu.Lock()
+	insts := make([]*instance, 0, len(m.sessions))
+	for _, inst := range m.sessions {
+		insts = append(insts, inst)
+	}
+	stored := make([]model.SessionStatus, 0, len(m.history))
+	for id, sess := range m.history {
+		if _, live := m.sessions[id]; live {
+			continue
+		}
+		stored = append(stored, sess.Status)
+	}
+	m.mu.Unlock()
+
+	counts := make(map[model.SessionStatus]int, len(insts)+len(stored))
+	for _, inst := range insts {
+		inst.mu.Lock()
+		status := inst.sess.Status
+		inst.mu.Unlock()
+		counts[status]++
+	}
+	for _, status := range stored {
+		counts[status]++
+	}
+	return counts
 }
 
 // done reports whether the session has finished.

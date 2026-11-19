@@ -90,7 +90,38 @@ type ServerConfig struct {
 	// ShutdownBudget bounds the whole stop sequence: HTTP drain, queue worker
 	// drain, and session manager shutdown. It must fit inside the pod's
 	// terminationGracePeriodSeconds with margin.
-	ShutdownBudget Duration `yaml:"shutdown_budget"`
+	ShutdownBudget Duration      `yaml:"shutdown_budget"`
+	Metrics        MetricsConfig `yaml:"metrics"`
+}
+
+// MetricsConfig covers the Prometheus endpoint.
+type MetricsConfig struct {
+	// Enabled serves the metrics endpoint. A nil value means enabled.
+	Enabled *bool `yaml:"enabled"`
+	// Address serves metrics on a listener of its own. Empty serves /metrics
+	// on the main HTTP listener.
+	Address string `yaml:"address"`
+	// RequireAuth demands a token with the admin scope. A nil value means
+	// required on the main listener and no auth on a separate address.
+	RequireAuth *bool `yaml:"require_auth"`
+}
+
+// MetricsEnabled reports whether the metrics endpoint is served.
+func (c ServerConfig) MetricsEnabled() bool {
+	return Bool(c.Metrics.Enabled, true)
+}
+
+// MetricsOnMainPort reports whether the main HTTP listener serves /metrics.
+// A non-empty metrics address serves the endpoint on its own listener instead.
+func (c ServerConfig) MetricsOnMainPort() bool {
+	return c.MetricsEnabled() && c.Metrics.Address == ""
+}
+
+// MetricsRequireAuth reports whether the metrics endpoint needs a token with
+// the admin scope. An unset value means required on the main listener, which
+// is the public API, and not required on a separate address.
+func (c ServerConfig) MetricsRequireAuth() bool {
+	return Bool(c.Metrics.RequireAuth, c.MetricsOnMainPort())
 }
 
 // DefaultShutdownBudget leaves five seconds of the thirty-second default pod
@@ -771,6 +802,9 @@ func (c *Config) Validate() error {
 	}
 	if err := c.Server.validateTokens(); err != nil {
 		return err
+	}
+	if c.Server.MetricsEnabled() && c.Server.Metrics.Address != "" && c.Server.Metrics.Address == c.Server.Addr {
+		return fmt.Errorf("server.metrics.address must differ from server.addr")
 	}
 	if c.Sessions.DefaultTTL.Std() <= 0 {
 		return fmt.Errorf("sessions.default_ttl must be positive")

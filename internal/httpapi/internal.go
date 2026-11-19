@@ -12,6 +12,7 @@ import (
 
 	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/journal"
+	"github.com/hayfever/mayfly/internal/metrics"
 	"github.com/hayfever/mayfly/internal/model"
 	"github.com/hayfever/mayfly/internal/session"
 )
@@ -346,7 +347,16 @@ func (s *Server) internalLLM(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	s.broker.ServeLLM(w, r, sess.Model)
+	start := time.Now()
+	rec := &requestRecorder{ResponseWriter: w}
+	s.broker.ServeLLM(rec, r, sess.Model)
+	// The broker writes the upstream status, so the result comes from the
+	// response it produced. A stream counts until its last byte.
+	result := metrics.ResultOK
+	if rec.status >= http.StatusBadRequest {
+		result = metrics.ResultError
+	}
+	s.metrics.LLMRequest(sess.Model, result, time.Since(start))
 }
 
 func (s *Server) internalMCP(w http.ResponseWriter, r *http.Request) {

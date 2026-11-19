@@ -18,21 +18,6 @@ const maxRequestIDLength = 64
 
 type requestIDKey struct{}
 
-// withRequestID echoes the caller's request id or generates one, then exposes
-// it in the request context and the X-Request-Id response header.
-func (s *Server) withRequestID(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.Header.Get("X-Request-Id")
-		if !validRequestID(id) {
-			id = newRequestID()
-		}
-		if id != "" {
-			w.Header().Set("X-Request-Id", id)
-		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDKey{}, id)))
-	})
-}
-
 // validRequestID accepts a short printable token so a request id cannot inject
 // into a log line.
 func validRequestID(id string) bool {
@@ -60,7 +45,7 @@ func newRequestID() string {
 	return hex.EncodeToString(buf)
 }
 
-// requestID returns the id that withRequestID attached, or an empty string
+// requestID returns the id that observeRequests attached, or an empty string
 // when the middleware is absent.
 func requestID(r *http.Request) string {
 	id, _ := r.Context().Value(requestIDKey{}).(string)

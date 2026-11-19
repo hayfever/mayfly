@@ -153,7 +153,7 @@ func TestAuditLineForMutatingRequest(t *testing.T) {
 		scope:   config.ScopeSchedulesWrite,
 		handler: func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusAccepted) },
 	}))
-	handler := s.withRequestID(mux)
+	handler := s.observeRequests(mux)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/schedules/nightly/run", nil)
 	req.Header.Set("Authorization", "Bearer ci-secret-value")
@@ -202,7 +202,7 @@ func TestAuditLineForForbiddenRequest(t *testing.T) {
 		scope:   config.ScopeSessionsWrite,
 		handler: func(http.ResponseWriter, *http.Request) { t.Fatal("handler ran without the scope") },
 	}))
-	rec := serve(t, s.withRequestID(mux), http.MethodDelete, "/api/v1/sessions/sess-7", "reader-secret")
+	rec := serve(t, s.observeRequests(mux), http.MethodDelete, "/api/v1/sessions/sess-7", "reader-secret")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -227,7 +227,7 @@ func TestAuditSkipsReadRequests(t *testing.T) {
 		scope:   config.ScopeQueueRead,
 		handler: func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) },
 	}))
-	if rec := serve(t, s.withRequestID(mux), http.MethodGet, "/api/v1/queue", "reader-secret"); rec.Code != http.StatusNoContent {
+	if rec := serve(t, s.observeRequests(mux), http.MethodGet, "/api/v1/queue", "reader-secret"); rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	if lines := auditLines(t, &buf); len(lines) != 0 {
@@ -249,7 +249,7 @@ func TestAuditTargetFromHandler(t *testing.T) {
 			w.WriteHeader(http.StatusCreated)
 		},
 	})
-	if rec := serve(t, s.withRequestID(handler), http.MethodPost, "/api/v1/sessions", "writer-secret"); rec.Code != http.StatusCreated {
+	if rec := serve(t, s.observeRequests(handler), http.MethodPost, "/api/v1/sessions", "writer-secret"); rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	lines := auditLines(t, &buf)
@@ -260,7 +260,7 @@ func TestAuditTargetFromHandler(t *testing.T) {
 
 func TestRequestIDHandling(t *testing.T) {
 	s := scopeServer(t)
-	handler := s.withRequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := s.observeRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Request-Id", requestID(r))
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -337,6 +337,10 @@ func auditLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
 		var event map[string]any
 		if err := json.Unmarshal([]byte(raw), &event); err != nil {
 			t.Fatalf("decode log line %q: %v", raw, err)
+		}
+		if event["msg"] != "audit" {
+			// The request log shares this buffer at info level.
+			continue
 		}
 		out = append(out, event)
 	}

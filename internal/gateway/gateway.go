@@ -116,6 +116,32 @@ type Options struct {
 	Audit       *Audit
 	Logger      *slog.Logger
 	Now         func() time.Time
+	// Observer records every finished or refused call. A nil observer drops
+	// the notifications.
+	Observer CallObserver
+}
+
+// CallObserver receives one notification per finished or refused tool call.
+// The gateway calls it on the request path, so an implementation must not
+// block.
+type CallObserver interface {
+	ToolCall(tool, result string)
+}
+
+// Results the gateway reports to a CallObserver.
+const (
+	CallOK          = "ok"
+	CallError       = "error"
+	CallInterrupted = "interrupted"
+	CallDenied      = "denied"
+	CallRateLimited = "rate_limited"
+	CallBusy        = "busy"
+)
+
+func (g *Gateway) observeCall(tool, result string) {
+	if g.opts.Observer != nil {
+		g.opts.Observer.ToolCall(tool, result)
+	}
 }
 
 // Gateway is the control plane's tool gateway.
@@ -376,6 +402,7 @@ func (g *Gateway) Begin(ctx context.Context, session string, req BeginRequest) (
 		// fixed table; resolve it against the entry before refusing.
 		tool, ok = g.wildcardTool(ctx, grant, req.Tool)
 		if !ok {
+			g.observeCall(req.Tool, CallDenied)
 			return BeginResponse{}, errf(http.StatusForbidden, "tool %q is not granted to this session", req.Tool)
 		}
 	}
@@ -459,6 +486,7 @@ func (g *Gateway) begin(ctx context.Context, grant Grant, session string, req Be
 
 	limiter := g.limits.limiter(session, tool.Owner, g.rateFor(tool.Owner))
 	if !limiter.Allow() {
+		g.observeCall(tool.Name, CallRateLimited)
 		return BeginResponse{}, &Error{
 			Status:     http.StatusTooManyRequests,
 			Message:    fmt.Sprintf("plugin %q is rate limited", tool.Owner),
@@ -467,6 +495,7 @@ func (g *Gateway) begin(ctx context.Context, grant Grant, session string, req Be
 	}
 	now := g.now()
 	if !g.limits.reserve(key, now, now.Add(tool.Timeout)) {
+		g.observeCall(tool.Name, CallBusy)
 		return BeginResponse{}, errf(http.StatusServiceUnavailable, "too many tool calls are in flight")
 	}
 	rec, created, err := g.ledger.Begin(ctx, journal.Call{
@@ -666,6 +695,18 @@ func (g *Gateway) auditDone(ctx context.Context, grant Grant, tool GrantTool, re
 		Replayed:    replayed,
 		Interrupted: rec.Interrupted,
 	})
+	if replayed {
+		// A ledger replay answers the runtime without running the call again.
+		return
+	}
+	result := CallOK
+	switch {
+	case rec.Interrupted:
+		result = CallInterrupted
+	case rec.IsError:
+		result = CallError
+	}
+	g.observeCall(tool.Name, result)
 }
 
 // GrantFor builds one session's grant from its runtime config. Plugin tools

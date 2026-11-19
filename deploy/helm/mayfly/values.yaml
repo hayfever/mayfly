@@ -32,6 +32,32 @@ service:
   nodePort: null
   annotations: {}
 
+# Prometheus metrics. The endpoint is enabled on the main HTTP port by default
+# and needs a token with the admin scope there. Set metrics.address to serve it
+# on a listener of its own instead, which has no auth unless metrics.requireAuth.
+metrics:
+  enabled: true
+  # Example: ":9090". Must end in ":<metrics.port>".
+  address: ""
+  port: 9090
+  # Empty means required on the main port and not required on a separate
+  # address.
+  requireAuth: null
+  # prometheus.io/scrape annotations on the control-plane pod.
+  prometheusAnnotations: false
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels for the ServiceMonitor, such as the selector your
+    # Prometheus instance uses.
+    labels: {}
+    namespace: ""
+    # Bearer token Secret for a scrape of an authenticated endpoint.
+    bearerTokenSecret:
+      name: ""
+      key: ""
+
 ingress:
   enabled: false
   className: ""
