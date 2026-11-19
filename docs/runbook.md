@@ -196,7 +196,7 @@ A session is stuck when its status stays `pending` or `running` and the thread s
 
 ```bash
 curl -s -H "Authorization: Bearer $MAYFLY_API_TOKEN" \
-  'http://localhost:8080/api/v1/sessions/<id>' | jq '.session | {status, error, pod_name, created_at}'
+  'http://localhost:8080/api/v1/sessions/<id>' | jq '.session | {status, error, created_at}'
 curl -s -H "Authorization: Bearer $MAYFLY_API_TOKEN" \
   'http://localhost:8080/api/v1/sessions/<id>/events?after=0' | jq '.events[-5:]'
 ```

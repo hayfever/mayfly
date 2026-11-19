@@ -13,7 +13,12 @@ info:
     with the runtime image. It is not part of this API promise.
 
     Every failed request to `/api/v1` or `/hooks/{name}` returns the
-    `Error` envelope with a stable `error.code`.
+    `Error` envelope with a stable `error.code`. An `/api/v1` request body
+    with a field this build does not know is a `400 invalid_request`; a client
+    must not send an option it expects the control plane to ignore.
+
+    Every endpoint that accepts queued work answers `202` with the same
+    accepted-job object: `Accepted`.
 
     List routes return one `items` array and an opaque `next_cursor`. Send the
     cursor back as the `cursor` query parameter. The last page omits
@@ -235,8 +240,11 @@ paths:
       operationId: deleteSession
       summary: Force-delete a session
       description: >
-        Stops the runtime, marks the session failed, and keeps the record until
-        `sessions.retention` expires.
+        Stops the runtime and marks the session failed. A live session keeps
+        its record until `sessions.retention` expires; a session restored from
+        the record store is removed at once. Safe while an adoption retry is
+        in flight: the retry cannot register the session again after the
+        delete.
       tags: [sessions]
       security:
         - bearerAuth: [sessions:write]
@@ -310,6 +318,7 @@ paths:
             schema:
               type: object
               required: [text]
+              additionalProperties: false
               properties:
                 text:
                   type: string
@@ -353,6 +362,7 @@ paths:
           application/json:
             schema:
               type: object
+              additionalProperties: false
               properties:
                 reason:
                   type: string
@@ -393,6 +403,7 @@ paths:
           application/json:
             schema:
               type: object
+              additionalProperties: false
               properties:
                 actor:
                   type: string
@@ -546,11 +557,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [job_id]
-                properties:
-                  job_id:
-                    type: string
+                $ref: "#/components/schemas/Accepted"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -665,13 +672,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [retried, id]
-                properties:
-                  retried:
-                    const: true
-                  id:
-                    type: string
+                $ref: "#/components/schemas/Accepted"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -836,6 +837,8 @@ components:
     CreateSessionRequest:
       type: object
       required: [prompt]
+      additionalProperties: false
+      description: An unknown field returns `400 invalid_request`.
       properties:
         prompt:
           type: string
@@ -860,6 +863,10 @@ components:
             type: string
     Session:
       type: object
+      description: >
+        The public session record. The runtime backend, the pod name, and the
+        artifact store URI are control-plane internals and are not part of
+        this object.
       required:
         - id
         - title
@@ -869,7 +876,6 @@ components:
         - harness
         - model
         - trigger
-        - backend
         - ttl_seconds
         - created_at
         - expires_at
@@ -905,10 +911,6 @@ components:
             type: string
         trigger:
           $ref: "#/components/schemas/Trigger"
-        backend:
-          type: string
-        pod_name:
-          type: string
         ttl_seconds:
           type: integer
         created_at:
@@ -938,7 +940,10 @@ components:
       properties:
         kind:
           type: string
-          enum: [api, generic, github, slack, datadog]
+          description: >
+            Trigger kind. Known values are `api`, `generic`, `github`,
+            `slack`, `datadog`, and `adopted` (a session recovered after a
+            control-plane restart). Treat the field as open.
         name:
           type: string
         event:
@@ -951,11 +956,12 @@ components:
           type: string
     Artifact:
       type: object
-      required: [key, uri, size, sha256, created_at, partial]
+      description: >
+        Metadata of the stored bundle. Download it with
+        `GET /api/v1/sessions/{id}/artifact`; the store URI stays internal.
+      required: [key, size, sha256, created_at, partial]
       properties:
         key:
-          type: string
-        uri:
           type: string
         size:
           type: integer
@@ -983,17 +989,14 @@ components:
           format: date-time
         type:
           type: string
-          enum:
-            - user_message
-            - assistant_message
-            - assistant_delta
-            - tool_call
-            - tool_result
-            - status
-            - error
-            - system
-            - artifact
-            - control
+          description: |
+            Event type. The known types are `user_message`,
+            `assistant_message`, `assistant_delta`, `tool_call`,
+            `tool_result`, `status`, `error`, `system`, `artifact`, and
+            `control`. The list is open: a new event type and a new optional
+            payload field are additive changes, and a client must ignore an
+            unknown type instead of rejecting the event. A rename or a removal
+            is breaking. docs/events.md lists each known type and its payload.
         actor:
           type: string
         text:
@@ -1222,6 +1225,12 @@ components:
           type: string
     Accepted:
       type: object
+      description: >
+        The one `202` body for an endpoint that accepted queued work: a
+        webhook delivery, a manual schedule run, or a dead-job retry.
+        `job_id` is the versioned job id from the job envelope, `delivery` is
+        its idempotency key, and `status` is the initial queue state. A new
+        optional field here is additive; a rename or a removal is breaking.
       required: [accepted, duplicate, job_id, status]
       properties:
         accepted:

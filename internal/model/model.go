@@ -30,6 +30,8 @@ type TriggerInfo struct {
 }
 
 // ArtifactInfo describes an exported session bundle in the configured store.
+// URI is the store location; the HTTP API exposes the bundle through its
+// download route and keeps URI internal.
 type ArtifactInfo struct {
 	Key       string    `json:"key"`
 	URI       string    `json:"uri"`
@@ -42,17 +44,19 @@ type ArtifactInfo struct {
 // Session is the primary unit of work. A session exists for a bounded period
 // of time and always ends with an artifact export attempt.
 type Session struct {
-	ID           string        `json:"id"`
-	Title        string        `json:"title"`
-	Status       SessionStatus `json:"status"`
-	Prompt       string        `json:"prompt"`
-	Agent        string        `json:"agent"`
-	Harness      string        `json:"harness"`
-	Model        string        `json:"model"`
-	Skills       []string      `json:"skills"`
-	MCPServers   []string      `json:"mcp_servers"`
-	Plugins      []string      `json:"plugins"`
-	Trigger      TriggerInfo   `json:"trigger"`
+	ID         string        `json:"id"`
+	Title      string        `json:"title"`
+	Status     SessionStatus `json:"status"`
+	Prompt     string        `json:"prompt"`
+	Agent      string        `json:"agent"`
+	Harness    string        `json:"harness"`
+	Model      string        `json:"model"`
+	Skills     []string      `json:"skills"`
+	MCPServers []string      `json:"mcp_servers"`
+	Plugins    []string      `json:"plugins"`
+	Trigger    TriggerInfo   `json:"trigger"`
+	// Backend and PodName describe the runtime placement. They are internal
+	// to the control plane and are not part of the public session object.
 	Backend      string        `json:"backend"`
 	PodName      string        `json:"pod_name,omitempty"`
 	TTLSeconds   int           `json:"ttl_seconds"`

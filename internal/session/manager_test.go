@@ -47,6 +47,7 @@ func testManager(t *testing.T) *Manager {
 		sessions:   map[string]*instance{},
 		tokenIndex: map[string]string{},
 		history:    map[string]model.Session{},
+		deleted:    map[string]time.Time{},
 		artifacts:  map[string]model.ArtifactInfo{},
 	}
 }
