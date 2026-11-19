@@ -1002,7 +1002,10 @@ func TestSettleNeverCleansLiveSession(t *testing.T) {
 	if m.pendingCount() != 0 {
 		t.Fatalf("pending = %d, want the live session removed from retries", m.pendingCount())
 	}
-	if _, stored := m.historySession("live4"); stored {
+	m.mu.Lock()
+	_, stored := m.history["live4"]
+	m.mu.Unlock()
+	if stored {
 		t.Fatal("the stale record of a live session was kept")
 	}
 }
@@ -1053,6 +1056,10 @@ func TestAdoptionWithoutRecordIsListedAndRetried(t *testing.T) {
 	m.retryAdopt()
 	if !m.pendingAdoption("n1") {
 		t.Fatal("the second failure stopped the retry")
+	}
+	got, ok = m.Get("n1")
+	if !ok || !strings.Contains(got.Error, "after 2 attempts:") {
+		t.Fatalf("second settlement = %+v", got)
 	}
 	assertSessionObjects(t, ctx, cs, spec, true)
 	if last, err := m.journal.LastTurn(ctx, "n1"); err != nil || last != 2 {

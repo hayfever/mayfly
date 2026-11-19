@@ -180,6 +180,11 @@ type Manager struct {
 	// history holds finished sessions loaded from the record store. A live
 	// instance always wins over its history entry.
 	history map[string]model.Session
+	// deleted holds the session IDs DELETE removed. An adoption pass that
+	// was already reading the cluster must not register one of them again,
+	// because that would resurrect a session the caller deleted. reap drops
+	// an entry after deletedRetention.
+	deleted map[string]time.Time
 	// artifacts survives session retention so a stored bundle stays
 	// downloadable after the session record is gone.
 	artifacts map[string]model.ArtifactInfo
@@ -274,6 +279,7 @@ func New(cfg *config.Config, bundle *project.Bundle, store artifact.Store, h *hu
 		sessions:    map[string]*instance{},
 		tokenIndex:  map[string]string{},
 		history:     map[string]model.Session{},
+		deleted:     map[string]time.Time{},
 		artifacts:   map[string]model.ArtifactInfo{},
 	}
 	for _, s := range loaded {

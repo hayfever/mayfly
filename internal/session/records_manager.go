@@ -12,6 +12,11 @@ import (
 // slows a session transition but never blocks a request.
 const recordTimeout = 5 * time.Second
 
+// deletedRetention bounds how long DELETE remembers an ID. An adoption pass
+// that could still register the session completes long before this; the
+// tombstone only has to outlive one pass.
+const deletedRetention = 24 * time.Hour
+
 // SetRecords attaches the store that keeps session records and the artifact
 // index across restarts. Call it before Start, so startup loads the same store
 // the manager writes to.
@@ -82,6 +87,11 @@ func (m *Manager) settleInterrupted() {
 	var stale []settle
 	var cleanup []string
 	for id, sess := range m.history {
+		if _, gone := m.deleted[id]; gone {
+			delete(m.history, id)
+			delete(m.adoptPending, id)
+			continue
+		}
 		if _, live := m.sessions[id]; live {
 			// Adoption rebuilt this session; the live instance owns it now.
 			delete(m.history, id)
@@ -90,8 +100,13 @@ func (m *Manager) settleInterrupted() {
 		}
 		entry, pending := m.adoptPending[id]
 		if pending && entry.Attempts < maxAdoptAttempts {
-			// Keep retrying, whatever the record says. A record without a
-			// pending entry is the normal restart settlement below.
+			// Keep retrying, whatever the record says. A session this
+			// control plane already settled as failed stays listed, but its
+			// reason must carry the current attempt count instead of the
+			// count from the first failed pass.
+			if sess.Status == model.StatusFailed {
+				stale = append(stale, settle{session: sess, reason: adoptAttemptReason(entry)})
+			}
 			continue
 		}
 		if terminalStatus(sess.Status) {
@@ -112,6 +127,10 @@ func (m *Manager) settleInterrupted() {
 		stale = append(stale, settle{session: sess, reason: reason})
 	}
 	for id, entry := range m.adoptPending {
+		if _, gone := m.deleted[id]; gone {
+			delete(m.adoptPending, id)
+			continue
+		}
 		if _, ok := m.history[id]; ok {
 			continue
 		}
@@ -161,6 +180,12 @@ func (m *Manager) settleInterrupted() {
 		}
 		m.persistRecord(sess)
 		m.mu.Lock()
+		if _, gone := m.deleted[sess.ID]; gone {
+			delete(m.history, sess.ID)
+			m.mu.Unlock()
+			m.deleteRecord(sess.ID)
+			continue
+		}
 		m.history[sess.ID] = sess
 		m.mu.Unlock()
 	}
@@ -190,10 +215,16 @@ func (m *Manager) mergeAdoptFailures(failed map[string]string, general string) {
 	defer m.mu.Unlock()
 	next := make(map[string]adoptFailure, len(failed)+len(m.adoptPending))
 	for id, reason := range failed {
+		if _, gone := m.deleted[id]; gone {
+			continue
+		}
 		next[id] = adoptFailure{Attempts: m.adoptPending[id].Attempts + 1, Reason: reason}
 	}
 	if general != "" {
 		for id, entry := range m.adoptPending {
+			if _, gone := m.deleted[id]; gone {
+				continue
+			}
 			if _, ok := next[id]; ok {
 				continue
 			}
@@ -222,13 +253,6 @@ func (m *Manager) pendingAdoption(id string) bool {
 	defer m.mu.Unlock()
 	_, ok := m.adoptPending[id]
 	return ok
-}
-
-// clearAdoptPending stops retrying one session's adoption.
-func (m *Manager) clearAdoptPending(id string) {
-	m.mu.Lock()
-	delete(m.adoptPending, id)
-	m.mu.Unlock()
 }
 
 // liveSessionIDs returns the sessions this control plane is running. Objects
@@ -318,32 +342,16 @@ func (m *Manager) deleteArtifactIndex(id string) {
 	}
 }
 
-// historySession returns a finished session loaded from the record store.
-func (m *Manager) historySession(id string) (model.Session, bool) {
-	m.mu.Lock()
-	sess, ok := m.history[id]
-	m.mu.Unlock()
-	return sess, ok
-}
-
-// dropHistory removes a finished session from the list and the record store.
-func (m *Manager) dropHistory(id string) bool {
-	m.mu.Lock()
-	_, ok := m.history[id]
-	delete(m.history, id)
-	m.mu.Unlock()
-	if !ok {
-		return false
-	}
-	m.deleteRecord(id)
-	return true
-}
-
 // pruneRecords drops stored sessions past sessions.retention and artifact
 // index entries past artifacts.index_retention. Retention of zero keeps a
 // record until an operator removes it.
 func (m *Manager) pruneRecords(now time.Time) {
 	m.mu.Lock()
+	for id, at := range m.deleted {
+		if now.Sub(at) > deletedRetention {
+			delete(m.deleted, id)
+		}
+	}
 	var expired []string
 	if retention := m.cfg.Sessions.Retention.Std(); retention > 0 {
 		for id, sess := range m.history {
