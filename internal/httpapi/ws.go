@@ -40,7 +40,7 @@ func (s *Server) attachWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	if err := conn.WriteJSON(map[string]any{"type": "hello", "session": sess}); err != nil {
+	if err := conn.WriteJSON(map[string]any{"type": "hello", "session": newAPISession(*sess)}); err != nil {
 		return
 	}
 

@@ -27,7 +27,7 @@ type createRequest struct {
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	var req createRequest
-	if err := decodeJSON(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
+	if err := decodeJSONStrict(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
 		writeError(w, http.StatusBadRequest, codeInvalidRequest, "invalid JSON body")
 		return
 	}
@@ -71,7 +71,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Location", s.sessionURL(created.ID))
-	writeJSON(w, http.StatusCreated, map[string]any{"session": created, "url": s.sessionURL(created.ID)})
+	writeJSON(w, http.StatusCreated, map[string]any{"session": newAPISession(*created), "url": s.sessionURL(created.ID)})
 }
 
 func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -91,7 +91,7 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	items, next := pageOf(sessions, start, query.limit, sessionKey)
-	writePage(w, items, next)
+	writePage(w, newAPISessions(items), next)
 }
 
 // sessionKey is the page order: newest first, then id descending.
@@ -105,7 +105,7 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, codeNotFound, "session not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"session": sess, "url": s.sessionURL(sess.ID)})
+	writeJSON(w, http.StatusOK, map[string]any{"session": newAPISession(*sess), "url": s.sessionURL(sess.ID)})
 }
 
 func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +132,7 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		Text  string `json:"text"`
 		Actor string `json:"actor"`
 	}
-	if err := decodeJSON(w, r, 64<<10, &req); err != nil {
+	if err := decodeJSONStrict(w, r, 64<<10, &req); err != nil {
 		writeError(w, http.StatusBadRequest, codeInvalidRequest, "invalid JSON body")
 		return
 	}
@@ -148,7 +148,10 @@ func (s *Server) closeSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	_ = decodeJSON(w, r, 4<<10, &req)
+	if err := decodeJSONStrict(w, r, 4<<10, &req); err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "invalid JSON body")
+		return
+	}
 	if req.Reason == "" {
 		req.Reason = "closed"
 	}
@@ -164,7 +167,10 @@ func (s *Server) createTicket(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Actor string `json:"actor"`
 	}
-	_ = decodeJSON(w, r, 4<<10, &req)
+	if err := decodeJSONStrict(w, r, 4<<10, &req); err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "invalid JSON body")
+		return
+	}
 	if _, ok := s.mgr.Get(id); !ok {
 		writeError(w, http.StatusNotFound, codeNotFound, "session not found")
 		return
