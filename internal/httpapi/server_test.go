@@ -592,6 +592,18 @@ func adminGET(t *testing.T, handler http.Handler, target string) *httptest.Respo
 	return rec
 }
 
+func adminRequest(t *testing.T, handler http.Handler, method, target, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-admin")
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
 // decodeEnvelope asserts a JSON error envelope and returns its body.
 func decodeEnvelope(t *testing.T, rec *httptest.ResponseRecorder) errorBody {
 	t.Helper()

@@ -117,12 +117,21 @@ func (s *Server) queueRetryDead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	record, ok, err := s.queue.Get(r.Context(), id)
+	if err != nil {
+		s.writeQueueAdminError(w, "retry", id, err)
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, codeNotFound, "job not found")
+		return
+	}
 	if err := s.queue.Retry(r.Context(), id); err != nil {
 		s.writeQueueAdminError(w, "retry", id, err)
 		return
 	}
 	s.logger.Info("dead job requeued", "job", id)
-	writeJSON(w, http.StatusAccepted, map[string]any{"retried": true, "id": id})
+	writeAccepted(w, record.Job, false)
 }
 
 // queueDeleteDead drops a buried job without running it.
