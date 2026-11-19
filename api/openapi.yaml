@@ -595,7 +595,10 @@ paths:
     get:
       operationId: getQueueJob
       summary: Read one accepted job
-      description: Includes the prompt and the session the job created.
+      description: >
+        Includes the prompt and the session the job created. A stored payload
+        this build cannot decode answers 409 with code `conflict` and the
+        decoder reason. The job record is not changed.
       tags: [queue]
       security:
         - bearerAuth: [queue:read]
@@ -612,6 +615,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "503":
           $ref: "#/components/responses/Unavailable"
   /api/v1/queue/dead:

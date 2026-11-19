@@ -39,10 +39,15 @@ const purgeBatch = 256
 // transaction, so an accepted job is either fully stored or not stored at all.
 type boltStore struct {
 	cfg config.QueueConfig
+	now clock
 	db  *bolt.DB
 }
 
 func newBolt(cfg config.QueueConfig) (*boltStore, error) {
+	return newBoltWithClock(cfg, systemClock)
+}
+
+func newBoltWithClock(cfg config.QueueConfig, now clock) (*boltStore, error) {
 	db, err := bolt.Open(cfg.Bolt.Path, 0o600, &bolt.Options{Timeout: 5 * time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("open queue database: %w", err)
@@ -76,7 +81,7 @@ func newBolt(cfg config.QueueConfig) (*boltStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("create queue buckets: %w", err)
 	}
-	return &boltStore{cfg: cfg, db: db}, nil
+	return &boltStore{cfg: cfg, now: now, db: db}, nil
 }
 
 // checkBoltFormat stamps a database written before the stamp existed as
@@ -101,17 +106,18 @@ func (s *boltStore) Accept(_ context.Context, job Job) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now().UTC()
+	now := s.now()
 	return s.db.Update(func(tx *bolt.Tx) error {
 		seen := tx.Bucket(bucketSeen)
 		ready := tx.Bucket(bucketReady)
-		if job.IdempotencyKey != "" {
-			if raw := seen.Get([]byte(job.ID)); raw != nil {
+		key := dedupeKey(job)
+		if key != "" {
+			if raw := seen.Get([]byte(key)); raw != nil {
 				expiry := time.Unix(0, int64(binary.BigEndian.Uint64(raw)))
 				if now.Before(expiry) {
 					return ErrDuplicate
 				}
-				if err := seen.Delete([]byte(job.ID)); err != nil {
+				if err := seen.Delete([]byte(key)); err != nil {
 					return err
 				}
 			}
@@ -128,14 +134,13 @@ func (s *boltStore) Accept(_ context.Context, job Job) error {
 		if err := ready.Put(readyKey(now, job.ID), nil); err != nil {
 			return err
 		}
-		if job.IdempotencyKey != "" {
+		if key != "" {
 			expiry := make([]byte, 8)
 			binary.BigEndian.PutUint64(expiry, uint64(now.Add(s.cfg.DedupeTTL.Std()).UnixNano()))
-			dedupeKey := []byte(job.ID)
-			if err := seen.Put(dedupeKey, expiry); err != nil {
+			if err := seen.Put([]byte(key), expiry); err != nil {
 				return err
 			}
-			if err := tx.Bucket(bucketSeenExpiry).Put(expiryKey(expiry, dedupeKey), nil); err != nil {
+			if err := tx.Bucket(bucketSeenExpiry).Put(expiryKey(expiry, []byte(key)), nil); err != nil {
 				return err
 			}
 		}
@@ -147,7 +152,7 @@ func (s *boltStore) Accept(_ context.Context, job Job) error {
 }
 
 func (s *boltStore) Claim(_ context.Context, max int) ([]Lease, error) {
-	now := time.Now().UTC()
+	now := s.now()
 	deadline := now.Add(s.cfg.VisibilityTimeout.Std())
 	var leases []Lease
 	err := s.db.Update(func(tx *bolt.Tx) error {
@@ -211,7 +216,7 @@ func (s *boltStore) Claim(_ context.Context, max int) ([]Lease, error) {
 }
 
 func (s *boltStore) Ack(_ context.Context, lease Lease, result Result) error {
-	now := time.Now().UTC()
+	now := s.now()
 	payload, err := json.Marshal(doneRecord{Job: lease.Job, SessionID: result.SessionID, FinishedAt: now})
 	if err != nil {
 		return err
@@ -236,7 +241,7 @@ func (s *boltStore) Ack(_ context.Context, lease Lease, result Result) error {
 }
 
 func (s *boltStore) Nack(_ context.Context, lease Lease, cause error) error {
-	now := time.Now().UTC()
+	now := s.now()
 	return s.db.Update(func(tx *bolt.Tx) error {
 		jobs := tx.Bucket(bucketJobs)
 		payload := jobs.Get([]byte(lease.ID))
@@ -279,7 +284,7 @@ func (s *boltStore) Nack(_ context.Context, lease Lease, cause error) error {
 }
 
 func (s *boltStore) Release(_ context.Context, lease Lease, after time.Duration) error {
-	now := time.Now().UTC().Add(after)
+	now := s.now().Add(after)
 	return s.db.Update(func(tx *bolt.Tx) error {
 		if tx.Bucket(bucketJobs).Get([]byte(lease.ID)) == nil {
 			return nil
@@ -296,7 +301,7 @@ func (s *boltStore) Release(_ context.Context, lease Lease, after time.Duration)
 }
 
 func (s *boltStore) Extend(_ context.Context, lease Lease, ttl time.Duration) (Lease, error) {
-	deadline := time.Now().UTC().Add(ttl)
+	deadline := s.now().Add(ttl)
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		if tx.Bucket(bucketJobs).Get([]byte(lease.ID)) == nil {
 			return ErrLeaseLost
@@ -318,14 +323,14 @@ func (s *boltStore) Extend(_ context.Context, lease Lease, ttl time.Duration) (L
 }
 
 func (s *boltStore) Get(_ context.Context, id string) (Record, bool, error) {
-	now := time.Now().UTC()
+	now := s.now()
 	var record Record
 	var found bool
 	err := s.db.View(func(tx *bolt.Tx) error {
 		if payload := tx.Bucket(bucketJobs).Get([]byte(id)); payload != nil {
 			var job Job
 			if err := json.Unmarshal(payload, &job); err != nil {
-				return err
+				return &UnreadableError{ID: id, Cause: err}
 			}
 			record = Record{Job: job, State: StateQueued}
 			if deadline, ok := readyFor(tx.Bucket(bucketReady), id); ok && deadline.After(now) {
@@ -343,7 +348,7 @@ func (s *boltStore) Get(_ context.Context, id string) (Record, bool, error) {
 		if payload := tx.Bucket(bucketDone).Get([]byte(id)); payload != nil {
 			var done doneRecord
 			if err := json.Unmarshal(payload, &done); err != nil {
-				return err
+				return &UnreadableError{ID: id, Cause: err}
 			}
 			record = Record{Job: done.Job, State: StateDone, SessionID: done.SessionID, FinishedAt: done.FinishedAt}
 			found = true
@@ -370,7 +375,7 @@ func (s *boltStore) Dead(_ context.Context, limit int) ([]Record, error) {
 }
 
 func (s *boltStore) Retry(_ context.Context, id string) error {
-	now := time.Now().UTC()
+	now := s.now()
 	return s.db.Update(func(tx *bolt.Tx) error {
 		payload := tx.Bucket(bucketDead).Get([]byte(id))
 		if payload == nil {
@@ -407,7 +412,7 @@ func (s *boltStore) Delete(_ context.Context, id string) error {
 }
 
 func (s *boltStore) Stats(_ context.Context) (Stats, error) {
-	now := time.Now().UTC()
+	now := s.now()
 	var stats Stats
 	err := s.db.View(func(tx *bolt.Tx) error {
 		stats = Stats{Dead: tx.Bucket(bucketDead).Stats().KeyN}
