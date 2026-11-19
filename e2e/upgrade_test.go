@@ -3,6 +3,8 @@
 package e2e
 
 import (
+	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,21 +18,24 @@ import (
 )
 
 const (
-	// upgradeRelease is a second release in the same namespace, so the
-	// upgrade never rewrites the release under test.
-	upgradeRelease = "mayfly-upgrade"
+	// upgradeRelease and upgradeNamespace isolate the upgrade from the release
+	// under test: the two control planes must not adopt or collect each other's
+	// sessions.
+	upgradeRelease   = "mayfly-upgrade"
+	upgradeNamespace = "mayfly-upgrade"
 	// chartRepository and imagePrefix publish every release; see the README.
 	chartRepository = "oci://ghcr.io/hayfever/charts/mayfly"
 	imagePrefix     = "ghcr.io/hayfever"
 )
 
-// TestUpgradeFromLastRelease installs the last released chart and images,
-// fills the session slots so a webhook job stays queued, upgrades the release
-// to the chart and images built from HEAD, and checks that the old sessions,
-// the queued job, and the queue's ability to run it all survive.
+// TestUpgradeFromLastRelease installs the last released chart and images in its
+// own namespace, fills the session slots so a webhook job stays queued,
+// upgrades the release to the chart and images built from HEAD, and checks that
+// the old sessions, the queued job, and the queue's ability to run it all
+// survive.
 //
 // The test needs a released version and, when the GHCR packages are private, a
-// pull secret for the cluster. See docs/testing.md.
+// pull secret in the upgrade namespace. See docs/testing.md.
 func TestUpgradeFromLastRelease(t *testing.T) {
 	from := getenv("MAYFLY_E2E_UPGRADE_FROM", "")
 	if from == "" {
@@ -46,12 +51,15 @@ func TestUpgradeFromLastRelease(t *testing.T) {
 	pullSecret := getenv("MAYFLY_E2E_PULL_SECRET", "")
 	headControlPlane := env.podImage(t, env.release)
 	headAgent := env.agentImage
+	llmStub := env.podImage(t, "llmstub")
+	mcpStub := env.podImage(t, "mcpstub")
 
-	up := env.forRelease(upgradeRelease)
+	up := env.forRelease(upgradeRelease, getenv("MAYFLY_E2E_UPGRADE_NAMESPACE", upgradeNamespace))
 	var sessions []session
 	t.Cleanup(func() {
-		up.cleanupUpgrade(t, root, sessions)
+		up.cleanupUpgrade(t)
 	})
+	up.prepare(t, root, llmStub, mcpStub)
 
 	t.Logf("installing %s version %s", chart, from)
 	up.installRelease(t, root, chart, []string{"--version", from}, prefix+"/mayflyd:"+from, prefix+"/mayfly-agent:"+from, pullSecret)
@@ -195,12 +203,12 @@ func (c *cluster) installRelease(t *testing.T, root, chart string, extra []strin
 	}
 }
 
-// forRelease is a connection to another release in the same namespace, with
-// its own port-forward. It borrows the release credentials.
-func (c *cluster) forRelease(release string) *cluster {
+// forRelease is a connection to another release with its own port-forward. It
+// borrows the release credentials.
+func (c *cluster) forRelease(release, namespace string) *cluster {
 	return &cluster{
 		kubeContext:   c.kubeContext,
-		namespace:     c.namespace,
+		namespace:     namespace,
 		release:       release,
 		service:       release,
 		token:         c.token,
@@ -211,7 +219,48 @@ func (c *cluster) forRelease(release string) *cluster {
 	}
 }
 
-// connectAndWait opens a port-forward to the release and waits for /readyz.
+// prepare creates the upgrade namespace with the release credentials and the
+// deterministic stubs, so the upgrade reads and changes nothing of the release
+// under test.
+func (c *cluster) prepare(t *testing.T, root, llmStub, mcpStub string) {
+	t.Helper()
+	namespace := fmt.Sprintf("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: %s\n", c.namespace)
+	if _, err := c.kubectlStdin(namespace, "apply", "-f", "-"); err != nil {
+		t.Fatal(err)
+	}
+	secret := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: mayfly-e2e-secrets
+type: Opaque
+data:
+  MAYFLY_API_TOKEN: %s
+  MAYFLY_WEBHOOK_SECRET: %s
+  MAYFLY_SLACK_SECRET: %s
+  OPENAI_API_KEY: %s
+`, base64.StdEncoding.EncodeToString([]byte(c.token)),
+		base64.StdEncoding.EncodeToString([]byte(c.webhookSecret)),
+		base64.StdEncoding.EncodeToString([]byte(c.slackSecret)),
+		base64.StdEncoding.EncodeToString([]byte("stub")))
+	if _, err := c.kubectlStdin(secret, "apply", "-f", "-"); err != nil {
+		t.Fatal(err)
+	}
+	stubs, err := os.ReadFile(filepath.Join(root, "e2e", "manifests", "stubs.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubs = bytes.ReplaceAll(stubs, []byte("LLMSTUB_IMAGE"), []byte(llmStub))
+	stubs = bytes.ReplaceAll(stubs, []byte("MCPSTUB_IMAGE"), []byte(mcpStub))
+	if _, err := c.kubectlStdin(string(stubs), "apply", "-f", "-"); err != nil {
+		t.Fatal(err)
+	}
+	for _, deployment := range []string{"llmstub", "mcpstub"} {
+		if _, err := c.kubectl("rollout", "status", "deployment/"+deployment, "--timeout=180s"); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func (c *cluster) connectAndWait(t *testing.T) {
 	t.Helper()
 	c.stopPortForward()
@@ -272,65 +321,13 @@ func (c *cluster) trySessionIDs() ([]string, error) {
 	return sessionListIDs(body)
 }
 
-// deleteSession deletes a session without failing the test; cleanup must keep
-// going when the release is already broken.
-func (c *cluster) deleteSession(id string) {
-	req, err := http.NewRequest(http.MethodDelete, c.url("/api/v1/sessions/"+id), nil)
-	if err != nil {
-		return
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return
-	}
-	_ = resp.Body.Close()
-}
-
-// cleanupUpgrade removes the upgrade release, its state, and its sessions so
-// the suite's leak check starts clean. The release is a separate control plane,
-// so every session it lists belongs to this test.
-func (c *cluster) cleanupUpgrade(t *testing.T, root string, sessions []session) {
+// cleanupUpgrade deletes the upgrade namespace with its release, sessions, and
+// stubs. The release under test lives in another namespace, so nothing of it is
+// touched.
+func (c *cluster) cleanupUpgrade(t *testing.T) {
 	t.Helper()
-	ids := make([]string, 0, len(sessions)+1)
-	for _, s := range sessions {
-		ids = append(ids, s.ID)
-	}
-	if listed, err := c.trySessionIDs(); err == nil {
-		ids = append(ids, listed...)
-	} else {
-		t.Logf("list sessions of %s during cleanup: %v", c.release, err)
-	}
-	slices.Sort(ids)
-	ids = slices.Compact(ids)
-	for _, id := range ids {
-		c.deleteSession(id)
-	}
-	for _, id := range ids {
-		deadline := time.Now().Add(90 * time.Second)
-		for {
-			objs, err := c.sessionObjects(id)
-			if err == nil && len(objs) == 0 {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Errorf("objects of session %s are still present after the upgrade test: %v (%v)", id, objs, err)
-				break
-			}
-			time.Sleep(2 * time.Second)
-		}
-	}
 	c.stopPortForward()
-	args := []string{"uninstall", c.release, "--namespace", c.namespace, "--wait", "--timeout", "2m"}
-	if c.kubeContext != "" {
-		args = append(args, "--kube-context", c.kubeContext)
-	}
-	cmd := exec.Command("helm", args...)
-	cmd.Dir = root
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Logf("helm uninstall %s: %v: %s", c.release, err, strings.TrimSpace(string(out)))
-	}
-	if _, err := c.kubectl("delete", "pvc", c.release+"-state", "--ignore-not-found"); err != nil {
-		t.Logf("delete pvc of %s: %v", c.release, err)
+	if out, err := c.kubectl("delete", "namespace", c.namespace, "--wait=false"); err != nil {
+		t.Logf("delete namespace %s: %v: %s", c.namespace, err, strings.TrimSpace(out))
 	}
 }

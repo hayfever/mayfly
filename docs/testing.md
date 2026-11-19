@@ -78,7 +78,7 @@ Requirements: Docker, k3d, kubectl, Helm 3, Go, and openssl. The k3d cluster use
 
 ### Upgrade test
 
-`TestUpgradeFromLastRelease` proves that a live install survives an upgrade. It installs the chart and images of a released version as a second release in the e2e namespace, fills the session slots, and queues a webhook job. It then runs `helm upgrade` to the local chart with the images built from HEAD and checks three things:
+`TestUpgradeFromLastRelease` proves that a live install survives an upgrade. It installs the chart and images of a released version in the `mayfly-upgrade` namespace, with its own copy of the stubs, fills the session slots, and queues a webhook job. It then runs `helm upgrade` to the local chart with the images built from HEAD and checks three things:
 
 1. the old sessions are still readable and listed, with their titles and the adopted trigger,
 2. the queued job record is still present,
@@ -89,7 +89,8 @@ The test skips unless `MAYFLY_E2E_UPGRADE_FROM` names a released chart version. 
 ```bash
 helm registry login ghcr.io -u <github-user>
 
-kubectl --context k3d-mayfly-e2e -n mayfly-e2e create secret docker-registry ghcr-pull \
+kubectl create namespace mayfly-upgrade
+kubectl -n mayfly-upgrade create secret docker-registry ghcr-pull \
   --docker-server=ghcr.io --docker-username=<github-user> --docker-password=<token>
 
 make e2e-up
@@ -98,7 +99,7 @@ MAYFLY_E2E_UPGRADE_FROM=0.1.0-rc.2 MAYFLY_E2E_PULL_SECRET=ghcr-pull \
 make e2e-down
 ```
 
-`MAYFLY_E2E_CHART_REPOSITORY` and `MAYFLY_E2E_IMAGE_PREFIX` override the default `ghcr.io/hayfever` package locations. The test installs both releases with the bbolt queue from [e2e/values.yaml](../e2e/values.yaml); the Redis e2e variant does not run it. A run takes a few minutes because the released images are pulled from the registry.
+`MAYFLY_E2E_CHART_REPOSITORY` and `MAYFLY_E2E_IMAGE_PREFIX` override the default `ghcr.io/hayfever` package locations. `MAYFLY_E2E_UPGRADE_NAMESPACE` overrides the namespace, and the test deletes it at the end. The test installs both releases with the bbolt queue from [e2e/values.yaml](../e2e/values.yaml); the Redis e2e variant does not run it. A run takes a few minutes because the released images are pulled from the registry.
 
 ### Against a real cluster
 
