@@ -20,6 +20,7 @@ import (
 // together or not at all.
 type redisStore struct {
 	cfg    config.QueueConfig
+	now    clock
 	client redis.UniversalClient
 	queue  string
 	jobs   string
@@ -89,6 +90,10 @@ return 1
 `
 
 func newRedis(ctx context.Context, cfg config.QueueConfig) (*redisStore, error) {
+	return newRedisWithClock(ctx, cfg, systemClock)
+}
+
+func newRedisWithClock(ctx context.Context, cfg config.QueueConfig, now clock) (*redisStore, error) {
 	options, err := redis.ParseURL(cfg.Redis.URL)
 	if err != nil {
 		return nil, fmt.Errorf("queue.redis.url: %w", err)
@@ -102,6 +107,7 @@ func newRedis(ctx context.Context, cfg config.QueueConfig) (*redisStore, error) 
 	tag := "{" + cfg.Redis.KeyPrefix + "}"
 	store := &redisStore{
 		cfg:    cfg,
+		now:    now,
 		queue:  tag + ":queue",
 		jobs:   tag + ":jobs",
 		dead:   tag + ":dead",
@@ -158,9 +164,9 @@ func (s *redisStore) checkFormat(ctx context.Context) error {
 	return nil
 }
 
-// dedupeFlag tells the accept script whether this job has a delivery key.
-func dedupeFlag(delivery string) string {
-	if delivery == "" {
+// dedupeFlag tells the accept script whether this job has a dedupe key.
+func dedupeFlag(key string) string {
+	if key == "" {
 		return "0"
 	}
 	return "1"
@@ -171,14 +177,15 @@ func (s *redisStore) Accept(ctx context.Context, job Job) error {
 	if err != nil {
 		return err
 	}
+	key := dedupeKey(job)
 	res, err := s.accept.Run(ctx, s.client,
-		[]string{s.queue, s.jobs, s.seen + job.ID, s.dead},
+		[]string{s.queue, s.jobs, s.seen + key, s.dead},
 		job.ID,
 		payload,
-		time.Now().UTC().UnixMilli(),
+		s.now().UnixMilli(),
 		s.cfg.MaxJobs,
 		int64(s.cfg.DedupeTTL.Std().Seconds()),
-		dedupeFlag(job.IdempotencyKey),
+		dedupeFlag(key),
 	).Int()
 	if err != nil {
 		return fmt.Errorf("queue accept: %w", err)
@@ -193,7 +200,7 @@ func (s *redisStore) Accept(ctx context.Context, job Job) error {
 }
 
 func (s *redisStore) Claim(ctx context.Context, max int) ([]Lease, error) {
-	now := time.Now().UTC()
+	now := s.now()
 	deadline := now.Add(s.cfg.VisibilityTimeout.Std())
 	raw, err := s.claim.Run(ctx, s.client, []string{s.queue, s.jobs},
 		now.UnixMilli(),
@@ -218,7 +225,7 @@ func (s *redisStore) Claim(ctx context.Context, max int) ([]Lease, error) {
 			buried, _ := json.Marshal(deadRecord{
 				Job:      Job{ID: id, Trigger: "unknown"},
 				Error:    "job payload does not decode: " + err.Error(),
-				FailedAt: time.Now().UTC(),
+				FailedAt: s.now(),
 			})
 			pipe := s.client.TxPipeline()
 			pipe.ZRem(ctx, s.queue, id)
@@ -236,7 +243,7 @@ func (s *redisStore) Claim(ctx context.Context, max int) ([]Lease, error) {
 }
 
 func (s *redisStore) Ack(ctx context.Context, lease Lease, result Result) error {
-	record, err := json.Marshal(doneRecord{Job: lease.Job, SessionID: result.SessionID, FinishedAt: time.Now().UTC()})
+	record, err := json.Marshal(doneRecord{Job: lease.Job, SessionID: result.SessionID, FinishedAt: s.now()})
 	if err != nil {
 		return err
 	}
@@ -265,25 +272,25 @@ func (s *redisStore) Nack(ctx context.Context, lease Lease, cause error) error {
 	var updated []byte
 	if max := s.cfg.MaxAttempts; max > 0 && job.Attempts >= max {
 		mode = "bury"
-		updated, err = json.Marshal(deadRecord{Job: job, Error: causeString(cause), FailedAt: time.Now().UTC()})
+		updated, err = json.Marshal(deadRecord{Job: job, Error: causeString(cause), FailedAt: s.now()})
 	} else {
 		updated, err = json.Marshal(job)
 	}
 	if err != nil {
 		return err
 	}
-	score := time.Now().UTC().Add(Backoff(job.Attempts, s.cfg.RetryBase.Std())).UnixMilli()
+	score := s.now().Add(Backoff(job.Attempts, s.cfg.RetryBase.Std())).UnixMilli()
 	return s.runSettle(ctx, lease, mode, score, updated)
 }
 
 func (s *redisStore) Release(ctx context.Context, lease Lease, after time.Duration) error {
-	return s.runSettle(ctx, lease, "release", time.Now().UTC().Add(after).UnixMilli(), nil)
+	return s.runSettle(ctx, lease, "release", s.now().Add(after).UnixMilli(), nil)
 }
 
 func (s *redisStore) Extend(ctx context.Context, lease Lease, ttl time.Duration) (Lease, error) {
 	// Scores are milliseconds, so the renewed deadline is kept at that
 	// precision for the next settle comparison.
-	deadline := time.UnixMilli(time.Now().UTC().Add(ttl).UnixMilli()).UTC()
+	deadline := time.UnixMilli(s.now().Add(ttl).UnixMilli()).UTC()
 	if err := s.runSettle(ctx, lease, "release", deadline.UnixMilli(), nil); err != nil {
 		return lease, err
 	}
@@ -310,11 +317,11 @@ func (s *redisStore) Get(ctx context.Context, id string) (Record, bool, error) {
 	if err == nil {
 		var job Job
 		if err := json.Unmarshal(payload, &job); err != nil {
-			return Record{}, false, err
+			return Record{}, false, &UnreadableError{ID: id, Cause: err}
 		}
 		record := Record{Job: job, State: StateQueued}
 		if score, err := s.client.ZScore(ctx, s.queue, id).Result(); err == nil {
-			if time.Now().UTC().UnixMilli() < int64(score) {
+			if s.now().UnixMilli() < int64(score) {
 				record.State = StateLeased
 			}
 		}
@@ -338,7 +345,7 @@ func (s *redisStore) Get(ctx context.Context, id string) (Record, bool, error) {
 	}
 	var done doneRecord
 	if err := json.Unmarshal(payload, &done); err != nil {
-		return Record{}, false, err
+		return Record{}, false, &UnreadableError{ID: id, Cause: err}
 	}
 	return Record{Job: done.Job, State: StateDone, SessionID: done.SessionID, FinishedAt: done.FinishedAt}, true, nil
 }
@@ -381,7 +388,7 @@ func (s *redisStore) Retry(ctx context.Context, id string) error {
 	pipe := s.client.TxPipeline()
 	pipe.HDel(ctx, s.dead, id)
 	pipe.HSet(ctx, s.jobs, id, encoded)
-	pipe.ZAdd(ctx, s.queue, redis.Z{Score: float64(time.Now().UTC().UnixMilli()), Member: id})
+	pipe.ZAdd(ctx, s.queue, redis.Z{Score: float64(s.now().UnixMilli()), Member: id})
 	_, err = pipe.Exec(ctx)
 	return err
 }
@@ -398,7 +405,7 @@ func (s *redisStore) Delete(ctx context.Context, id string) error {
 }
 
 func (s *redisStore) Stats(ctx context.Context) (Stats, error) {
-	now := time.Now().UTC().UnixMilli()
+	now := s.now().UnixMilli()
 	pipe := s.client.Pipeline()
 	pending := pipe.ZCount(ctx, s.queue, "-inf", fmt.Sprint(now))
 	leased := pipe.ZCount(ctx, s.queue, "("+fmt.Sprint(now), "+inf")

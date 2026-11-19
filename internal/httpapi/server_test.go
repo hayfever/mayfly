@@ -226,6 +226,41 @@ func TestWebhookRejectsInvalidSessionOptions(t *testing.T) {
 	}
 }
 
+// unreadableQueue stands in for a store whose job payload does not decode.
+type unreadableQueue struct {
+	queue.Store
+	err error
+}
+
+func (q unreadableQueue) Get(context.Context, string) (queue.Record, bool, error) {
+	return queue.Record{}, false, q.err
+}
+
+func TestQueueJobUnreadablePayload(t *testing.T) {
+	cfg := config.Default()
+	cfg.AdminToken = "test-admin"
+	store := unreadableQueue{
+		Store: testQueue(t),
+		err:   &queue.UnreadableError{ID: "bad", Cause: errors.New("job envelope prompt is required for session.create")},
+	}
+	s := New(cfg, nil, store, testLogger())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/queue/jobs/bad", nil)
+	req.Header.Set("Authorization", "Bearer test-admin")
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d body=%s, want 409", rec.Code, rec.Body.String())
+	}
+	body := decodeEnvelope(t, rec)
+	if body.Code != codeConflict {
+		t.Fatalf("code = %q, want %q", body.Code, codeConflict)
+	}
+	if !strings.Contains(body.Message, "unreadable") || !strings.Contains(body.Message, "prompt is required") {
+		t.Fatalf("message = %q, want the decoder reason", body.Message)
+	}
+}
+
 func TestQueueAdminEndpoints(t *testing.T) {
 	cfg := config.Default()
 	cfg.AdminToken = "test-admin"

@@ -138,6 +138,22 @@ func (j *Job) fromEnvelope(env Envelope) error {
 	if env.Trigger.Kind == "" {
 		return errors.New("job envelope trigger.kind is required")
 	}
+	// A v1 envelope must satisfy the schema rules for its kind. Claim buries a
+	// job whose payload fails to decode, so a malformed job dead-letters
+	// instead of being claimed again.
+	switch kind {
+	case KindSession:
+		if env.Prompt == "" {
+			return errors.New("job envelope prompt is required for session.create")
+		}
+	case KindSource:
+		if env.Source == nil {
+			return errors.New("job envelope source is required for source.run")
+		}
+		if env.Source.Schedule == "" || env.Source.Source == "" || env.Source.Slot.IsZero() {
+			return errors.New("job envelope source requires schedule, source, and slot")
+		}
+	}
 	if env.ID == "" {
 		env.ID = deriveJobID(kind, env.Trigger.Name, env.IdempotencyKey)
 	}

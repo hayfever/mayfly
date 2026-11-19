@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -191,5 +192,134 @@ func assertBuriedVersion(t *testing.T, store Store, id, reason string) {
 	}
 	if !strings.Contains(records[0].Error, reason) {
 		t.Fatalf("dead reason = %q, want it to contain %q", records[0].Error, reason)
+	}
+}
+
+// invalidSessionPayload is a version 1 envelope that fails the schema: a
+// session.create job without a prompt.
+const invalidSessionPayload = `{"version":1,"kind":"session.create","created_at":"2026-11-18T09:00:00Z","trigger":{"kind":"generic"}}`
+
+func TestBoltBuriesInvalidV1Payload(t *testing.T) {
+	ctx := context.Background()
+	cfg := bboltStoreConfig(t)
+	first, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	injectBoltJob(t, cfg.Bolt.Path, "no-prompt", []byte(invalidSessionPayload))
+
+	store, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	leases, err := store.Claim(ctx, 10)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if len(leases) != 0 {
+		t.Fatalf("malformed job was leased: %+v", leases)
+	}
+	assertBuriedVersion(t, store, "no-prompt", "prompt is required")
+	if stats, _ := store.Stats(ctx); stats.Dead != 1 || stats.Pending != 0 {
+		t.Fatalf("stats = %+v, want one dead job", stats)
+	}
+	if leases, _ := store.Claim(ctx, 10); len(leases) != 0 {
+		t.Fatalf("second claim = %+v, want no leases", leases)
+	}
+}
+
+func TestRedisBuriesInvalidV1Payload(t *testing.T) {
+	ctx := context.Background()
+	server := miniredis.RunT(t)
+	cfg := testConfig(t)
+	cfg.Backend = "redis"
+	cfg.Redis.URL = "redis://" + server.Addr()
+	cfg.Redis.KeyPrefix = "mayfly-envelope-invalid"
+	store, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	redisStore := store.(*redisStore)
+	if err := redisStore.client.HSet(ctx, redisStore.jobs, "no-prompt", invalidSessionPayload).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := redisStore.client.ZAdd(ctx, redisStore.queue, redis.Z{Score: float64(time.Now().Add(-time.Second).UnixMilli()), Member: "no-prompt"}).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	leases, err := store.Claim(ctx, 10)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if len(leases) != 0 {
+		t.Fatalf("malformed job was leased: %+v", leases)
+	}
+	assertBuriedVersion(t, store, "no-prompt", "prompt is required")
+	if n := redisStore.client.HLen(ctx, redisStore.jobs).Val(); n != 0 {
+		t.Fatalf("jobs hash still holds %d fields", n)
+	}
+}
+
+// TestBoltReportsUnreadableJobPayload covers the admin lookup of a job this
+// build cannot decode: the store names the job and the decoder failure.
+func TestBoltReportsUnreadableJobPayload(t *testing.T) {
+	ctx := context.Background()
+	cfg := bboltStoreConfig(t)
+	first, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	injectBoltJob(t, cfg.Bolt.Path, "bad", []byte("{not json"))
+
+	store, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, ok, err := store.Get(ctx, "bad")
+	if ok {
+		t.Fatal("unreadable job was reported as found")
+	}
+	var unreadable *UnreadableError
+	if !errors.As(err, &unreadable) || unreadable.ID != "bad" {
+		t.Fatalf("get = %v, want UnreadableError for bad", err)
+	}
+	if !errors.Is(err, ErrUnreadable) {
+		t.Fatalf("get = %v, want ErrUnreadable", err)
+	}
+}
+
+func TestRedisReportsUnreadableJobPayload(t *testing.T) {
+	ctx := context.Background()
+	server := miniredis.RunT(t)
+	cfg := testConfig(t)
+	cfg.Backend = "redis"
+	cfg.Redis.URL = "redis://" + server.Addr()
+	cfg.Redis.KeyPrefix = "mayfly-envelope-unreadable"
+	store, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	redisStore := store.(*redisStore)
+	if err := redisStore.client.HSet(ctx, redisStore.jobs, "bad", "{not json").Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, ok, err := store.Get(ctx, "bad")
+	if ok {
+		t.Fatal("unreadable job was reported as found")
+	}
+	var unreadable *UnreadableError
+	if !errors.As(err, &unreadable) || unreadable.ID != "bad" {
+		t.Fatalf("get = %v, want UnreadableError for bad", err)
 	}
 }

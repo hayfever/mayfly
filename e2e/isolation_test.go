@@ -52,10 +52,11 @@ func TestNetworkIsolation(t *testing.T) {
 
 	startListener(t, podB, listenerPort)
 
-	// Controls from an unrestricted pod in the same namespace.
-	expectCurl(t, probe, llm, curlOK, "probe pod reaches llmstub (control)")
-	expectCurl(t, probe, fmt.Sprintf("http://%s:9099/healthz", llmIP), curlOK, "probe pod reaches llmstub by pod IP (control)")
-	expectCurl(t, probe, fmt.Sprintf("http://%s:1/", llmIP), curlRefused, "closed port on a pod without a policy refuses (control)")
+	// Controls from an unrestricted pod in the same namespace. A CNI may drop
+	// or refuse a closed port, so only "did not connect" counts.
+	waitReachable(t, probe, llm, "probe pod reaches llmstub (control)")
+	waitReachable(t, probe, fmt.Sprintf("http://%s:9099/healthz", llmIP), "probe pod reaches llmstub by pod IP (control)")
+	expectCurl(t, probe, fmt.Sprintf("http://%s:1/", llmIP), curlBlocked, "closed port on a pod without a policy does not connect (control)")
 
 	// The listener runs inside session B. NetworkPolicy rules are additive, so
 	// a temporary allow policy opens the two probe paths without touching the
@@ -89,7 +90,7 @@ func TestNetworkIsolation(t *testing.T) {
 		if code, out := env.execIn(t, podA, "getent", "hosts", "kubernetes.default.svc.cluster.local"); code != 0 {
 			t.Errorf("DNS is blocked from the session: exit %d: %s", code, out)
 		}
-		expectCurl(t, podA, controlPlane, curlOK, "session reaches the control plane")
+		waitReachable(t, podA, controlPlane, "session reaches the control plane")
 		expectCurl(t, podA, "https://kubernetes.default.svc.cluster.local/version", curlBlocked, "Kubernetes API")
 		expectCurl(t, podA, llm, curlBlocked, "LLM backend directly, bypassing the proxy")
 		expectCurl(t, podA, mcp, curlBlocked, "MCP server directly, bypassing the proxy")
@@ -215,11 +216,16 @@ func podIP(t *testing.T, name string) string {
 
 func podIPBySelector(t *testing.T, selector string) string {
 	t.Helper()
-	out, err := env.kubectl("get", "pod", "-l", selector, "-o", "jsonpath={.items[0].status.podIP}")
-	if err != nil || strings.TrimSpace(out) == "" {
-		t.Fatalf("pod IP for %s: %v %q", selector, err, out)
-	}
-	return strings.TrimSpace(out)
+	var ip string
+	eventually(t, time.Minute, "pod IP for "+selector, func() (bool, string) {
+		out, err := env.kubectl("get", "pod", "-l", selector, "-o", "jsonpath={.items[0].status.podIP}")
+		if err != nil {
+			return false, err.Error()
+		}
+		ip = strings.TrimSpace(out)
+		return ip != "", "no IP yet"
+	})
+	return ip
 }
 
 // startProbe runs a pod without a NetworkPolicy, from the agent image (which
