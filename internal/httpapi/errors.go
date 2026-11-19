@@ -43,7 +43,34 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 }
 
 func writeErrorDetails(w http.ResponseWriter, status int, code, message string, details map[string]any) {
+	// The request id lets a person correlate the response with its log line.
+	if id := requestIDFromWriter(w); id != "" {
+		merged := make(map[string]any, len(details)+1)
+		for key, value := range details {
+			merged[key] = value
+		}
+		merged["request_id"] = id
+		details = merged
+	}
 	writeJSON(w, status, errorEnvelope{Error: errorBody{Code: code, Message: message, Details: details}})
+}
+
+// requestIDFromWriter walks the response writer wrappers for the id that the
+// request middleware assigned. No id means the response is outside a request,
+// as in a direct handler test.
+func requestIDFromWriter(w http.ResponseWriter) string {
+	for {
+		if carrier, ok := w.(interface{ requestID() string }); ok {
+			if id := carrier.requestID(); id != "" {
+				return id
+			}
+		}
+		unwrapper, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return ""
+		}
+		w = unwrapper.Unwrap()
+	}
 }
 
 // writeInternalError writes the runtime protocol error body. The /internal/v1

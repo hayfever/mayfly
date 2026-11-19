@@ -25,6 +25,7 @@ import (
 	"github.com/hayfever/mayfly/internal/broker"
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/gateway"
+	"github.com/hayfever/mayfly/internal/metrics"
 	"github.com/hayfever/mayfly/internal/queue"
 	"github.com/hayfever/mayfly/internal/ratelimit"
 	"github.com/hayfever/mayfly/internal/session"
@@ -96,6 +97,7 @@ type Server struct {
 	upgrader   websocket.Upgrader
 	schedules  *ScheduleService
 	readyCheck func() error
+	metrics    *metrics.Metrics
 }
 
 // New builds the HTTP server. queue may be nil in tests that do not exercise
@@ -160,6 +162,14 @@ func WithBroker(b *broker.Broker) Option {
 func WithGateway(g *gateway.Gateway) Option {
 	return func(s *Server) {
 		s.gateway = g
+	}
+}
+
+// WithMetrics gives the server the registry it records requests in and, when
+// server.metrics has no separate address, the endpoint it serves.
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(s *Server) {
+		s.metrics = m
 	}
 }
 
@@ -236,8 +246,34 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/v1/llm/chat/completions", s.internalLLM)
 	mux.HandleFunc("/internal/v1/mcp/{server}", s.internalMCP)
 
-	return s.commonHeaders(s.recoverPanics(s.logRequests(shapeAPIErrors(mux))))
+	if handler := s.metricsHandler(); handler != nil && s.cfg.Server.MetricsOnMainPort() {
+		mux.Handle("GET /metrics", handler)
+	}
+
+	return s.commonHeaders(s.observeRequests(s.recoverPanics(shapeAPIErrors(mux))))
 }
+
+// metricsHandler serves the registry and applies the admin token when the
+// configuration asks for it. It returns nil when no registry is wired.
+func (s *Server) metricsHandler() http.Handler {
+	if s.metrics == nil {
+		return nil
+	}
+	handler := s.metrics.Handler()
+	if !s.cfg.Server.MetricsRequireAuth() {
+		return handler
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.admin(func(w http.ResponseWriter, r *http.Request) {
+			handler.ServeHTTP(w, r)
+		})(w, r)
+	})
+}
+
+// MetricsHandler returns the metrics endpoint for a listener of its own. It
+// returns nil when no registry is wired, and it applies the admin token when
+// server.metrics.require_auth asks for it.
+func (s *Server) MetricsHandler() http.Handler { return s.metricsHandler() }
 
 // ready reports whether this replica has finished starting. It checks local
 // state only: the artifact store and other remote dependencies stay out of the
@@ -305,6 +341,9 @@ type errorShapedWriter struct {
 	shaped bool
 }
 
+// Unwrap lets the error envelope reach the request recorder underneath.
+func (w *errorShapedWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *errorShapedWriter) WriteHeader(status int) {
 	if w.shaped {
 		return
@@ -360,14 +399,6 @@ func (w *errorShapedWriter) ReadFrom(r io.Reader) (int64, error) {
 		return readerFrom.ReadFrom(r)
 	}
 	return io.Copy(struct{ io.Writer }{w}, r)
-}
-
-func (s *Server) logRequests(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		next.ServeHTTP(w, r)
-		s.logger.Debug("http request", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(start).Milliseconds())
-	})
 }
 
 func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
