@@ -42,6 +42,12 @@ The changes apply to `/api/v1` and `/hooks/{name}`:
 
 Follow `next_cursor` until it is absent. Do not build a cursor value.
 
+These response shapes also changed:
+
+- `POST /api/v1/queue/dead/{id}/retry` returns the shared accepted-job object `{"accepted","duplicate","job_id","delivery","status"}`. It returned `202 {"retried":true,"id":"..."}` before.
+- Session JSON no longer includes `backend`, `pod_name`, or `artifact.uri`. Download the bundle through `GET /api/v1/sessions/{id}/artifact`.
+- Unknown fields in `/api/v1` request bodies return `400 invalid_request`. Webhook bodies from external senders stay permissive.
+
 ## API tokens
 
 1. `mayflyd` exits with code 2 when no token is configured. It no longer generates a token and logs the secret.
@@ -62,6 +68,9 @@ A restarted control plane lists finished sessions that retention still covers.
 `DELETE` on a restored session returns 204. A state file with a newer
 `format_version` stops startup with an error that names the file.
 
+An adoption failure reports the current attempt count with the correct singular
+or plural. `DELETE` is safe against an adoption retry in flight.
+
 ## Queue jobs
 
 The raw queue payload is now the version 1 envelope in
@@ -69,14 +78,22 @@ The raw queue payload is now the version 1 envelope in
 the next record write. A third party that reads or writes raw queue records must
 use the version 1 envelope.
 
-The job id comes from the idempotency key, scoped by kind and trigger. Omit `id`
-or use the documented derivation to keep dedupe working across a retry.
+The job id comes from the idempotency key, scoped by kind and trigger. Two
+envelopes with the same `idempotency_key` and different ids are duplicates. A
+producer-supplied id does not change the dedupe key.
+
+`GET /api/v1/queue/jobs/{id}` returns `409 conflict` with the decoder reason for
+a payload it cannot decode. Do not retry on `409`. A version 1 `session.create`
+without a prompt, or a `source.run` without a complete source, is buried with a
+reason instead of claimed and retried.
 
 ## Events
 
 The WebSocket and event wire format keeps its JSON keys. Clients must ignore an
 unknown event type and an unknown field. The final `status` event can now say
-`"status":"closing"` and omits `error` when there is no failure.
+`"status":"closing"` and omits `error` when there is no failure. `Event.type` and
+`Trigger.kind` are no longer closed enums in the OpenAPI document, so a new type
+or optional field is additive.
 
 Go importers of `internal/model` and `internal/journal` must use
 `model.EventData` and `model.DataAs[T]` instead of `map[string]any`.

@@ -7,8 +7,8 @@ Routine operations for one Mayfly control plane. The examples use release `mayfl
 - One control plane replica owns every session. Do not run two.
 - The state volume at `/var/lib/mayfly` holds the queue database, the session record database, the turn journal, the schedule watermark, and local artifact bundles. It is the only durable state on the control-plane side.
 - Session pods keep their own workspace claims. They survive a control-plane restart and a control-plane upgrade.
-- The control plane reads its configuration and the admin token at startup. A change to either needs a pod restart.
-- Keep the admin token in a variable for the commands below: `export MAYFLY_API_TOKEN=<token>`.
+- The control plane reads its configuration and the token secrets at startup. A change to either needs a pod restart.
+- Export a named API token for the commands below as `MAYFLY_API_TOKEN`. The commands need `sessions:read`, `sessions:write`, `queue:read`, and `queue:write`. The `admin` scope covers all four. The legacy token from `server.token_env` is named `default` and has the `admin` scope.
 
 ## Upgrade
 
@@ -124,19 +124,21 @@ kubectl -n mayfly exec state-copy -- ls -l /state
 
 A bbolt file from a newer build can fail the layout check of an older build. Restore the same build that wrote the archive. A control plane that reads a session record with a newer `format_version` refuses to start; do not downgrade after an upgrade writes the newer format.
 
-## Rotate the admin token
+## Rotate an API token
 
-The control plane reads the token from the environment variable that `server.token_env` names, and the variable comes from the Secret in `existingSecret`.
+Named tokens are configured under `server.tokens`, and each token reads its secret from the environment variable that `secret_env` names. The Helm chart loads those variables from the Secret that `controlPlane.tokensSecret` names. The legacy token from `server.token_env` is one token named `default` with the `admin` scope, and the chart reads it from `existingSecret`.
 
-1. Create a new token and write it to the Secret:
+1. Generate a new value and write it to the Secret key for the token. This example rotates a token named `ci` whose `secret_env` is `MAYFLY_CI_TOKEN`. Use the key that your `server.tokens` entry names:
 
 ```bash
 NEW_TOKEN="$(openssl rand -hex 32)"
-kubectl -n mayfly patch secret mayfly-secrets --type merge \
-  -p "{\"stringData\":{\"MAYFLY_API_TOKEN\":\"${NEW_TOKEN}\"}}"
+kubectl -n mayfly patch secret mayfly-tokens --type merge \
+  -p "{\"stringData\":{\"MAYFLY_CI_TOKEN\":\"${NEW_TOKEN}\"}}"
 ```
 
-2. Restart the control plane, then check both tokens:
+For the legacy default token, patch the key in `existingSecret` that `server.token_env` names. The default key is `MAYFLY_API_TOKEN`.
+
+2. Restart the control plane, then check the new and old values:
 
 ```bash
 kubectl -n mayfly rollout restart deployment/mayfly
@@ -147,11 +149,11 @@ curl -s -o /dev/null -w '%{http_code}\n' \
   -H "Authorization: Bearer ${OLD_TOKEN}" http://localhost:8080/api/v1/sessions
 ```
 
-The new token returns `200`. The old token returns `401`. Give the new token to every client.
+The new value returns `200`. The old value returns `401` after the restart. Give the new value to every client.
 
 3. Rotate a webhook secret the same way. The key is the one that `triggers[].secret_env` names. Restart, then update the sender, or its deliveries fail verification.
 
-Session pods keep their own session tokens in their own Secret. An admin token rotation does not touch them.
+Session pods keep their own session tokens in their own Secret. Rotating an API token does not touch them.
 
 ## Triage dead letters
 

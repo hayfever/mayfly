@@ -105,11 +105,11 @@ make build
 ./hack/k3d-up.sh
 ```
 
-The script builds images, creates a k3d cluster (k3s in Docker), imports the images, applies manifests, and prints the admin token. k3s enforces the per-session NetworkPolicy the control plane creates. The included deployment uses deterministic stub servers for the LLM and one HTTP MCP server, so no API key is needed.
+The script builds images, creates a k3d cluster (k3s in Docker), imports the images, applies manifests, and prints an API token with the `admin` scope. k3s enforces the per-session NetworkPolicy the control plane creates. The included deployment uses deterministic stub servers for the LLM and one HTTP MCP server, so no API key is needed.
 
 ```bash
 export MAYFLY_URL=http://localhost:8080
-export MAYFLY_TOKEN=<printed token>
+export MAYFLY_API_TOKEN=<printed token>
 
 ./bin/mayfly run --prompt "Investigate the latest deploy failure"
 ./bin/mayfly ls
@@ -191,7 +191,7 @@ curl -sS http://localhost:8080/hooks/generic \
   -d '{"prompt":"Check the latest deploy"}'
 ```
 
-Full endpoint list: [api/openapi.yaml](api/openapi.yaml), with operator notes in [docs/api.md](docs/api.md). Event thread and payloads: [docs/events.md](docs/events.md). Queue job envelope and delivery: [docs/queue-jobs.md](docs/queue-jobs.md). Provider auth: [docs/providers.md](docs/providers.md). Scheduled sources: [docs/sources.md](docs/sources.md). Release process: [docs/release.md](docs/release.md). Upgrade and recovery: [docs/runbook.md](docs/runbook.md). Deprecation policy: [docs/deprecation.md](docs/deprecation.md). Testing: [docs/testing.md](docs/testing.md). Plugins: [docs/plugins.md](docs/plugins.md).
+Full endpoint list: [api/openapi.yaml](api/openapi.yaml), with operator notes in [docs/api.md](docs/api.md). Event thread and payloads: [docs/events.md](docs/events.md). Queue job envelope and delivery: [docs/queue-jobs.md](docs/queue-jobs.md). Provider auth: [docs/providers.md](docs/providers.md). Scheduled sources: [docs/sources.md](docs/sources.md). Release process: [docs/release.md](docs/release.md). Upgrade and recovery: [docs/runbook.md](docs/runbook.md). Deprecation policy: [docs/deprecation.md](docs/deprecation.md). Testing: [docs/testing.md](docs/testing.md). Load and soak harness: [docs/loadtest.md](docs/loadtest.md). Plugins: [docs/plugins.md](docs/plugins.md).
 
 ## Configuration
 

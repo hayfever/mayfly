@@ -17,10 +17,14 @@ Operators moving from 0.1.x or a release candidate should read
 - Versioned queue job envelope `api/job.v1.schema.json`, documented in [docs/queue-jobs.md](docs/queue-jobs.md). Producers and stores encode and decode it through one codec, and the job id is derived from the idempotency key.
 - Typed event payloads in `internal/model`, with a schema per type in the OpenAPI document and the contract in [docs/events.md](docs/events.md).
 - Named API tokens with scopes under `server.tokens`, plus one audit line per authenticated, mutating `/api/v1` request.
-- Prometheus metrics and one structured request log line per request with a request id. `GET /metrics` is on the main port with an `admin` token or on a separate address.
+- Prometheus metrics and one structured request log line per request with a request id. `GET /metrics` requires a token with the `admin` scope on the main port, or is served on a separate address.
 - Release supply chain: Trivy scans both image architectures before a tag exists, and cosign signs the image digests and the chart with the workflow identity. The Helm chart validates its values with `values.schema.json`.
 - Operator runbook with upgrade, state-volume backup and restore, dead-letter triage, stuck-session recovery, and restart steps. Deprecation policy in [docs/deprecation.md](docs/deprecation.md).
 - An end-to-end upgrade test that runs one release against the previous release and checks that in-flight sessions resume.
+- A reproducible load and soak harness at `hack/loadtest`, with `make loadtest` and [docs/loadtest.md](docs/loadtest.md). It drives N concurrent sessions and webhook triggers against Mayfly with the `llmstub` backend and reports p50, p95, and p99 latency, error rate, session throughput, and goroutine and memory growth. It runs against local k3d or any kubeconfig and does not create cloud resources or use real model keys.
+- `/metrics` also exposes the standard Prometheus Go and process collectors, so a soak can watch runtime growth.
+- `POST /api/v1/schedules/{name}/run` returns the full accepted-job object. The webhook, manual schedule run, and dead-job retry use one accepted-job shape.
+- Documented the complete set of unauthenticated routes in [docs/security.md](docs/security.md).
 
 ### Breaking changes
 
@@ -35,6 +39,18 @@ Operators moving from 0.1.x or a release candidate should read
 - Helm value `replicaCount` is removed, and `values.schema.json` rejects unknown top-level values. The chart pins one replica. `shutdown.budgetSeconds` must be less than `shutdown.gracePeriodSeconds`, or `helm template` fails.
 - The default LiteLLM image tag changes from `main-stable` to `v1.110.0`.
 - Published images and the chart are signed from 0.2.0. Releases before 0.2.0 have no signature.
+- `GET /api/v1/queue/jobs/{id}` returns `409 conflict` with the decoder reason for a job whose stored payload cannot be decoded. It returned `503 unavailable` before. A client that retried on `503` must stop retrying on `409`.
+- A version 1 `session.create` without a prompt, or a `source.run` without a complete source, is buried with a reason. It is no longer claimed and retried.
+- Two envelopes with the same `idempotency_key` and different ids are duplicates. A producer-supplied id does not change the dedupe key.
+- `POST /api/v1/queue/dead/{id}/retry` returns the shared accepted-job object `{"accepted","duplicate","job_id","delivery","status"}`. It returned `202 {"retried":true,"id":"..."}` before.
+- Session JSON no longer includes `backend`, `pod_name`, or `artifact.uri`. This covers `POST /api/v1/sessions`, `GET /api/v1/sessions`, `GET /api/v1/sessions/{id}`, and the WebSocket hello. Download the bundle through `GET /api/v1/sessions/{id}/artifact`.
+- Unknown fields in `/api/v1` request bodies return `400 invalid_request`. Webhook bodies from external senders stay permissive.
+- `Event.type` and `Trigger.kind` are no longer closed enums in the OpenAPI document. A new type or optional field is additive. A rename or removal is breaking.
+
+### Fixed
+
+- The plugin shim drops readiness as soon as a child request fails, so `/readyz` no longer passes after the child has exited.
+- Adoption reports the current attempt count and the correct singular or plural in the failure message. `DELETE` is safe against an adoption retry in flight.
 
 ## [0.1.0] - Unreleased
 
