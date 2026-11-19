@@ -165,7 +165,9 @@ litellm:
   enabled: false
   image:
     repository: ghcr.io/berriai/litellm
-    tag: main-stable
+    # A release tag, not a rolling tag. LiteLLM deprecates main-stable and
+    # publishes vX.Y.Z tags that it never overwrites. Bump this deliberately.
+    tag: v1.110.0
     digest: ""
   existingSecret: litellm-secrets
   masterKeyEnv: LITELLM_MASTER_KEY

@@ -118,5 +118,6 @@ For Bedrock on EKS, annotate `litellm.serviceAccount.annotations` with your IRSA
 | `ingress.enabled` | false | Create an Ingress |
 | `controlPlane.resources` | small | Control-plane resources |
 | `litellm.enabled` | false | Deploy LiteLLM |
+| `litellm.image.tag` | `v1.110.0` | LiteLLM release tag. The chart rejects a rolling tag such as `main-stable` |
 
 The control plane runs one replica. Session history is in memory; accepted webhook work, the turn journal, and artifacts are durable with `bbolt` plus persistence, or with `redis` for the queue. See [docs/deployment.md](../../../docs/deployment.md).

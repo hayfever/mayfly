@@ -116,7 +116,7 @@ For Bedrock on EKS, bind an IAM role to the LiteLLM ServiceAccount with IRSA and
 
 [examples/litellm/deployment.yaml](../examples/litellm/deployment.yaml) is a starting manifest: ConfigMap, Deployment, Service. Before using it:
 
-- Replace `ghcr.io/berriai/litellm:main-stable` with a pinned version or digest.
+- The manifest pins `ghcr.io/berriai/litellm:v1.110.0`. Bump the tag deliberately, and check the readiness probe against the new version. The chart value `litellm.image.tag` is pinned to the same version.
 - Create `litellm-secrets`.
 - Keep the Service private. Only the control plane needs access.
 - If the image needs a writable cache, mount `/tmp` and set `HOME=/tmp`.
