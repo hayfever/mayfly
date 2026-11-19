@@ -78,7 +78,7 @@ A token acts on every session its scopes reach. There is no user identity.
 | LLM and MCP credentials | Not in any API response. A token can create a session with a configured model and MCP server. | No per-token budget or quota. A `sessions:write` token spends the deployment LLM budget. |
 | Plugin gateway keys | Not exposed. | None. |
 | Workspace and artifacts | `sessions:read` downloads any bundle. `sessions:write` plus a ticket joins any session and can drive its workspace. | Scopes apply across sessions; there is no per-session ACL. **Accepted** for a single tenant. |
-| Control-plane state | `queue:read` returns a job prompt on a single lookup and can retry or delete dead jobs. `schedules:write` starts a schedule. | Scope, not identity, decides access. |
+| Control-plane state | `queue:read` returns a job prompt on a single lookup. `queue:write` retries or deletes dead jobs. `schedules:write` starts a schedule. | Scope, not identity, decides access. |
 
 - The `admin` scope grants every scope. The legacy `server.token_env` token is
   admin. Prefer named tokens with narrow scopes and `expires_at`.
@@ -137,7 +137,7 @@ Kubernetes RBAC is the boundary. Mayfly has no control above it.
 | Asset | Control today | Residual risk |
 |---|---|---|
 | All assets above | The control-plane Role grants only the namespace objects it manages (`deploy/k8s/base/rbac.yaml`). The session ServiceAccount has no bindings and no mounted token. | A subject that can read Secrets, read the state PVC, or exec into a control-plane pod has every asset: API tokens and webhook secrets, LLM and MCP keys, session tokens, and workspace or artifact data. Exec into a session pod gives that session's token and workspace. |
-| Configuration and images | `agents.allowed_images` limits agent and plugin images. | A subject that can patch the control-plane Deployment can change the image, the config, and the mounted Secrets. |
+| Configuration and images | `agents.allowed_images` limits agent and plugin images. | A subject that can patch the control-plane Deployment can change the image, the config, and which Secrets the pod mounts. |
 
 - A subject that can read a session Secret can act as that session.
 - **Accepted**: cluster administrators and every permission the cluster grants
