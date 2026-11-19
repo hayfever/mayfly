@@ -14,7 +14,7 @@ import (
 // final sample so the report includes the end of the window. A failed scrape
 // is a sample with Err set, not a run failure.
 func collectRuntime(ctx context.Context, client *apiClient, metricsURL string, interval time.Duration) []RuntimeSample {
-	samples := []RuntimeSample{scrapeRuntime(ctx, client, metricsURL)}
+	var samples []RuntimeSample
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {

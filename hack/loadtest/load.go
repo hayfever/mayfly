@@ -82,9 +82,10 @@ func runLoad(parent context.Context, cfg loadConfig, client *apiClient, lost <-c
 		}()
 	}
 
+	firstSample := scrapeRuntime(ctx, client, cfg.metricsURL)
 	samples := make(chan []RuntimeSample, 1)
 	go func() {
-		samples <- collectRuntime(ctx, client, cfg.metricsURL, cfg.sampleInterval)
+		samples <- append([]RuntimeSample{firstSample}, collectRuntime(ctx, client, cfg.metricsURL, cfg.sampleInterval)...)
 	}()
 
 	result := runWorkers(ctx, cfg, client)
@@ -234,7 +235,7 @@ func (w *worker) session(ctx context.Context) {
 	w.result.sessionsCreated++
 
 	status, waitErr := w.client.waitSession(ctx, id, w.cfg.pollInterval, w.cfg.sessionTimeout)
-	cleanup(ctx, w, id, waitErr)
+	cleanup(w, id)
 	if waitErr != nil {
 		if ctx.Err() == nil {
 			w.result.waitFailures = append(w.result.waitFailures, waitErr.Error())
@@ -275,7 +276,7 @@ func (w *worker) webhook(ctx context.Context, n int) {
 	}
 	w.result.sessionsCreated++
 	status, waitErr := w.client.waitSession(ctx, id, w.cfg.pollInterval, w.cfg.sessionTimeout)
-	cleanup(ctx, w, id, waitErr)
+	cleanup(w, id)
 	if waitErr != nil {
 		if ctx.Err() == nil {
 			w.result.waitFailures = append(w.result.waitFailures, waitErr.Error())
@@ -295,13 +296,10 @@ func (w *worker) webhook(ctx context.Context, n int) {
 
 // cleanup deletes a session after a terminal state or a failed wait. It uses
 // its own context so the end of the load window does not skip the delete.
-func cleanup(ctx context.Context, w *worker, id string, waitErr error) {
+func cleanup(w *worker, id string) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := w.client.deleteSession(cleanupCtx, id); err != nil {
-		if waitErr != nil && ctx.Err() != nil {
-			return
-		}
 		w.result.cleanupFailures = append(w.result.cleanupFailures, err.Error())
 	}
 }
