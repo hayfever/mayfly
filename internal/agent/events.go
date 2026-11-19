@@ -68,14 +68,14 @@ func loggedStepEvents(path string) (map[string]struct{}, error) {
 
 func recordKey(stepKey, typ string) string { return stepKey + " " + typ }
 
-func (e *emitter) Emit(ctx context.Context, typ model.EventType, actor, text string, data map[string]any) {
+func (e *emitter) Emit(ctx context.Context, typ model.EventType, actor, text string, data model.EventData) {
 	e.emit(ctx, "", typ, actor, text, data)
 }
 
 // EmitStep emits an event that belongs to one journaled step. The control
 // plane drops a repeated StepKey so re-running a step that never reached the
 // journal does not duplicate its thread message.
-func (e *emitter) EmitStep(ctx context.Context, stepKey string, typ model.EventType, actor, text string, data map[string]any) {
+func (e *emitter) EmitStep(ctx context.Context, stepKey string, typ model.EventType, actor, text string, data model.EventData) {
 	e.emit(ctx, stepKey, typ, actor, text, data)
 }
 
@@ -117,7 +117,7 @@ func (e *emitter) RecordLocal(stepKey string, evs []journal.StepEvent) {
 	}
 }
 
-func (e *emitter) emit(ctx context.Context, stepKey string, typ model.EventType, actor, text string, data map[string]any) {
+func (e *emitter) emit(ctx context.Context, stepKey string, typ model.EventType, actor, text string, data model.EventData) {
 	ev := model.Event{
 		Time:    time.Now().UTC(),
 		StepKey: stepKey,

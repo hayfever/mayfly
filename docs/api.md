@@ -124,7 +124,8 @@ Force-stops the session, marks it failed, and keeps the record until `sessions.r
 
 ### `GET /api/v1/sessions/{id}/events?after=<seq>`
 
-Returns retained events with sequence greater than `after`.
+Returns retained events with sequence greater than `after`. The event object
+and every payload schema are documented in [events.md](events.md).
 
 ```json
 {"session_id":"abc123","events":[{"seq":4,"type":"assistant_message","text":"...","time":"..."}]}
@@ -176,7 +177,10 @@ Client messages:
 {"type":"user_message","text":"message text"}
 ```
 
-The actor name comes from the ticket. Multiple clients share the thread. The server sends ping frames every 30 seconds. Events are replayed from `after` (default 0); reconnect with `after=0` to rebuild the view.
+The actor name comes from the ticket. Multiple clients share the thread. The
+server sends ping frames every 30 seconds. Events are replayed from `after`
+(default 0); reconnect with `after=0` to rebuild the view. The event object and
+the compatibility rules are documented in [events.md](events.md).
 
 The message types are `WebSocketServerMessage` and `WebSocketClientMessage` in the spec.
 

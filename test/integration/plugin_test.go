@@ -143,7 +143,7 @@ func TestPluginResumeDoesNotRepeatEffect(t *testing.T) {
 		var interrupted, system bool
 		for _, ev := range events {
 			if ev.Type == model.EventToolResult {
-				if value, _ := ev.Data["interrupted"].(bool); value {
+				if data, _ := model.DataAs[model.ToolResultData](ev.Data); data.Interrupted {
 					interrupted = true
 				}
 			}

@@ -182,12 +182,12 @@ func (r *Runtime) Run(ctx context.Context) error {
 	for _, p := range r.cfg.Plugins {
 		pluginNames = append(pluginNames, p.Name)
 	}
-	r.events.Emit(ctx, model.EventSystem, "mayfly", "Session started. Attach to interact.", map[string]any{
-		"model":       r.cfg.Model,
-		"skills":      skillNames,
-		"mcp_servers": mcpNames,
-		"plugins":     pluginNames,
-		"tool_count":  len(r.toolsList),
+	r.events.Emit(ctx, model.EventSystem, "mayfly", "Session started. Attach to interact.", model.SystemData{
+		Model:      r.cfg.Model,
+		Skills:     skillNames,
+		MCPServers: mcpNames,
+		Plugins:    pluginNames,
+		ToolCount:  len(r.toolsList),
 	})
 
 	userCh := make(chan model.Event, 32)
@@ -251,10 +251,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 					r.events.Emit(ctx, model.EventError, "mayfly", "Message queue is full; message dropped.", nil)
 				}
 			case model.EventControl:
-				action, _ := ev.Data["action"].(string)
-				reason, _ := ev.Data["reason"].(string)
+				control, _ := model.DataAs[model.ControlData](ev.Data)
 				select {
-				case controlCh <- controlMsg{action: action, reason: reason}:
+				case controlCh <- controlMsg{action: control.Action, reason: control.Reason}:
 				default:
 				}
 			}
@@ -703,14 +702,14 @@ func (r *Runtime) executeModel(ctx context.Context, turn int64, step, round int,
 			Type:  string(model.EventAssistantMessage),
 			Actor: "agent",
 			Text:  msg.Content,
-			Data:  map[string]any{"finish_reason": finish},
+			Data:  model.AssistantMessageData{FinishReason: finish},
 		})
 	case msg.Content != "":
 		events = append(events, journal.StepEvent{
 			Type:  string(model.EventAssistantMessage),
 			Actor: "agent",
 			Text:  msg.Content,
-			Data:  map[string]any{"tool_calls": len(msg.ToolCalls)},
+			Data:  model.AssistantMessageData{ToolCalls: len(msg.ToolCalls)},
 		})
 	}
 	out, err := json.Marshal(modelStepOutput{Message: msg, FinishReason: finish, Events: events})
@@ -737,10 +736,10 @@ func (r *Runtime) executeTool(ctx context.Context, turn int64, step int, call ll
 			Type:  string(model.EventToolCall),
 			Actor: "agent",
 			Text:  "Invalid JSON arguments for " + name,
-			Data: map[string]any{
-				"tool":      name,
-				"call_id":   call.ID,
-				"arguments": args,
+			Data: model.ToolCallData{
+				Tool:      name,
+				CallID:    call.ID,
+				Arguments: args,
 			},
 		}
 		r.events.EmitRecord(ctx, callKey, ev)
@@ -755,10 +754,10 @@ func (r *Runtime) executeTool(ctx context.Context, turn int64, step int, call ll
 		Type:  string(model.EventToolCall),
 		Actor: "agent",
 		Text:  name,
-		Data: map[string]any{
-			"tool":      name,
-			"call_id":   call.ID,
-			"arguments": args,
+		Data: model.ToolCallData{
+			Tool:      name,
+			CallID:    call.ID,
+			Arguments: args,
 		},
 	}
 	r.events.EmitRecord(ctx, callKey, callEvent)
@@ -774,19 +773,16 @@ func (r *Runtime) executeTool(ctx context.Context, turn int64, step int, call ll
 		// cut short. Its message is the whole result, so the model reads why.
 		r.events.Emit(ctx, model.EventSystem, "mayfly", out, nil)
 	}
-	resultData := map[string]any{
-		"tool":    name,
-		"call_id": call.ID,
-		"error":   isErr,
-	}
-	if outcome.Interrupted {
-		resultData["interrupted"] = true
-	}
 	resultEvent := journal.StepEvent{
 		Type:  string(model.EventToolResult),
 		Actor: "agent",
 		Text:  truncate(out, 8<<10),
-		Data:  resultData,
+		Data: model.ToolResultData{
+			Tool:        name,
+			CallID:      call.ID,
+			Error:       isErr,
+			Interrupted: outcome.Interrupted,
+		},
 	}
 	r.trace.Write("tool_result", map[string]any{
 		"tool":        name,
