@@ -1,0 +1,16 @@
+{
+  "seq": 7,
+  "session_id": "abc123",
+  "step_key": "1/2/result",
+  "time": "2026-01-02T03:04:05Z",
+  "type": "artifact",
+  "actor": "mayfly",
+  "text": "text",
+  "data": {
+    "key": "sessions/abc123/artifact.tar.gz",
+    "uri": "file:///artifacts/abc123.tar.gz",
+    "size": 42,
+    "sha256": "0123456789abcdef",
+    "partial": true
+  }
+}

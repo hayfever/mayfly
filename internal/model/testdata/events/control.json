@@ -1,0 +1,13 @@
+{
+  "seq": 7,
+  "session_id": "abc123",
+  "step_key": "1/2/result",
+  "time": "2026-01-02T03:04:05Z",
+  "type": "control",
+  "actor": "mayfly",
+  "text": "text",
+  "data": {
+    "action": "close",
+    "reason": "done"
+  }
+}

@@ -599,12 +599,11 @@ func printEvent(ev model.Event) {
 			fmt.Println(ev.Text)
 		}
 	case model.EventToolCall:
-		tool, _ := ev.Data["tool"].(string)
-		args, _ := ev.Data["arguments"].(string)
-		fmt.Printf("[tool] %s %s\n", tool, args)
+		call, _ := model.DataAs[model.ToolCallData](ev.Data)
+		fmt.Printf("[tool] %s %s\n", call.Tool, call.Arguments)
 	case model.EventToolResult:
-		tool, _ := ev.Data["tool"].(string)
-		fmt.Printf("[result] %s\n%s\n", tool, ev.Text)
+		result, _ := model.DataAs[model.ToolResultData](ev.Data)
+		fmt.Printf("[result] %s\n%s\n", result.Tool, ev.Text)
 	case model.EventStatus, model.EventSystem:
 		fmt.Printf("-- %s\n", ev.Text)
 	case model.EventError:

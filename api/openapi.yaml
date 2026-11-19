@@ -241,6 +241,10 @@ paths:
     get:
       operationId: listSessionEvents
       summary: Read retained events
+      description: |
+        Return events with a sequence greater than `after`. The event object
+        and the payload schema for each event type are documented in
+        docs/events.md.
       tags: [sessions]
       parameters:
         - name: after
@@ -418,7 +422,8 @@ paths:
 
         Server frames are `WebSocketServerMessage`. Client frames are
         `WebSocketClientMessage`. Events are replayed after `after`. The server
-        sends a ping control frame every 30 seconds.
+        sends a ping control frame every 30 seconds. The event object and the
+        compatibility rules are documented in docs/events.md.
       tags: [sessions]
       parameters:
         - name: ticket
@@ -912,6 +917,117 @@ components:
         data:
           type: object
           additionalProperties: true
+          description: |
+            Payload of the event. The shape depends on `type`. Each event type
+            that carries a payload has a schema in this document, and
+            docs/events.md maps every type to its schema. The field is absent
+            for a type without a payload. A client must ignore an unknown
+            event type and unknown fields.
+    UserMessageEventData:
+      type: object
+      description: Payload of a `user_message` event that a trigger started.
+      required: [kind, name, event]
+      properties:
+        kind:
+          type: string
+          description: "Trigger kind: api, generic, github, slack, or datadog."
+        name:
+          type: string
+        event:
+          type: string
+    AssistantMessageEventData:
+      type: object
+      description: Payload of an `assistant_message` event.
+      properties:
+        finish_reason:
+          type: string
+        tool_calls:
+          type: integer
+    ToolCallEventData:
+      type: object
+      description: Payload of a `tool_call` event.
+      required: [tool, call_id, arguments]
+      properties:
+        tool:
+          type: string
+        call_id:
+          type: string
+        arguments:
+          type: string
+          description: Tool arguments as a JSON-encoded string.
+    ToolResultEventData:
+      type: object
+      description: Payload of a `tool_result` event.
+      required: [tool, call_id, error]
+      properties:
+        tool:
+          type: string
+        call_id:
+          type: string
+        error:
+          type: boolean
+        interrupted:
+          type: boolean
+    StatusEventData:
+      type: object
+      description: Payload of a `status` event.
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [pending, running, closing, completed, failed, expired]
+        reason:
+          type: string
+        error:
+          type: string
+        restart:
+          type: integer
+    SystemEventData:
+      type: object
+      description: Payload of the first `system` event, which reports the runtime setup.
+      required: [model, skills, mcp_servers, plugins, tool_count]
+      properties:
+        model:
+          type: string
+        skills:
+          type: array
+          items:
+            type: string
+        mcp_servers:
+          type: array
+          items:
+            type: string
+        plugins:
+          type: array
+          items:
+            type: string
+        tool_count:
+          type: integer
+    ArtifactEventData:
+      type: object
+      description: Payload of an `artifact` event.
+      required: [key, uri, size, sha256]
+      properties:
+        key:
+          type: string
+        uri:
+          type: string
+        size:
+          type: integer
+          format: int64
+        sha256:
+          type: string
+        partial:
+          type: boolean
+    ControlEventData:
+      type: object
+      description: Payload of a `control` event.
+      required: [action]
+      properties:
+        action:
+          type: string
+        reason:
+          type: string
     SessionResponse:
       type: object
       required: [session, url]

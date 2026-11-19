@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/hayfever/mayfly/internal/model"
 )
 
 // Entry is one completed step of a turn.
@@ -29,10 +31,29 @@ type Entry struct {
 // entry's output so control-plane recovery can rebuild the visible thread
 // without executing the step.
 type StepEvent struct {
-	Type  string         `json:"type"`
-	Actor string         `json:"actor,omitempty"`
-	Text  string         `json:"text,omitempty"`
-	Data  map[string]any `json:"data,omitempty"`
+	Type  string          `json:"type"`
+	Actor string          `json:"actor,omitempty"`
+	Text  string          `json:"text,omitempty"`
+	Data  model.EventData `json:"data,omitempty"`
+}
+
+// UnmarshalJSON decodes the typed payload that belongs to the event type.
+func (e *StepEvent) UnmarshalJSON(b []byte) error {
+	type stepEvent StepEvent
+	var raw struct {
+		*stepEvent
+		Data json.RawMessage `json:"data"`
+	}
+	raw.stepEvent = (*stepEvent)(e)
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	data, err := model.DecodeEventData(model.EventType(e.Type), raw.Data)
+	if err != nil {
+		return err
+	}
+	e.Data = data
+	return nil
 }
 
 // Store persists turn steps. Append is idempotent for the same session, turn,

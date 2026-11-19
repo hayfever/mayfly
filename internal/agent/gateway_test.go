@@ -258,7 +258,7 @@ func TestExecuteToolInterrupted(t *testing.T) {
 	if result == nil {
 		t.Fatalf("no tool_result event in %+v", step.Events)
 	}
-	if interrupted, _ := result.Data["interrupted"].(bool); !interrupted {
+	if data, _ := model.DataAs[model.ToolResultData](result.Data); !data.Interrupted {
 		t.Fatalf("tool_result data = %+v", result.Data)
 	}
 	var system []string
