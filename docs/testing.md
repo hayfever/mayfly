@@ -99,7 +99,7 @@ MAYFLY_E2E_UPGRADE_FROM=0.1.0-rc.2 MAYFLY_E2E_PULL_SECRET=ghcr-pull \
 make e2e-down
 ```
 
-`MAYFLY_E2E_CHART_REPOSITORY` and `MAYFLY_E2E_IMAGE_PREFIX` override the default `ghcr.io/hayfever` package locations. `MAYFLY_E2E_UPGRADE_NAMESPACE` overrides the namespace, and the test deletes it at the end. The test installs both releases with the bbolt queue from [e2e/values.yaml](../e2e/values.yaml); the Redis e2e variant does not run it. A run takes a few minutes because the released images are pulled from the registry.
+`MAYFLY_E2E_CHART_REPOSITORY` and `MAYFLY_E2E_IMAGE_PREFIX` override the default `ghcr.io/hayfever` package locations. `MAYFLY_E2E_UPGRADE_NAMESPACE` overrides the namespace. The test deletes the namespace when it passes and keeps it for inspection when it fails. The test installs both releases with the bbolt queue from [e2e/values.yaml](../e2e/values.yaml); the Redis e2e variant does not run it. A run takes a few minutes because the released images are pulled from the registry.
 
 ### Against a real cluster
 

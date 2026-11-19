@@ -105,6 +105,12 @@ jobs:
           MAYFLY_E2E_UPGRADE_FROM: ${{ steps.previous.outputs.from }}
           MAYFLY_E2E_PULL_SECRET: ghcr-pull
         run: make e2e-test
+      - name: upgrade diagnostics
+        if: failure()
+        run: |
+          mkdir -p "${{ runner.temp }}/e2e"
+          kubectl --context k3d-mayfly-e2e -n mayfly-upgrade get all,secrets,configmaps,pvc -o wide >"${{ runner.temp }}/e2e/upgrade-resources.txt" 2>&1 || true
+          kubectl --context k3d-mayfly-e2e -n mayfly-upgrade logs deployment/mayfly-upgrade --all-containers --tail=-1 >"${{ runner.temp }}/e2e/upgrade-mayflyd.log" 2>&1 || true
       - name: upload diagnostics
         if: failure()
         uses: actions/upload-artifact@v7

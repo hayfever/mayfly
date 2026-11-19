@@ -327,6 +327,10 @@ func (c *cluster) trySessionIDs() ([]string, error) {
 func (c *cluster) cleanupUpgrade(t *testing.T) {
 	t.Helper()
 	c.stopPortForward()
+	if t.Failed() {
+		t.Logf("keeping namespace %s for diagnostics; delete it with: kubectl delete namespace %s", c.namespace, c.namespace)
+		return
+	}
 	if out, err := c.kubectl("delete", "namespace", c.namespace, "--wait=false"); err != nil {
 		t.Logf("delete namespace %s: %v: %s", c.namespace, err, strings.TrimSpace(out))
 	}
