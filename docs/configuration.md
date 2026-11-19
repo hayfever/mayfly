@@ -366,6 +366,7 @@ Signature behavior:
 | `MAYFLY_API_TOKEN` | control plane | Default `server.token_env`: one admin-scoped token named `default` |
 | `MAYFLY_CONFIG` | all binaries | Default config path |
 | `MAYFLY_LOG_LEVEL` | control plane, runtime | `debug`, `info`, `warn`, `error` |
+| `MAYFLY_TOKEN` | CLI | Deprecated alias for `MAYFLY_API_TOKEN`. The CLI prints one warning when it uses the alias |
 | `MAYFLY_SESSION_TOKEN` | runtime | Injected per session; do not set manually |
 | `KUBECONFIG` | control plane | Used when not running in-cluster |
 
