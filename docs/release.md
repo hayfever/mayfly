@@ -27,14 +27,15 @@ If the base ref has no `api/openapi.yaml`, the script prints a notice and exits 
 
 CI runs `govulncheck ./...` in the `vulncheck` job. The job fails when the module graph reaches a known vulnerability in our code paths. Fix it by bumping the dependency in `go.mod`. The scan runs with the latest vulnerability database, so a new advisory can fail a pull request that changes nothing.
 
-The release workflow builds each image, scans it, and signs it in that order:
+The release workflow builds each image, scans it, tags it, and signs it in that order:
 
-1. Docker Buildx pushes the multi-arch image and reports the manifest digest.
-2. `trivy image` scans that digest with `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`. A HIGH or CRITICAL vulnerability that has a fixed version fails the job. A finding without a fix is reported and does not block.
-3. `cosign sign` signs the digest with the workflow's GitHub OIDC identity. No key and no stored secret is involved.
-4. The chart job waits for both images, pushes the chart to GHCR, and signs it with the same identity.
+1. Docker Buildx builds the multi-arch image and pushes the manifest and layers by digest, without a tag.
+2. `trivy image` scans that digest for `linux/amd64` and `linux/arm64` with `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`. A HIGH or CRITICAL vulnerability that has a fixed version fails the job. A finding without a fix is reported and does not block.
+3. Only a clean scan creates the version, `major.minor`, and `latest` tags with `docker buildx imagetools create`.
+4. `cosign sign` signs the digest with the workflow's GitHub OIDC identity. No key and no stored secret is involved.
+5. The chart job waits for both images, pushes the chart to GHCR, and signs it with the same identity.
 
-The signature comes after the scan, so an image that fails the scan stays unsigned. A tag that does not verify is not a release artifact.
+A failed scan fails the job before any tag exists, so the release has no image tag and no signature. The untagged manifest is not a release artifact, and the registry garbage collector removes it. A tag that does not verify is not a release artifact.
 
 ### Verify a published release
 
@@ -102,9 +103,9 @@ git push origin main --tags
 The release workflow runs on `v*` tags:
 
 - GoReleaser builds CLI archives, checksums, and the GitHub release.
-- Docker Buildx publishes multi-arch control-plane and agent images with SBOM and provenance.
-- Trivy scans each image digest and fails the job on a HIGH or CRITICAL vulnerability that has a fix.
-- Cosign signs each image digest with the workflow identity, then the chart job pushes and signs the chart.
+- Docker Buildx builds multi-arch control-plane and agent images with SBOM and provenance, and pushes them by digest without tags.
+- Trivy scans each digest for both architectures and fails the job on a HIGH or CRITICAL vulnerability that has a fix.
+- Buildx creates the image tags after a clean scan. Cosign then signs each digest with the workflow identity, and the chart job pushes and signs the chart.
 
 ## Release candidates
 
