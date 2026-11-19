@@ -98,8 +98,10 @@ with later producers:
    existing field means. Publish version 2 instead.
 3. A reader rejects a version it does not know. The store buries the job with
    the version in the error, so the queue keeps moving.
-4. A reader also rejects an unknown `kind`. A build that does not implement a
-   new kind buries the job instead of running it as a session.
+4. A reader also rejects an unknown `kind`, a `session.create` without a
+   `prompt`, and a `source.run` without a complete `source`. A build that does
+   not implement a kind, or that reads a job the schema rejects, buries the job
+   with the reason instead of running it.
 5. Validate producer output against `api/job.v1.schema.json` in tests.
 
 ## Idempotency

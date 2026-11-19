@@ -161,6 +161,11 @@ func TestEnvelopeRejectsUnknownKindAndMissingTrigger(t *testing.T) {
 		"unknown kind":    `{"version":1,"kind":"session.delete","created_at":"2026-11-18T09:00:00Z","prompt":"hi","trigger":{"kind":"generic"}}`,
 		"missing kind":    `{"version":1,"kind":"","created_at":"2026-11-18T09:00:00Z","prompt":"hi","trigger":{"kind":"generic"}}`,
 		"missing trigger": `{"version":1,"kind":"session.create","created_at":"2026-11-18T09:00:00Z","prompt":"hi"}`,
+		"missing prompt":  `{"version":1,"kind":"session.create","created_at":"2026-11-18T09:00:00Z","trigger":{"kind":"generic"}}`,
+		"empty prompt":    `{"version":1,"kind":"session.create","created_at":"2026-11-18T09:00:00Z","prompt":"","trigger":{"kind":"generic"}}`,
+		"missing source":  `{"version":1,"kind":"source.run","created_at":"2026-11-18T09:00:00Z","trigger":{"kind":"schedule"}}`,
+		"incomplete source": `{"version":1,"kind":"source.run","created_at":"2026-11-18T09:00:00Z","trigger":{"kind":"schedule"},` +
+			`"source":{"schedule":"watch"}}`,
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
