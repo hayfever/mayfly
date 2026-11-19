@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
+## [0.3.0] - Unreleased
+
+### Changed
+
+- Install and release docs describe the public 0.2.0 images and chart, verify releases by digest with cosign, and [docs/security.md](docs/security.md) adds an attacker-by-asset threat model.
+
 ## [0.2.0] - 2026-11-19
 
 Operators moving from 0.1.x or a release candidate should read
