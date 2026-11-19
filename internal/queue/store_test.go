@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,14 +43,15 @@ func testJob(delivery string) Job {
 	}, time.Now().UTC())
 }
 
-// backends returns every available store with the default test configuration.
+// backends returns every available store with the default test configuration
+// on the system clock.
 func backends(t *testing.T) map[string]Store {
 	t.Helper()
-	return backendsWith(t, testConfig(t))
+	stores, _, _ := openBackends(t, testConfig(t), systemClock)
+	return stores
 }
 
-// shortLeaseConfig makes a claim expire quickly, for tests that wait for a
-// lease to time out.
+// shortLeaseConfig makes a claim expire quickly on the store clock.
 func shortLeaseConfig(t *testing.T) config.QueueConfig {
 	t.Helper()
 	cfg := testConfig(t)
@@ -57,30 +59,95 @@ func shortLeaseConfig(t *testing.T) config.QueueConfig {
 	return cfg
 }
 
-// backendsWith returns every available store for the conformance suite. Redis
-// runs against an in-process miniredis unless MAYFLY_REDIS_TEST_URL names one.
+// backendsWith returns every available store for the conformance suite on the
+// system clock.
 func backendsWith(t *testing.T, cfg config.QueueConfig) map[string]Store {
 	t.Helper()
-	stores := map[string]Store{}
-	memory, err := New(context.Background(), cfg)
-	if err != nil {
-		t.Fatal(err)
+	stores, _, _ := openBackends(t, cfg, systemClock)
+	return stores
+}
+
+// testClock is a clock the test moves by hand, so lease and expiry
+// assertions do not depend on wall-clock timing.
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newTestClock() *testClock {
+	return &testClock{now: time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)}
+}
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *testClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// testBackends is one set of stores on a manually advanced clock.
+type testBackends struct {
+	stores        map[string]Store
+	clock         *testClock
+	redis         *miniredis.Miniredis
+	externalRedis bool
+}
+
+// clockedBackends returns every available store on one test clock. Time moves
+// only when a test calls advance, so a lease expires exactly when the test says
+// it does.
+func clockedBackends(t *testing.T, cfg config.QueueConfig) *testBackends {
+	t.Helper()
+	clock := newTestClock()
+	stores, server, external := openBackends(t, cfg, clock.Now)
+	return &testBackends{stores: stores, clock: clock, redis: server, externalRedis: external}
+}
+
+// advance moves the clock forward. Redis scheduling scores read the same
+// clock, and the in-process server expires its keys with it.
+func (b *testBackends) advance(d time.Duration) {
+	b.clock.Advance(d)
+	if b.redis != nil {
+		b.redis.FastForward(d)
 	}
-	stores["memory"] = memory
+}
+
+// expire moves the clock forward and waits for a real Redis server, which
+// expires keys on its own clock, to do the same.
+func (b *testBackends) expire(d time.Duration) {
+	b.advance(d)
+	if b.externalRedis {
+		time.Sleep(d)
+	}
+}
+
+// openBackends builds every available store on one clock. Redis runs against an
+// in-process miniredis unless MAYFLY_REDIS_TEST_URL names one.
+func openBackends(t *testing.T, cfg config.QueueConfig, now clock) (map[string]Store, *miniredis.Miniredis, bool) {
+	t.Helper()
+	stores := map[string]Store{
+		"memory": newMemoryWithClock(cfg, now),
+	}
 
 	boltCfg := cfg
 	boltCfg.Backend = "bbolt"
 	boltCfg.Bolt.Path = filepath.Join(t.TempDir(), "queue.db")
-	bolt, err := New(context.Background(), boltCfg)
+	bolt, err := newBoltWithClock(boltCfg, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	stores["bbolt"] = bolt
 
+	var server *miniredis.Miniredis
 	url := os.Getenv("MAYFLY_REDIS_TEST_URL")
 	if url == "" {
-		server := miniredis.RunT(t)
-		// Expire keys as the wall clock advances; miniredis otherwise only
+		server = miniredis.RunT(t)
+		// Expire keys as the clock advances; miniredis otherwise only
 		// expires on FastForward.
 		server.ClockTTL(true)
 		url = "redis://" + server.Addr()
@@ -90,15 +157,13 @@ func backendsWith(t *testing.T, cfg config.QueueConfig) map[string]Store {
 	redisCfg.Redis.URL = url
 	// A fresh prefix keeps repeat runs independent.
 	redisCfg.Redis.KeyPrefix = fmt.Sprintf("mayfly-test-%d", time.Now().UnixNano())
-	redisBackend, err := New(context.Background(), redisCfg)
+	redisBackend, err := newRedisWithClock(context.Background(), redisCfg, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Clear keys from an earlier run so counts start at zero.
-	if store, ok := redisBackend.(*redisStore); ok {
-		ctx := context.Background()
-		_ = store.client.Del(ctx, store.queue, store.jobs, store.dead).Err()
-	}
+	ctx := context.Background()
+	_ = redisBackend.client.Del(ctx, redisBackend.queue, redisBackend.jobs, redisBackend.dead).Err()
 	stores["redis"] = redisBackend
 	for name, store := range stores {
 		t.Cleanup(func() {
@@ -107,11 +172,12 @@ func backendsWith(t *testing.T, cfg config.QueueConfig) map[string]Store {
 			}
 		})
 	}
-	return stores
+	return stores, server, server == nil
 }
 
 func TestStoreLifecycle(t *testing.T) {
-	for name, store := range backends(t) {
+	backends := clockedBackends(t, testConfig(t))
+	for name, store := range backends.stores {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			job := testJob("delivery-1")
@@ -195,7 +261,9 @@ func TestStoreDedupeIsPerTrigger(t *testing.T) {
 }
 
 func TestStoreVisibilityExpiryReclaims(t *testing.T) {
-	for name, store := range backendsWith(t, shortLeaseConfig(t)) {
+	cfg := testConfig(t)
+	backends := clockedBackends(t, cfg)
+	for name, store := range backends.stores {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			if err := store.Accept(ctx, testJob("lease-me")); err != nil {
@@ -208,7 +276,7 @@ func TestStoreVisibilityExpiryReclaims(t *testing.T) {
 			if again, _ := store.Claim(ctx, 1); len(again) != 0 {
 				t.Fatalf("job claimed twice: %+v", again)
 			}
-			time.Sleep(80 * time.Millisecond)
+			backends.advance(cfg.VisibilityTimeout.Std() + time.Millisecond)
 			second, err := store.Claim(ctx, 1)
 			if err != nil {
 				t.Fatal(err)
@@ -224,7 +292,9 @@ func TestStoreVisibilityExpiryReclaims(t *testing.T) {
 }
 
 func TestStoreRetryThenDead(t *testing.T) {
-	for name, store := range backends(t) {
+	cfg := testConfig(t)
+	backends := clockedBackends(t, cfg)
+	for name, store := range backends.stores {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			if err := store.Accept(ctx, testJob("fails")); err != nil {
@@ -238,7 +308,7 @@ func TestStoreRetryThenDead(t *testing.T) {
 			if stats.Dead != 0 {
 				t.Fatalf("job buried after one attempt: %+v", stats)
 			}
-			time.Sleep(40 * time.Millisecond)
+			backends.advance(Backoff(1, cfg.RetryBase.Std()))
 			retry := claimOne(t, store)
 			if retry.Job.Attempts != 1 {
 				t.Fatalf("attempts = %d, want 1", retry.Job.Attempts)
@@ -258,14 +328,16 @@ func TestStoreRetryThenDead(t *testing.T) {
 }
 
 func TestStoreReleaseDefers(t *testing.T) {
-	for name, store := range backends(t) {
+	backends := clockedBackends(t, testConfig(t))
+	for name, store := range backends.stores {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			if err := store.Accept(ctx, testJob("defer")); err != nil {
 				t.Fatal(err)
 			}
 			lease := claimOne(t, store)
-			if err := store.Release(ctx, lease, 150*time.Millisecond); err != nil {
+			const delay = 150 * time.Millisecond
+			if err := store.Release(ctx, lease, delay); err != nil {
 				t.Fatal(err)
 			}
 			if leases, _ := store.Claim(ctx, 1); len(leases) != 0 {
@@ -275,7 +347,7 @@ func TestStoreReleaseDefers(t *testing.T) {
 			if stats.Leased != 1 || stats.Dead != 0 {
 				t.Fatalf("stats after release = %+v", stats)
 			}
-			time.Sleep(200 * time.Millisecond)
+			backends.advance(delay)
 			if got := claimOne(t, store); got.ID != lease.ID {
 				t.Fatalf("released job = %s, want %s", got.ID, lease.ID)
 			}
@@ -384,7 +456,8 @@ func TestBoltPurgesExpiredDedupeKeys(t *testing.T) {
 	cfg.MaxJobs = 0
 	cfg.Bolt.Path = filepath.Join(t.TempDir(), "queue.db")
 	cfg.DedupeTTL = config.Duration(20 * time.Millisecond)
-	store, err := New(context.Background(), cfg)
+	clock := newTestClock()
+	store, err := newBoltWithClock(cfg, clock.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +468,7 @@ func TestBoltPurgesExpiredDedupeKeys(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	time.Sleep(40 * time.Millisecond)
+	clock.Advance(cfg.DedupeTTL.Std() + time.Nanosecond)
 	if err := store.Accept(ctx, testJob("fresh")); err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +476,7 @@ func TestBoltPurgesExpiredDedupeKeys(t *testing.T) {
 		t.Fatalf("fresh duplicate = %v, want ErrDuplicate", err)
 	}
 	var seen int
-	_ = store.(*boltStore).db.View(func(tx *bolt.Tx) error {
+	_ = store.db.View(func(tx *bolt.Tx) error {
 		seen = tx.Bucket(bucketSeen).Stats().KeyN
 		return nil
 	})
@@ -474,14 +547,16 @@ func claimOne(t *testing.T, store Store) Lease {
 }
 
 func TestStoreStaleLeaseCannotSettle(t *testing.T) {
-	for name, store := range backendsWith(t, shortLeaseConfig(t)) {
+	cfg := shortLeaseConfig(t)
+	backends := clockedBackends(t, cfg)
+	for name, store := range backends.stores {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			if err := store.Accept(ctx, testJob("stale")); err != nil {
 				t.Fatal(err)
 			}
 			stale := claimOne(t, store)
-			time.Sleep(80 * time.Millisecond)
+			backends.advance(cfg.VisibilityTimeout.Std())
 			current := claimOne(t, store)
 			if err := store.Nack(ctx, stale, errors.New("late failure")); !errors.Is(err, ErrLeaseLost) {
 				t.Fatalf("stale nack = %v, want ErrLeaseLost", err)
@@ -495,7 +570,7 @@ func TestStoreStaleLeaseCannotSettle(t *testing.T) {
 			if err := store.Nack(ctx, current, errors.New("real failure")); err != nil {
 				t.Fatalf("current nack = %v", err)
 			}
-			time.Sleep(40 * time.Millisecond)
+			backends.advance(Backoff(1, cfg.RetryBase.Std()))
 			if retry := claimOne(t, store); retry.Job.Attempts != 1 {
 				t.Fatalf("attempts = %d, want 1", retry.Job.Attempts)
 			}
@@ -602,7 +677,8 @@ func TestStoreExpiresDoneTombstones(t *testing.T) {
 	cfg.MaxJobs = 0
 	cfg.MaxAttempts = 1
 	cfg.TombstoneTTL = config.Duration(100 * time.Millisecond)
-	for name, store := range backendsWith(t, cfg) {
+	backends := clockedBackends(t, cfg)
+	for name, store := range backends.stores {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			job := testJob("tombstone")
@@ -612,7 +688,7 @@ func TestStoreExpiresDoneTombstones(t *testing.T) {
 			if err := store.Ack(ctx, claimOne(t, store), Result{SessionID: "sess"}); err != nil {
 				t.Fatal(err)
 			}
-			time.Sleep(150 * time.Millisecond)
+			backends.expire(cfg.TombstoneTTL.Std() + time.Nanosecond)
 			// bbolt and memory purge on the next accept; Redis expires the key.
 			if err := store.Accept(ctx, testJob("")); err != nil {
 				t.Fatal(err)
@@ -625,23 +701,26 @@ func TestStoreExpiresDoneTombstones(t *testing.T) {
 }
 
 func TestStoreExtendKeepsLease(t *testing.T) {
-	for name, store := range backendsWith(t, shortLeaseConfig(t)) {
+	cfg := shortLeaseConfig(t)
+	ttl := cfg.VisibilityTimeout.Std()
+	backends := clockedBackends(t, cfg)
+	for name, store := range backends.stores {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			if err := store.Accept(ctx, testJob("extend")); err != nil {
 				t.Fatal(err)
 			}
 			lease := claimOne(t, store)
-			// Renew past the 50ms visibility timeout twice.
-			for i := 0; i < 2; i++ {
-				time.Sleep(30 * time.Millisecond)
-				renewed, err := store.Extend(ctx, lease, 50*time.Millisecond)
+			// Renew before each visibility timeout runs out, twice.
+			for i := range 2 {
+				backends.advance(30 * time.Millisecond)
+				renewed, err := store.Extend(ctx, lease, ttl)
 				if err != nil {
 					t.Fatalf("extend %d = %v", i, err)
 				}
 				lease = renewed
 			}
-			time.Sleep(30 * time.Millisecond)
+			backends.advance(30 * time.Millisecond)
 			if leases, _ := store.Claim(ctx, 10); len(leases) != 0 {
 				t.Fatalf("renewed job was claimed again: %+v", leases)
 			}
@@ -649,7 +728,7 @@ func TestStoreExtendKeepsLease(t *testing.T) {
 				t.Fatalf("release with renewed lease = %v", err)
 			}
 			stale := claimOne(t, store)
-			time.Sleep(80 * time.Millisecond)
+			backends.advance(ttl + time.Millisecond)
 			current := claimOne(t, store)
 			if _, err := store.Extend(ctx, stale, time.Second); !errors.Is(err, ErrLeaseLost) {
 				t.Fatalf("stale extend = %v, want ErrLeaseLost", err)

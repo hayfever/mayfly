@@ -29,6 +29,14 @@ var (
 	ErrNotFound = errors.New("job not found")
 )
 
+// clock reports the current time. Each store reads one clock for every lease,
+// retry, and expiry decision, so a test can move time forward without waiting
+// for the wall clock.
+type clock func() time.Time
+
+// systemClock is the clock a store built by New uses.
+func systemClock() time.Time { return time.Now().UTC() }
+
 // Kind tells a worker which handler owns a job.
 type Kind string
 

@@ -13,6 +13,7 @@ import (
 // a restart drops accepted work.
 type memoryStore struct {
 	cfg  config.QueueConfig
+	now  clock
 	mu   sync.Mutex
 	jobs map[string]*memEntry
 	seen map[string]time.Time
@@ -30,15 +31,20 @@ type memEntry struct {
 }
 
 func newMemory(cfg config.QueueConfig) *memoryStore {
+	return newMemoryWithClock(cfg, systemClock)
+}
+
+func newMemoryWithClock(cfg config.QueueConfig, now clock) *memoryStore {
 	return &memoryStore{
 		cfg:  cfg,
+		now:  now,
 		jobs: map[string]*memEntry{},
 		seen: map[string]time.Time{},
 	}
 }
 
 func (s *memoryStore) Accept(_ context.Context, job Job) error {
-	now := time.Now().UTC()
+	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked(now)
@@ -88,7 +94,7 @@ func (s *memoryStore) sweepLocked(now time.Time) {
 }
 
 func (s *memoryStore) Claim(_ context.Context, max int) ([]Lease, error) {
-	now := time.Now().UTC()
+	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	type candidate struct {
@@ -124,12 +130,12 @@ func (s *memoryStore) Ack(_ context.Context, lease Lease, result Result) error {
 	}
 	entry.done = true
 	entry.sessionID = result.SessionID
-	entry.finishedAt = time.Now().UTC()
+	entry.finishedAt = s.now()
 	return nil
 }
 
 func (s *memoryStore) Nack(_ context.Context, lease Lease, cause error) error {
-	now := time.Now().UTC()
+	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, ok := s.jobs[lease.ID]
@@ -160,7 +166,7 @@ func (s *memoryStore) Release(_ context.Context, lease Lease, after time.Duratio
 	if entry.done || entry.dead || !entry.readyAt.Equal(lease.Deadline) {
 		return ErrLeaseLost
 	}
-	entry.readyAt = time.Now().UTC().Add(after)
+	entry.readyAt = s.now().Add(after)
 	return nil
 }
 
@@ -171,13 +177,13 @@ func (s *memoryStore) Extend(_ context.Context, lease Lease, ttl time.Duration) 
 	if !ok || entry.done || entry.dead || !entry.readyAt.Equal(lease.Deadline) {
 		return lease, ErrLeaseLost
 	}
-	entry.readyAt = time.Now().UTC().Add(ttl)
+	entry.readyAt = s.now().Add(ttl)
 	lease.Deadline = entry.readyAt
 	return lease, nil
 }
 
 func (s *memoryStore) Get(_ context.Context, id string) (Record, bool, error) {
-	now := time.Now().UTC()
+	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked(now)
@@ -226,7 +232,7 @@ func (s *memoryStore) Dead(_ context.Context, limit int) ([]Record, error) {
 }
 
 func (s *memoryStore) Retry(_ context.Context, id string) error {
-	now := time.Now().UTC()
+	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, ok := s.jobs[id]
@@ -253,7 +259,7 @@ func (s *memoryStore) Delete(_ context.Context, id string) error {
 }
 
 func (s *memoryStore) Stats(_ context.Context) (Stats, error) {
-	now := time.Now().UTC()
+	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked(now)
