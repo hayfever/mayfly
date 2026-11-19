@@ -23,9 +23,8 @@ func (m *Manager) SetRecords(store RecordStore) {
 }
 
 // loadRecords restores the sessions and artifact metadata a previous
-// control-plane lifetime wrote. A session that adoption did not rebuild cannot
-// continue, so its record is marked failed: the runtime that would finish the
-// turn is gone, and the next lifetime has no handle for it.
+// control-plane lifetime wrote. It does not judge a non-terminal record:
+// settleInterrupted does that once adoption has reported what it can see.
 func (m *Manager) loadRecords(ctx context.Context) error {
 	if m.records == nil {
 		return nil
@@ -38,8 +37,6 @@ func (m *Manager) loadRecords(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load artifact index: %w", err)
 	}
-	now := time.Now().UTC()
-	interrupted := 0
 	m.mu.Lock()
 	if m.history == nil {
 		m.history = map[string]model.Session{}
@@ -54,21 +51,73 @@ func (m *Manager) loadRecords(ctx context.Context) error {
 			// Adoption owns the record of a session it rebuilt.
 			continue
 		}
-		if !terminalStatus(sess.Status) {
-			sess.Status = model.StatusFailed
-			sess.Error = "control plane restarted before the session finished"
-			if sess.ClosedAt == nil {
-				sess.ClosedAt = &now
-			}
-			interrupted++
-			m.persistRecord(sess)
-		}
 		m.mu.Lock()
 		m.history[sess.ID] = sess
 		m.mu.Unlock()
 	}
-	m.logger.Info("loaded session records", "sessions", len(records), "artifacts", len(artifacts), "interrupted", interrupted)
+	m.logger.Info("loaded session records", "sessions", len(records), "artifacts", len(artifacts))
 	return nil
+}
+
+// settleInterrupted marks a restored record failed when no runtime can
+// continue it. Adoption owns an ID it saw but could not rebuild, and a pass
+// that failed did not see every session, so those records wait for the retry
+// rather than being reported as failed while their pod may still run.
+func (m *Manager) settleInterrupted() {
+	if m.adoptIncomplete.Load() {
+		return
+	}
+	now := time.Now().UTC()
+	m.mu.Lock()
+	pending := m.adoptPending
+	var stale []model.Session
+	for id, sess := range m.history {
+		if _, live := m.sessions[id]; live {
+			// Adoption rebuilt this session; the live instance owns it now.
+			delete(m.history, id)
+			continue
+		}
+		if terminalStatus(sess.Status) {
+			continue
+		}
+		if _, ok := pending[id]; ok {
+			continue
+		}
+		stale = append(stale, sess)
+	}
+	m.mu.Unlock()
+	for _, sess := range stale {
+		sess.Status = model.StatusFailed
+		sess.Error = "control plane restarted before the session finished"
+		if sess.ClosedAt == nil {
+			sess.ClosedAt = &now
+		}
+		m.persistRecord(sess)
+		m.mu.Lock()
+		m.history[sess.ID] = sess
+		m.mu.Unlock()
+	}
+}
+
+// setAdoptPending records the session IDs the last adoption pass could not
+// rebuild yet.
+func (m *Manager) setAdoptPending(pending map[string]struct{}) {
+	m.mu.Lock()
+	m.adoptPending = pending
+	m.mu.Unlock()
+}
+
+// adoptNeeded reports whether adoption has unfinished work to retry.
+func (m *Manager) adoptNeeded() bool {
+	if m.kube == nil {
+		return false
+	}
+	if m.adoptIncomplete.Load() {
+		return true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.adoptPending) > 0
 }
 
 // persistRecord writes one session snapshot. A failure is logged, not

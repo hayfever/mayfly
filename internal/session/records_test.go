@@ -6,16 +6,24 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/journal"
+	"github.com/hayfever/mayfly/internal/k8s"
 	"github.com/hayfever/mayfly/internal/model"
+	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
 func testRecordStores(t *testing.T) map[string]func() RecordStore {
@@ -408,5 +416,158 @@ func TestDeleteDropsStoredSession(t *testing.T) {
 	}
 	if err := m.Delete("gone"); err != ErrNotFound {
 		t.Fatalf("second delete = %v, want ErrNotFound", err)
+	}
+}
+
+// TestLoadRecordsWaitsForAdoptionRetry covers a control plane whose adoption
+// pass could not list pods. The restored record must stay non-terminal until a
+// later pass reports what it can see.
+func TestLoadRecordsWaitsForAdoptionRetry(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	var failList atomic.Bool
+	failList.Store(true)
+	cs.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if failList.Load() {
+			return true, nil, errors.New("api unavailable")
+		}
+		return false, nil, nil
+	})
+
+	m := testManager(t)
+	m.cfg.Runtime.Backend = "kubernetes"
+	m.kube = k8s.NewForClient(cs, "mayfly")
+	m.journal = journal.NewMemory()
+	m.runner = &fakeRunner{}
+	records := NewMemoryRecords()
+	m.SetRecords(records)
+	created := time.Now().UTC().Add(-time.Minute)
+	m.persistRecord(model.Session{ID: "a2", Status: model.StatusRunning, CreatedAt: created})
+
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown(context.Background())
+
+	got, ok := m.Get("a2")
+	if !ok {
+		t.Fatal("record is missing after a failed adoption pass")
+	}
+	if got.Status != model.StatusRunning || got.ClosedAt != nil {
+		t.Fatalf("record after a failed adoption pass = %+v, want running", got)
+	}
+
+	// The API recovers: the retry sees no pod for the session, so the record
+	// can be settled.
+	failList.Store(false)
+	m.retryAdopt()
+
+	got, ok = m.Get("a2")
+	if !ok {
+		t.Fatal("record disappeared after adoption completed")
+	}
+	if got.Status != model.StatusFailed || got.ClosedAt == nil {
+		t.Fatalf("record after adoption completed = %+v, want failed", got)
+	}
+}
+
+// TestAdoptFailureKeepsRecordOutOfFailedState covers a session whose pod
+// adoption could not read. Its record must not be reported failed while the
+// pod may still run.
+func TestAdoptFailureKeepsRecordOutOfFailedState(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	var failRead atomic.Bool
+	failRead.Store(true)
+	cs.PrependReactor("get", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if failRead.Load() {
+			return true, nil, errors.New("api unavailable")
+		}
+		return false, nil, nil
+	})
+
+	m := testManager(t)
+	if err := m.loadAgents(); err != nil {
+		t.Fatal(err)
+	}
+	m.cfg.Runtime.Backend = "kubernetes"
+	m.cfg.Sessions.MaxRestarts = 2
+	m.kube = k8s.NewForClient(cs, "mayfly")
+	m.journal = journal.NewMemory()
+	m.runner = &fakeRunner{}
+	m.stateDir = t.TempDir()
+	records := NewMemoryRecords()
+	m.SetRecords(records)
+
+	cfg := sessioncfg.Config{
+		Version:    sessioncfg.Version,
+		SessionID:  "a1",
+		Agent:      "default",
+		Model:      "stub",
+		Title:      "live",
+		TTLSeconds: 600,
+		CreatedAt:  time.Now().UTC(),
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := &k8s.SessionSpec{
+		Namespace:           "mayfly",
+		SessionID:           "a1",
+		PodName:             "mayfly-a1",
+		SecretName:          "mayfly-a1",
+		ConfigMapName:       "mayfly-a1",
+		Image:               "example/agent:1",
+		PlatformNs:          "mayfly",
+		PersistentWorkspace: true,
+		SessionJSON:         raw,
+		Token:               "token",
+		TTL:                 time.Hour,
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.kube.CreateSession(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	m.persistRecord(model.Session{ID: "a1", Status: model.StatusRunning, CreatedAt: cfg.CreatedAt})
+
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown(context.Background())
+
+	got, ok := m.Get("a1")
+	if !ok {
+		t.Fatal("record of an unreadable session is missing")
+	}
+	if got.Status != model.StatusRunning || got.ClosedAt != nil {
+		t.Fatalf("record before adoption recovered = %+v, want running", got)
+	}
+
+	failRead.Store(false)
+	m.retryAdopt()
+
+	if _, ok := m.instance("a1"); !ok {
+		t.Fatal("adoption did not register the session after the read recovered")
+	}
+	got, ok = m.Get("a1")
+	if !ok {
+		t.Fatal("session is missing after adoption")
+	}
+	if got.Status != model.StatusPending || got.ClosedAt != nil {
+		t.Fatalf("session after adoption = %+v, want pending", got)
+	}
+	list := m.List()
+	if len(list) != 1 {
+		t.Fatalf("list = %+v, want one entry", list)
+	}
+	stored, err := records.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].Session.Status != model.StatusPending {
+		t.Fatalf("stored records = %+v, want one pending", stored)
 	}
 }

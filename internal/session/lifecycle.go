@@ -550,7 +550,14 @@ func (m *Manager) failFallback(inst *instance, reason string, err error) {
 // It returns the instances that need a replacement pod: sessions whose pod
 // exists but is gone are polled, while sessions whose pod was lost between a
 // DeletePod and a Start have nothing to poll.
+//
+// A pass that cannot see every session, or cannot rebuild one it saw, leaves
+// that evidence on the manager: the maintenance loop retries the pass, and
+// settleInterrupted keeps the affected records out of the failed state until
+// adoption resolves them.
 func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
+	m.adoptIncomplete.Store(true)
+	pending := map[string]struct{}{}
 	pods, err := m.kube.SessionPods(ctx)
 	if err != nil {
 		return nil, err
@@ -596,6 +603,7 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 		}
 		if err != nil {
 			m.logger.Warn("adopt: read config", "pod", pod.Name, "error", err)
+			pending[id] = struct{}{}
 			continue
 		}
 		var cfg sessioncfg.Config
@@ -611,6 +619,7 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 		}
 		if err != nil {
 			m.logger.Warn("adopt: read session credentials", "pod", pod.Name, "error", err)
+			pending[id] = struct{}{}
 			continue
 		}
 		token := keys.Token
@@ -672,6 +681,7 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 		empty, err := m.seedSequence(ctx, id)
 		if err != nil {
 			m.logger.Error("adopt: cannot seed session sequence; leaving pod unadopted", "session", id, "error", err)
+			pending[id] = struct{}{}
 			continue
 		}
 		if empty {
@@ -695,9 +705,9 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 	if err != nil {
 		// Garbage collection deletes anything it cannot see an owner for.
 		// Without this list, recovery and collection would disagree about
-		// which objects are resumable, so leave everything for the next
-		// control-plane start.
+		// which objects are resumable, so leave everything for the next pass.
 		m.logger.Warn("adopt: list sessions without a pod; skipping garbage collection", "error", err)
+		m.setAdoptPending(pending)
 		return replacements, nil
 	}
 	for id, objs := range orphans {
@@ -708,11 +718,17 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 		if preserve {
 			live[id] = struct{}{}
 		}
+		if inst == nil && preserve {
+			// The objects are resumable but could not be read yet.
+			pending[id] = struct{}{}
+		}
 		if inst != nil {
 			replacements = append(replacements, inst)
 		}
 	}
 	m.garbageCollectSessions(ctx, live)
+	m.setAdoptPending(pending)
+	m.adoptIncomplete.Store(false)
 	return replacements, nil
 }
 
@@ -946,14 +962,22 @@ func mcpNames(in []sessioncfg.MCPServer) []string {
 	return out
 }
 
+// adoptRetryInterval is how often an unfinished adoption pass is retried. It
+// is a variable so tests do not wait for it.
+var adoptRetryInterval = 15 * time.Second
+
 func (m *Manager) maintenance() {
 	reaper := time.NewTicker(5 * time.Second)
 	defer reaper.Stop()
 	var pollC <-chan time.Time
+	var adoptC <-chan time.Time
 	if m.kube != nil {
 		t := time.NewTicker(m.cfg.Runtime.PollInterval.Std())
 		defer t.Stop()
 		pollC = t.C
+		retry := time.NewTicker(adoptRetryInterval)
+		defer retry.Stop()
+		adoptC = retry.C
 	}
 	for {
 		select {
@@ -963,8 +987,27 @@ func (m *Manager) maintenance() {
 			m.reap()
 		case <-pollC:
 			m.pollPods(m.ctx)
+		case <-adoptC:
+			m.retryAdopt()
 		}
 	}
+}
+
+// retryAdopt finishes an adoption pass that failed or left sessions behind.
+// A rebuilt session is treated like one adopted at startup.
+func (m *Manager) retryAdopt() {
+	if !m.adoptNeeded() {
+		return
+	}
+	replacements, err := m.adopt(m.ctx)
+	if err != nil {
+		m.logger.Warn("adopt existing sessions", "error", err)
+		return
+	}
+	for _, inst := range replacements {
+		m.restartSoon(inst, "pod missing while adopting after a restart")
+	}
+	m.settleInterrupted()
 }
 
 func (m *Manager) reap() {

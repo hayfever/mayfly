@@ -163,6 +163,12 @@ type Manager struct {
 
 	// records keeps session records and the artifact index across restarts.
 	records RecordStore
+	// adoptPending holds the session IDs the last adoption pass saw but could
+	// not rebuild, and adoptIncomplete reports a pass that failed before it
+	// saw every session. A record for such an ID is not marked failed until
+	// adoption resolves it.
+	adoptPending    map[string]struct{}
+	adoptIncomplete atomic.Bool
 
 	mu         sync.Mutex
 	sessions   map[string]*instance
@@ -293,6 +299,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.cancel()
 		return err
 	}
+	m.settleInterrupted()
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
