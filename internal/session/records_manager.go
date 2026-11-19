@@ -62,15 +62,20 @@ func (m *Manager) loadRecords(ctx context.Context) error {
 // settleInterrupted marks a restored record failed when no runtime can
 // continue it. Adoption owns an ID it saw but could not rebuild, and a pass
 // that failed did not see every session, so those records wait for the retry
-// rather than being reported as failed while their pod may still run.
+// rather than being reported as failed while their pod may still run. An ID
+// whose attempts reach maxAdoptAttempts is settled with the last reason, so a
+// session that can never be read does not stay in a retry loop forever.
 func (m *Manager) settleInterrupted() {
 	if m.adoptIncomplete.Load() {
 		return
 	}
 	now := time.Now().UTC()
+	type settle struct {
+		session model.Session
+		reason  string
+	}
 	m.mu.Lock()
-	pending := m.adoptPending
-	var stale []model.Session
+	var stale []settle
 	for id, sess := range m.history {
 		if _, live := m.sessions[id]; live {
 			// Adoption rebuilt this session; the live instance owns it now.
@@ -80,31 +85,98 @@ func (m *Manager) settleInterrupted() {
 		if terminalStatus(sess.Status) {
 			continue
 		}
-		if _, ok := pending[id]; ok {
+		if entry, ok := m.adoptPending[id]; ok && entry.Attempts < maxAdoptAttempts {
 			continue
 		}
-		stale = append(stale, sess)
+		reason := "control plane restarted before the session finished"
+		if entry, ok := m.adoptPending[id]; ok {
+			reason = fmt.Sprintf("session could not be adopted after %d attempts: %s", entry.Attempts, entry.Reason)
+		}
+		stale = append(stale, settle{session: sess, reason: reason})
 	}
 	m.mu.Unlock()
-	for _, sess := range stale {
+	for _, item := range stale {
+		sess := item.session
 		sess.Status = model.StatusFailed
-		sess.Error = "control plane restarted before the session finished"
+		sess.Error = item.reason
 		if sess.ClosedAt == nil {
 			sess.ClosedAt = &now
 		}
 		m.persistRecord(sess)
 		m.mu.Lock()
 		m.history[sess.ID] = sess
+		delete(m.adoptPending, sess.ID)
 		m.mu.Unlock()
 	}
 }
 
-// setAdoptPending records the session IDs the last adoption pass could not
-// rebuild yet.
-func (m *Manager) setAdoptPending(pending map[string]struct{}) {
+// mergeAdoptFailures replaces the pending set with the sessions this pass
+// could not rebuild. An ID that was pending and is not unresolved now is
+// resolved. general, when set, keeps every previously pending ID because the
+// pass could not examine it.
+func (m *Manager) mergeAdoptFailures(failed map[string]string, general string) {
 	m.mu.Lock()
-	m.adoptPending = pending
+	defer m.mu.Unlock()
+	next := make(map[string]adoptFailure, len(failed)+len(m.adoptPending))
+	for id, reason := range failed {
+		next[id] = adoptFailure{Attempts: m.adoptPending[id].Attempts + 1, Reason: reason}
+	}
+	if general != "" {
+		for id, entry := range m.adoptPending {
+			if _, ok := next[id]; ok {
+				continue
+			}
+			entry.Attempts++
+			entry.Reason = general
+			next[id] = entry
+		}
+	}
+	m.adoptPending = next
+}
+
+// pendingAdoptions returns the session IDs a previous pass could not rebuild.
+func (m *Manager) pendingAdoptions() map[string]struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]struct{}, len(m.adoptPending))
+	for id := range m.adoptPending {
+		out[id] = struct{}{}
+	}
+	return out
+}
+
+// pendingAdoption reports whether id is waiting for adoption.
+func (m *Manager) pendingAdoption(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.adoptPending[id]
+	return ok
+}
+
+// clearAdoptPending stops retrying one session's adoption.
+func (m *Manager) clearAdoptPending(id string) {
+	m.mu.Lock()
+	delete(m.adoptPending, id)
 	m.mu.Unlock()
+}
+
+// liveSessionIDs returns the sessions this control plane is running. Objects
+// of these sessions must never be collected.
+func (m *Manager) liveSessionIDs() map[string]struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]struct{}, len(m.sessions))
+	for id := range m.sessions {
+		out[id] = struct{}{}
+	}
+	return out
+}
+
+// pendingCount reports how many sessions adoption still has to settle.
+func (m *Manager) pendingCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.adoptPending)
 }
 
 // adoptNeeded reports whether adoption has unfinished work to retry.
@@ -115,9 +187,7 @@ func (m *Manager) adoptNeeded() bool {
 	if m.adoptIncomplete.Load() {
 		return true
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.adoptPending) > 0
+	return m.pendingCount() > 0
 }
 
 // persistRecord writes one session snapshot. A failure is logged, not

@@ -16,6 +16,8 @@ import (
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -639,5 +641,242 @@ func TestAdoptFailureKeepsRecordOutOfFailedState(t *testing.T) {
 	}
 	if len(stored) != 1 || stored[0].Session.Status != model.StatusPending {
 		t.Fatalf("stored records = %+v, want one pending", stored)
+	}
+}
+
+// adoptTestManager builds a manager whose adoption talks to a fake cluster.
+func adoptTestManager(t *testing.T, cs *fake.Clientset) *Manager {
+	t.Helper()
+	m := testManager(t)
+	if err := m.loadAgents(); err != nil {
+		t.Fatal(err)
+	}
+	m.cfg.Runtime.Backend = "kubernetes"
+	m.kube = k8s.NewForClient(cs, "mayfly")
+	m.journal = journal.NewMemory()
+	m.runner = &fakeRunner{}
+	m.stateDir = t.TempDir()
+	return m
+}
+
+// createSessionObjects writes one session's Secret, ConfigMap, policy, claim,
+// and pod into the fake cluster.
+func createSessionObjects(t *testing.T, ctx context.Context, kube *k8s.Client, id string, cfg sessioncfg.Config) *k8s.SessionSpec {
+	t.Helper()
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := &k8s.SessionSpec{
+		Namespace:           "mayfly",
+		SessionID:           id,
+		PodName:             "mayfly-" + id,
+		SecretName:          "mayfly-" + id,
+		ConfigMapName:       "mayfly-" + id,
+		Image:               "example/agent:1",
+		PlatformNs:          "mayfly",
+		PersistentWorkspace: true,
+		EnableNetworkPolicy: true,
+		SessionJSON:         raw,
+		Token:               "token",
+		TTL:                 time.Hour,
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := kube.CreateSession(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	return spec
+}
+
+func liveConfig(id string) sessioncfg.Config {
+	return sessioncfg.Config{
+		Version:    sessioncfg.Version,
+		SessionID:  id,
+		Agent:      "default",
+		Model:      "stub",
+		Title:      id,
+		TTLSeconds: 600,
+		CreatedAt:  time.Now().UTC(),
+	}
+}
+
+func assertSessionObjects(t *testing.T, ctx context.Context, cs *fake.Clientset, spec *k8s.SessionSpec, want bool) {
+	t.Helper()
+	_, cmErr := cs.CoreV1().ConfigMaps(spec.Namespace).Get(ctx, spec.ConfigMapName, metav1.GetOptions{})
+	_, secretErr := cs.CoreV1().Secrets(spec.Namespace).Get(ctx, spec.SecretName, metav1.GetOptions{})
+	_, pvcErr := cs.CoreV1().PersistentVolumeClaims(spec.Namespace).Get(ctx, spec.PVCName, metav1.GetOptions{})
+	_, policyErr := cs.NetworkingV1().NetworkPolicies(spec.Namespace).Get(ctx, spec.NetworkPolicyName, metav1.GetOptions{})
+	for name, err := range map[string]error{
+		"configmap": cmErr,
+		"secret":    secretErr,
+		"claim":     pvcErr,
+		"policy":    policyErr,
+	} {
+		if want && err != nil {
+			t.Fatalf("%s was removed from a live session: %v", name, err)
+		}
+		if !want && !apierrors.IsNotFound(err) {
+			t.Fatalf("%s still exists: %v", name, err)
+		}
+	}
+}
+
+// TestAdoptKeepsObjectsOfLivePodlessSession covers the keep set: a session
+// this control plane is running has no pod between replacements, so neither
+// list names it, and garbage collection must still leave its objects alone.
+func TestAdoptKeepsObjectsOfLivePodlessSession(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	m := adoptTestManager(t, cs)
+	spec := createSessionObjects(t, ctx, m.kube, "live2", liveConfig("live2"))
+	if err := m.kube.DeletePod(ctx, spec.PodName, 0); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.sessions["live2"] = &instance{sess: model.Session{ID: "live2", Status: model.StatusRunning}, tokenHash: hashToken("t")}
+	m.mu.Unlock()
+	if err := m.journal.Append(ctx, journal.Entry{SessionID: "live2", Turn: 3, Step: 0, Name: "user"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.adopt(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	assertSessionObjects(t, ctx, cs, spec, true)
+	if last, err := m.journal.LastTurn(ctx, "live2"); err != nil || last != 3 {
+		t.Fatalf("journal after adopt: last turn %d, %v; want 3", last, err)
+	}
+}
+
+// TestRetryAdoptKeepsLivePodlessSession covers a retry that runs while a live
+// session has no pod: the retry adopts pending sessions only and must not
+// collect anything.
+func TestRetryAdoptKeepsLivePodlessSession(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	m := adoptTestManager(t, cs)
+	spec := createSessionObjects(t, ctx, m.kube, "live3", liveConfig("live3"))
+	if err := m.kube.DeletePod(ctx, spec.PodName, 0); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.sessions["live3"] = &instance{sess: model.Session{ID: "live3", Status: model.StatusRunning}, tokenHash: hashToken("t")}
+	m.adoptPending = map[string]adoptFailure{"gone": {Attempts: 1, Reason: "read the session config"}}
+	m.mu.Unlock()
+	if err := m.journal.Append(ctx, journal.Entry{SessionID: "live3", Turn: 5, Step: 0, Name: "user"}); err != nil {
+		t.Fatal(err)
+	}
+
+	m.retryAdopt()
+
+	assertSessionObjects(t, ctx, cs, spec, true)
+	if last, err := m.journal.LastTurn(ctx, "live3"); err != nil || last != 5 {
+		t.Fatalf("journal after retry: last turn %d, %v; want 5", last, err)
+	}
+	if m.pendingCount() != 0 {
+		t.Fatalf("pending = %d, want the vanished session resolved", m.pendingCount())
+	}
+	if _, ok := m.instance("gone"); ok {
+		t.Fatal("a session with no pod or objects was adopted")
+	}
+}
+
+// TestAdoptGivesUpAfterMaxAttempts checks a session that can never be read
+// stops being retried and its record says why.
+func TestAdoptGivesUpAfterMaxAttempts(t *testing.T) {
+	ctx := context.Background()
+	records := NewMemoryRecords()
+	m := testManager(t)
+	m.SetRecords(records)
+	created := time.Now().UTC().Add(-time.Minute)
+	m.history["c1"] = model.Session{ID: "c1", Status: model.StatusRunning, CreatedAt: created}
+	m.history["c2"] = model.Session{ID: "c2", Status: model.StatusRunning, CreatedAt: created}
+	m.adoptPending = map[string]adoptFailure{
+		"c1": {Attempts: maxAdoptAttempts, Reason: "read the session config"},
+		"c2": {Attempts: maxAdoptAttempts - 1, Reason: "read the session config"},
+	}
+
+	m.settleInterrupted()
+
+	got, ok := m.Get("c1")
+	if !ok {
+		t.Fatal("capped session is missing from the list")
+	}
+	if got.Status != model.StatusFailed || got.ClosedAt == nil {
+		t.Fatalf("capped session = %+v, want failed", got)
+	}
+	if !strings.Contains(got.Error, "after 10 attempts") || !strings.Contains(got.Error, "read the session config") {
+		t.Fatalf("error = %q", got.Error)
+	}
+	if got, ok := m.Get("c2"); !ok || got.Status != model.StatusRunning {
+		t.Fatalf("session under the cap = %+v, want running", got)
+	}
+	if m.pendingCount() != 1 {
+		t.Fatalf("pending = %d, want only the session under the cap", m.pendingCount())
+	}
+	stored, err := records.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].Session.ID != "c1" || stored[0].Session.Status != model.StatusFailed {
+		t.Fatalf("stored records = %+v, want the capped session failed", stored)
+	}
+}
+
+// TestDeleteCleansPendingAdoptionSession checks DELETE stops the pod, removes
+// the objects and journal, drops the record, and stops the retry.
+func TestDeleteCleansPendingAdoptionSession(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	var failRead atomic.Bool
+	failRead.Store(true)
+	cs.PrependReactor("get", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if failRead.Load() {
+			return true, nil, errors.New("api unavailable")
+		}
+		return false, nil, nil
+	})
+	m := adoptTestManager(t, cs)
+	records := NewMemoryRecords()
+	m.SetRecords(records)
+	spec := createSessionObjects(t, ctx, m.kube, "d1", liveConfig("d1"))
+	m.persistRecord(model.Session{ID: "d1", Status: model.StatusRunning, CreatedAt: time.Now().UTC()})
+	if err := m.journal.Append(ctx, journal.Entry{SessionID: "d1", Turn: 4, Step: 0, Name: "user"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown(context.Background())
+	if !m.pendingAdoption("d1") {
+		t.Fatal("the session was not left pending after a failed read")
+	}
+	// The API recovers; the cleanup path must not depend on the read that
+	// failed.
+	failRead.Store(false)
+
+	if err := m.Delete("d1"); err != nil {
+		t.Fatalf("delete a pending session: %v", err)
+	}
+
+	if m.pendingAdoption("d1") {
+		t.Fatal("the pending id survived delete")
+	}
+	if _, ok := m.Get("d1"); ok {
+		t.Fatal("the record survived delete")
+	}
+	if stored, _ := records.List(ctx); len(stored) != 0 {
+		t.Fatalf("stored records = %+v", stored)
+	}
+	if _, err := cs.CoreV1().Pods("mayfly").Get(ctx, spec.PodName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("pod after delete: %v, want gone", err)
+	}
+	assertSessionObjects(t, ctx, cs, spec, false)
+	if last, err := m.journal.LastTurn(ctx, "d1"); err != nil || last != 0 {
+		t.Fatalf("journal after delete: last turn %d, %v; want deleted", last, err)
 	}
 }
