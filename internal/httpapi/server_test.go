@@ -695,6 +695,8 @@ func TestSessionErrorMapping(t *testing.T) {
 		{fmt.Errorf("post: %w", session.ErrClosed), http.StatusConflict, codeConflict, false},
 		{fmt.Errorf("auth: %w", session.ErrUnauthorized), http.StatusUnauthorized, codeUnauthorized, false},
 		{session.ErrCapacity, http.StatusTooManyRequests, codeRateLimited, true},
+		{session.ErrEmptyMessage, http.StatusBadRequest, codeInvalidRequest, false},
+		{fmt.Errorf("%w: 40000 bytes (limit 32768)", session.ErrMessageTooLong), http.StatusBadRequest, codeInvalidRequest, false},
 		{errors.New("storage exploded"), http.StatusInternalServerError, codeInternal, false},
 	}
 	for _, tc := range cases {
@@ -715,6 +717,40 @@ func TestSessionErrorMapping(t *testing.T) {
 	}
 }
 
+func TestPostMessageRejectsBadText(t *testing.T) {
+	server, mgr := sessionServer(t, 1)
+	sessions := mgr.List()
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d", len(sessions))
+	}
+	id := sessions[0].ID
+	handler := server.Handler()
+
+	post := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+id+"/messages", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer test-admin")
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := post(`{"text":"   "}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty message status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if body := decodeEnvelope(t, rec); body.Code != codeInvalidRequest {
+		t.Fatalf("empty message code = %q", body.Code)
+	}
+
+	rec = post(`{"text":"` + strings.Repeat("x", 32<<10+1) + `"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("long message status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if body := decodeEnvelope(t, rec); body.Code != codeInvalidRequest {
+		t.Fatalf("long message code = %q", body.Code)
+	}
+}
+
 func TestPanicRecoveryUsesEnvelope(t *testing.T) {
 	s := New(config.Default(), nil, nil, testLogger())
 	handler := s.recoverPanics(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -727,6 +763,15 @@ func TestPanicRecoveryUsesEnvelope(t *testing.T) {
 	}
 	if body := decodeEnvelope(t, rec); body.Code != codeInternal {
 		t.Fatalf("panic code = %q", body.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/internal/v1/sessions/x/tools", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("internal panic status = %d", rec.Code)
+	}
+	if got := rec.Body.String(); got != "internal server error\n" {
+		t.Fatalf("internal panic body = %q", got)
 	}
 }
 

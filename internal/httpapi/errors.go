@@ -67,6 +67,8 @@ func (s *Server) writeSessionError(w http.ResponseWriter, err error) {
 	case errors.Is(err, session.ErrCapacity):
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, codeRateLimited, err.Error())
+	case errors.Is(err, session.ErrEmptyMessage), errors.Is(err, session.ErrMessageTooLong):
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
 	default:
 		s.logger.Error("session request failed", "error", err)
 		writeError(w, http.StatusInternalServerError, codeInternal, "session request failed")

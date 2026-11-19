@@ -25,6 +25,12 @@ import (
 	"github.com/hayfever/mayfly/internal/version"
 )
 
+// ErrEmptyMessage rejects a human message with no text.
+var ErrEmptyMessage = errors.New("message is empty")
+
+// ErrMessageTooLong rejects a human message over maxMessageBytes.
+var ErrMessageTooLong = errors.New("message is too long")
+
 // Events returns retained thread events after a sequence.
 func (m *Manager) Events(id string, after int64) ([]model.Event, bool) {
 	if _, ok := m.Get(id); !ok {
@@ -67,10 +73,10 @@ func (m *Manager) PostMessage(id, actor, text string) (model.Event, error) {
 	}
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return model.Event{}, errors.New("message is empty")
+		return model.Event{}, ErrEmptyMessage
 	}
 	if len(text) > maxMessageBytes {
-		return model.Event{}, fmt.Errorf("message exceeds %d bytes", maxMessageBytes)
+		return model.Event{}, fmt.Errorf("%w: %d bytes (limit %d)", ErrMessageTooLong, len(text), maxMessageBytes)
 	}
 	if actor == "" {
 		actor = "user"
