@@ -44,6 +44,7 @@ func TestMain(m *testing.M) {
 type shim struct {
 	listen string
 	key    []byte
+	server *serveServer
 	cancel context.CancelFunc
 	done   chan error
 }
@@ -77,7 +78,7 @@ func startShim(t *testing.T, opts serveOptions) *shim {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- server.run(ctx) }()
-	s := &shim{listen: opts.listen, key: key, cancel: cancel, done: done}
+	s := &shim{listen: opts.listen, key: key, server: server, cancel: cancel, done: done}
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -537,8 +538,11 @@ func TestServeChildRestart(t *testing.T) {
 		t.Fatalf("tools/call = %q isError=%v, want the child's stderr", text, isError)
 	}
 
-	if err := probe(context.Background(), s.listen, 500*time.Millisecond); err == nil {
-		t.Fatal("probe passed while the child was down")
+	// The failed call proved the child exited, so the shim must drop
+	// readiness before it answers; checking the server state directly avoids
+	// racing the supervisor's restart delay.
+	if s.server.isReady() {
+		t.Fatal("shim reported ready after the child exited")
 	}
 	waitReady(t, s)
 	if err := probe(context.Background(), s.listen, 2*time.Second); err != nil {
