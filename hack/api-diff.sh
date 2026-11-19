@@ -15,7 +15,9 @@ cd "$(git rev-parse --show-toplevel)"
 
 base="${1:-${API_DIFF_BASE:-}}"
 if [ -z "$base" ]; then
-  base="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+  # Version sort ranks v0.2.0 above v0.2.0-rc.1; git describe would pick by
+  # commit ancestry instead.
+  base="$(git -c versionsort.suffix=-rc tag --list 'v*' --sort=-version:refname | head -n 1)"
 fi
 if [ -z "$base" ]; then
   echo "api-diff: no v* tag found; skipping the spec comparison" >&2
