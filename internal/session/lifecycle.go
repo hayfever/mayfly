@@ -283,6 +283,7 @@ func (m *Manager) Close(id, reason string) error {
 		reason = "closed"
 	}
 	inst.mu.Unlock()
+	m.persistInstance(inst)
 
 	m.hub.Append(id, model.Event{
 		Type:  model.EventControl,
@@ -299,10 +300,15 @@ func (m *Manager) Close(id, reason string) error {
 	return nil
 }
 
-// Delete force-stops a session and marks it failed.
+// Delete force-stops a session and marks it failed. A finished session
+// restored from the record store has no runtime to stop, so Delete only
+// removes its record and its list entry.
 func (m *Manager) Delete(id string) error {
 	inst, ok := m.instance(id)
 	if !ok {
+		if m.dropHistory(id) {
+			return nil
+		}
 		return ErrNotFound
 	}
 	inst.mu.Lock()
@@ -335,6 +341,7 @@ func (m *Manager) finalize(inst *instance, status model.SessionStatus, reason, e
 	inst.sess.LastActivity = now
 	hash := inst.tokenHash
 	inst.mu.Unlock()
+	m.persistInstance(inst)
 
 	m.removeToken(hash)
 	text := "Session " + string(final) + "."
@@ -676,6 +683,7 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 		m.mu.Unlock()
 		m.registerGrant(inst)
 		m.hub.Create(id)
+		m.persistInstance(inst)
 		m.hub.Append(id, model.Event{Type: model.EventSystem, Actor: "mayfly", Text: "Session recovered by control plane restart."})
 		m.restoreJournalThread(id)
 		m.logger.Info("adopted session", "session", id, "pod", pod.Name, "restarts", inst.restarts)
@@ -803,6 +811,7 @@ func (m *Manager) adoptPodless(ctx context.Context, id string, objs k8s.OrphanOb
 	m.mu.Unlock()
 	m.registerGrant(inst)
 	m.hub.Create(id)
+	m.persistInstance(inst)
 	m.hub.Append(id, model.Event{Type: model.EventSystem, Actor: "mayfly", Text: "Session recovered by control plane restart."})
 	m.restoreJournalThread(id)
 	m.logger.Info("adopted session without a pod; starting a replacement", "session", id)
@@ -960,6 +969,7 @@ func (m *Manager) maintenance() {
 
 func (m *Manager) reap() {
 	now := time.Now().UTC()
+	m.pruneRecords(now)
 	retention := m.cfg.Sessions.Retention.Std()
 	for _, inst := range m.snapshot() {
 		inst.mu.Lock()

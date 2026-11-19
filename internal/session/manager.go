@@ -161,9 +161,15 @@ type Manager struct {
 	stateDir     string
 	gateway      GrantRegistry
 
+	// records keeps session records and the artifact index across restarts.
+	records RecordStore
+
 	mu         sync.Mutex
 	sessions   map[string]*instance
 	tokenIndex map[string]string
+	// history holds finished sessions loaded from the record store. A live
+	// instance always wins over its history entry.
+	history map[string]model.Session
 	// artifacts survives session retention so a stored bundle stays
 	// downloadable after the session record is gone.
 	artifacts map[string]model.ArtifactInfo
@@ -229,8 +235,10 @@ func New(cfg *config.Config, bundle *project.Bundle, store artifact.Store, h *hu
 		skills:      loaded,
 		skillByName: map[string]sessioncfg.Skill{},
 		mcpByName:   map[string]config.MCPServerConfig{},
+		records:     NewMemoryRecords(),
 		sessions:    map[string]*instance{},
 		tokenIndex:  map[string]string{},
+		history:     map[string]model.Session{},
 		artifacts:   map[string]model.ArtifactInfo{},
 	}
 	for _, s := range loaded {
@@ -277,6 +285,13 @@ func (m *Manager) Start(ctx context.Context) error {
 		if err != nil {
 			m.logger.Warn("adopt existing sessions", "error", err)
 		}
+	}
+	// Adoption rebuilds live sessions first, so a record it owns is not
+	// reported as interrupted. A record this build cannot read stops startup:
+	// serving a partial list would hide sessions an operator can still see.
+	if err := m.loadRecords(ctx); err != nil {
+		m.cancel()
+		return err
 	}
 	m.wg.Add(1)
 	go func() {
@@ -581,6 +596,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 	// finds its table.
 	m.registerGrant(inst)
 	m.hub.Create(id)
+	m.persistInstance(inst)
 	m.appendEvent(inst, model.Event{
 		Type:  model.EventUserMessage,
 		Actor: "trigger",
@@ -624,6 +640,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		m.mu.Unlock()
 		m.removeToken(hash)
 		m.dropGrant(id)
+		m.persistInstance(inst)
 		m.hub.Append(id, model.Event{Type: model.EventError, Actor: "mayfly", Text: "Failed to start session: " + err.Error()})
 		m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session failed.", Data: map[string]any{"status": string(model.StatusFailed)}})
 		snapshot := m.copySession(inst)
@@ -761,6 +778,9 @@ func (m *Manager) reserveLocked(inst *instance) error {
 	if _, exists := m.sessions[id]; exists {
 		return fmt.Errorf("session id %q is already in use", id)
 	}
+	if _, exists := m.history[id]; exists {
+		return fmt.Errorf("session id %q is already in use", id)
+	}
 	if max := m.cfg.Sessions.MaxConcurrent; max > 0 {
 		active := 0
 		for _, other := range m.sessions {
@@ -794,6 +814,7 @@ func (m *Manager) RuntimeConnected(id string) {
 	inst.sess.StartedAt = &now
 	inst.sess.LastActivity = now
 	inst.mu.Unlock()
+	m.persistInstance(inst)
 	m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session running.", Data: map[string]any{"status": string(model.StatusRunning)}})
 	m.logger.Info("session runtime connected", "session", id)
 }
@@ -813,6 +834,7 @@ func (m *Manager) forget(id string) {
 	inst.mu.Unlock()
 	m.removeToken(hash)
 	m.hub.Remove(id)
+	m.deleteRecord(id)
 	// The artifact index outlives the session so downloads keep working.
 	m.logger.Info("session removed from memory", "session", id)
 }
@@ -1207,41 +1229,65 @@ func (m *Manager) newID() string {
 	for {
 		id := randomHex(5)
 		m.mu.Lock()
-		_, exists := m.sessions[id]
+		_, live := m.sessions[id]
+		_, stored := m.history[id]
 		m.mu.Unlock()
-		if !exists {
+		if !live && !stored {
 			return id
 		}
 	}
 }
 
-// Get returns a copy of a session.
+// Get returns a copy of a session, including a finished session restored from
+// the record store.
 func (m *Manager) Get(id string) (*model.Session, bool) {
 	m.mu.Lock()
 	inst := m.sessions[id]
+	stored, inHistory := m.history[id]
 	m.mu.Unlock()
-	if inst == nil {
+	var snapshot model.Session
+	switch {
+	case inst != nil:
+		snapshot = m.copySession(inst)
+	case inHistory:
+		snapshot = cloneSession(stored)
+	default:
 		return nil, false
 	}
-	snapshot := m.copySession(inst)
 	if info, ok := m.artifactFor(id); ok {
 		snapshot.Artifact = &info
 	}
 	return &snapshot, true
 }
 
-// List returns sessions newest first.
+// List returns sessions newest first, including finished sessions restored
+// from the record store.
 func (m *Manager) List() []model.Session {
 	m.mu.Lock()
 	insts := make([]*instance, 0, len(m.sessions))
-	for _, inst := range m.sessions {
+	live := make(map[string]struct{}, len(m.sessions))
+	for id, inst := range m.sessions {
 		insts = append(insts, inst)
+		live[id] = struct{}{}
+	}
+	stored := make([]model.Session, 0, len(m.history))
+	for id, sess := range m.history {
+		if _, ok := live[id]; ok {
+			continue
+		}
+		stored = append(stored, cloneSession(sess))
 	}
 	m.mu.Unlock()
-	out := make([]model.Session, 0, len(insts))
+	out := make([]model.Session, 0, len(insts)+len(stored))
 	for _, inst := range insts {
 		snapshot := m.copySession(inst)
 		if info, ok := m.artifactFor(inst.sess.ID); ok {
+			snapshot.Artifact = &info
+		}
+		out = append(out, snapshot)
+	}
+	for _, snapshot := range stored {
+		if info, ok := m.artifactFor(snapshot.ID); ok {
 			snapshot.Artifact = &info
 		}
 		out = append(out, snapshot)
@@ -1272,10 +1318,15 @@ func (m *Manager) snapshot() []*instance {
 func (m *Manager) copySession(inst *instance) model.Session {
 	inst.mu.Lock()
 	defer inst.mu.Unlock()
-	out := inst.sess
-	out.Skills = append([]string(nil), inst.sess.Skills...)
-	out.MCPServers = append([]string(nil), inst.sess.MCPServers...)
-	out.Plugins = append([]string(nil), inst.sess.Plugins...)
+	return cloneSession(inst.sess)
+}
+
+// cloneSession copies a session and the slices a caller may append to.
+func cloneSession(in model.Session) model.Session {
+	out := in
+	out.Skills = append([]string(nil), in.Skills...)
+	out.MCPServers = append([]string(nil), in.MCPServers...)
+	out.Plugins = append([]string(nil), in.Plugins...)
 	return out
 }
 
@@ -1284,6 +1335,7 @@ func (m *Manager) setArtifact(id string, info model.ArtifactInfo) {
 	m.mu.Lock()
 	m.artifacts[id] = info
 	m.mu.Unlock()
+	m.saveArtifactIndex(id, info)
 }
 
 // artifactFor returns the latest bundle for a session, including sessions that

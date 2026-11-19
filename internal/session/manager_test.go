@@ -43,8 +43,10 @@ func testManager(t *testing.T) *Manager {
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		store:      store,
 		hub:        hub.New(100),
+		records:    NewMemoryRecords(),
 		sessions:   map[string]*instance{},
 		tokenIndex: map[string]string{},
+		history:    map[string]model.Session{},
 		artifacts:  map[string]model.ArtifactInfo{},
 	}
 }

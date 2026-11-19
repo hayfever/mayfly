@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -96,6 +97,18 @@ type SessionsConfig struct {
 	ShellTimeout        Duration `yaml:"shell_timeout"`
 	WorkspaceDir        string   `yaml:"workspace_dir"`
 	ArtifactsDir        string   `yaml:"artifacts_dir"`
+	// Records selects where session records and the artifact index are kept.
+	Records RecordConfig `yaml:"records"`
+}
+
+// RecordConfig selects the store that keeps session records and the artifact
+// index across restarts.
+type RecordConfig struct {
+	// Backend is memory or bbolt. An empty value follows journal.backend.
+	Backend string `yaml:"backend"`
+	// Path is the bbolt file. An empty value puts sessions.db beside the
+	// journal database.
+	Path string `yaml:"path"`
 }
 
 // JournalConfig selects where agent turn steps are recorded for replay.
@@ -195,6 +208,10 @@ type ArtifactsConfig struct {
 	Local    LocalStoreConfig `yaml:"local"`
 	S3       S3StoreConfig    `yaml:"s3"`
 	MaxBytes int64            `yaml:"max_bytes"`
+	// IndexRetention bounds how long the control plane keeps a stored
+	// bundle's download metadata after the session record is gone. Zero keeps
+	// the metadata, because the bundle itself is the durable output.
+	IndexRetention Duration `yaml:"index_retention"`
 }
 
 // LocalStoreConfig writes artifacts to a directory.
@@ -542,6 +559,12 @@ func (c *Config) applyDefaults() {
 	if c.Journal.Backend == "bbolt" && c.Journal.Bolt.Path == "" {
 		c.Journal.Bolt.Path = ".mayfly/journal.db"
 	}
+	if c.Sessions.Records.Backend == "" {
+		c.Sessions.Records.Backend = c.Journal.Backend
+	}
+	if c.Sessions.Records.Backend == "bbolt" && c.Sessions.Records.Path == "" {
+		c.Sessions.Records.Path = filepath.Join(filepath.Dir(c.Journal.Bolt.Path), "sessions.db")
+	}
 	if c.Runtime.WorkspaceLimit == "" {
 		c.Runtime.WorkspaceLimit = "1Gi"
 	}
@@ -688,6 +711,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Sessions.MaxRestarts < 0 {
 		return fmt.Errorf("sessions.max_restarts must not be negative")
+	}
+	switch c.Sessions.Records.Backend {
+	case "memory":
+	case "bbolt":
+		if c.Sessions.Records.Path == "" {
+			return fmt.Errorf("sessions.records.path is required for the bbolt backend")
+		}
+	default:
+		return fmt.Errorf("sessions.records.backend must be memory or bbolt")
+	}
+	if c.Artifacts.IndexRetention.Std() < 0 {
+		return fmt.Errorf("artifacts.index_retention must not be negative")
 	}
 	if c.Sources.MaxArtifactBytes <= 0 {
 		return fmt.Errorf("sources.max_artifact_bytes must be positive")
