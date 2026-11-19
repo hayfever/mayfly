@@ -1,7 +1,11 @@
 {{- $config := deepCopy .Values.config -}}
 {{- $fullname := include "mayfly.fullname" . -}}
 {{- $litellmName := include "mayfly.litellmName" . -}}
+{{- if ge (int .Values.shutdown.budgetSeconds) (int .Values.shutdown.gracePeriodSeconds) -}}
+{{- fail "shutdown.budgetSeconds must be less than shutdown.gracePeriodSeconds" -}}
+{{- end -}}
 {{- $_ := set $config.server "addr" (printf ":%v" .Values.service.port) -}}
+{{- $_ := set $config.server "shutdown_budget" (printf "%ds" (int .Values.shutdown.budgetSeconds)) -}}
 {{- $_ := set $config.server "internal_url" (default (printf "http://%s.%s.svc.cluster.local:%v" $fullname .Release.Namespace .Values.service.port) $config.server.internal_url) -}}
 {{- $_ := set $config.sessions "namespace" (default .Release.Namespace $config.sessions.namespace) -}}
 {{- $_ := set $config.runtime "image" (include "mayfly.agentImage" .) -}}

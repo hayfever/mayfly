@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -25,6 +26,7 @@ type redisStore struct {
 	dead   string
 	seen   string
 	done   string
+	format string
 
 	accept *redis.Script
 	claim  *redis.Script
@@ -105,6 +107,7 @@ func newRedis(ctx context.Context, cfg config.QueueConfig) (*redisStore, error) 
 		dead:   tag + ":dead",
 		seen:   tag + ":seen:",
 		done:   tag + ":done:",
+		format: tag + ":format_version",
 		accept: redis.NewScript(acceptScript),
 		claim:  redis.NewScript(claimScript),
 		settle: redis.NewScript(settleScript),
@@ -125,7 +128,34 @@ func newRedis(ctx context.Context, cfg config.QueueConfig) (*redisStore, error) 
 		_ = store.client.Close()
 		return nil, fmt.Errorf("queue.redis: %w", err)
 	}
+	if err := store.checkFormat(pingCtx); err != nil {
+		_ = store.client.Close()
+		return nil, err
+	}
 	return store, nil
+}
+
+// checkFormat stamps a queue written before the stamp existed as version 1 and
+// rejects a queue written by a newer build. The stamp is a separate key so it
+// never mixes with a job record.
+func (s *redisStore) checkFormat(ctx context.Context) error {
+	raw, err := s.client.Get(ctx, s.format).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return fmt.Errorf("queue format: %w", err)
+	}
+	missing, err := checkFormat([]byte(raw))
+	if err != nil {
+		return err
+	}
+	if !missing {
+		return nil
+	}
+	// SETNX: a second control plane that starts at the same moment must not
+	// overwrite a stamp it has not read yet.
+	if err := s.client.SetNX(ctx, s.format, formatVersion, 0).Err(); err != nil {
+		return fmt.Errorf("queue format stamp: %w", err)
+	}
+	return nil
 }
 
 // dedupeFlag tells the accept script whether this job has a delivery key.

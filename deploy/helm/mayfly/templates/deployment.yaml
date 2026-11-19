@@ -45,7 +45,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: {{ .Values.shutdown.gracePeriodSeconds }}
       containers:
         - name: mayflyd
           image: {{ include "mayfly.controlPlaneImage" . }}

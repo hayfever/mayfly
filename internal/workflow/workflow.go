@@ -213,6 +213,7 @@ func (r *Runner) Handle(ctx context.Context, job queue.Job) (queue.Result, error
 				ErrAllFailed, result.Totals.Failed, result.Totals.Pages, firstError(result.Documents))
 		}
 		digest, size, err = r.writeArtifact(ctx, key, runArtifact{
+			Version:     sources.FormatVersion,
 			RunID:       runID,
 			Schedule:    schedule.Name,
 			Source:      result.Source,
@@ -317,8 +318,15 @@ func (r *Runner) loadArtifact(ctx context.Context, key, schedule, runID string) 
 	if stored.RunID != runID || stored.Schedule != schedule || stored.Documents == nil {
 		return sources.Result{}, "", 0, false, fmt.Errorf("run artifact %s does not belong to run %s of schedule %s", key, runID, schedule)
 	}
+	// Version 0 is an artifact written before the stamp existed; it holds the
+	// version 1 layout.
+	switch stored.Version {
+	case 0, sources.FormatVersion:
+	default:
+		return sources.Result{}, "", 0, false, fmt.Errorf("run artifact %s has format version %d; this build reads up to %d", key, stored.Version, sources.FormatVersion)
+	}
 	sum := sha256.Sum256(raw)
-	result = sources.Result{Source: stored.Source, Documents: stored.Documents, Totals: stored.Totals}
+	result = sources.Result{Version: stored.Version, Source: stored.Source, Documents: stored.Documents, Totals: stored.Totals}
 	return result, hex.EncodeToString(sum[:]), int64(len(raw)), true, nil
 }
 
@@ -333,6 +341,7 @@ func firstError(docs []sources.Document) string {
 
 // runArtifact is the payload stored under runs/<schedule>/<run>.json.
 type runArtifact struct {
+	Version     int                `json:"version"`
 	RunID       string             `json:"run_id"`
 	Schedule    string             `json:"schedule"`
 	Source      string             `json:"source"`

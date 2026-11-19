@@ -213,6 +213,8 @@ A runtime can finalize straight from `running` without a close request. The buil
 
 If `runner.Start` fails, `Create` marks the session `failed` immediately and returns the error; a queued webhook job is then retried (`Nack`). A `pending` session moves to `running` only when its runtime authenticates to the control plane. If the runtime has not connected within `sessions.connect_timeout` (default `2m`, measured from when the pod reaches `Running`, or from launch on the local backend), the manager exports a partial artifact, stops the container, and marks the session `failed`, which releases its capacity slot.
 
+The manager writes each transition to the session record store (`sessions.records`: `bbolt` at `sessions.db` beside the journal, or `memory`). A record holds the fields `List` and `Get` serve, including the artifact metadata, and no token: an adopted session reads its token back from its Secret, and a finalized session does not accept one. At startup the manager adopts pods first and then loads the store. A finished record becomes a list entry. A record for a session that adoption did not rebuild is marked `failed`, because no runtime can continue its turn. Records leave the store after `sessions.retention`; artifact metadata leaves after `artifacts.index_retention`. A record this build cannot read stops startup rather than serving a partial list.
+
 ## Thread model
 
 One in-memory stream per session holds ordered events with a monotonic sequence. Each event has a type, optional actor, text, and data.
@@ -240,7 +242,7 @@ Retention is bounded per session (`sessions.event_buffer`, default 5000 events).
 | `files/...` | workspace files and one `plugins/<name>.stderr.log` per inline plugin |
 | `session.json` | runtime configuration for the session |
 
-`manifest.json` is written last and lists every other entry. The upload is content-addressed by SHA-256 and verified by the control plane.
+`manifest.json` is written last and lists every other entry. The upload is content-addressed by SHA-256 and verified by the control plane. The index that serves downloads lives in the session record store, so a restart does not lose the mapping from session to bundle.
 
 ## Failure handling
 
@@ -254,7 +256,7 @@ Retention is bounded per session (`sessions.event_buffer`, default 5000 events).
 | Tool gateway unreachable | The runtime retries each begin and complete for up to 5 minutes, then exits without finalizing so a replacement resumes. It never runs a tool without a successful begin |
 | Tool call interrupted by a restart | Non-idempotent: the gateway returns an interrupted error result and the runtime emits a `system` event. Idempotent: the call is dispatched again with the same key. A completed call whose journal step did not land replays the recorded result |
 | Plugin unavailable | `required: true` fails the session at start. Otherwise a `system` event and the session continues without its tools |
-| Control plane restarts | Running pods labeled `mayfly.io/managed=true` are adopted from their ConfigMap and Secret, the hub is seeded above the reserved sequence floor, and the last journaled turn is restored to the thread with its step keys. A runtime in flight retries transient model, tool gateway, and journal requests through the replacement control plane for up to 5 minutes per step, then exits so a replacement resumes. A session that lost its pod but kept its ConfigMap, Secret, and workspace claim gets a replacement pod at startup. A pod whose ConfigMap is gone belongs to a session that finalized mid-cleanup (cleanup deletes the ConfigMap first) and is deleted. The rest of the objects are garbage-collected. With no journal state at all (persistence off), the hub is seeded at the current time in microseconds, so new messages never reuse the in-flight turn's key |
+| Control plane restarts | Running pods labeled `mayfly.io/managed=true` are adopted from their ConfigMap and Secret, the hub is seeded above the reserved sequence floor, and the last journaled turn is restored to the thread with its step keys. A runtime in flight retries transient model, tool gateway, and journal requests through the replacement control plane for up to 5 minutes per step, then exits so a replacement resumes. A session that lost its pod but kept its ConfigMap, Secret, and workspace claim gets a replacement pod at startup. A pod whose ConfigMap is gone belongs to a session that finalized mid-cleanup (cleanup deletes the ConfigMap first) and is deleted. The rest of the objects are garbage-collected. Finished sessions and artifact metadata are read back from the session record store. With no journal state at all (persistence off), the hub is seeded at the current time in microseconds, so new messages never reuse the in-flight turn's key |
 | TTL elapses | Close with reason `expired`; runtime finalizes; status becomes `expired` |
 | SIGTERM or SIGINT | A drain, eviction, preemption, or `kubectl delete` is not a close. The runtime stops the turn, closes its logs, and exits non-zero without finalizing, so the control plane starts a replacement. It finalizes when a close control event was received, or with its full bundle when the session cannot resume (`sessions.max_restarts: 0`, or a Kubernetes session without a persistent workspace) |
 

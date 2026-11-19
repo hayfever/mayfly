@@ -537,3 +537,32 @@ func TestConfigPluginVolumeLimit(t *testing.T) {
 		t.Fatalf("explicit plugin volume limit did not validate: %v", err)
 	}
 }
+
+func TestShutdownSharesSplitTheBudget(t *testing.T) {
+	cfg := Default()
+	httpShare, workerShare, managerShare := cfg.Server.ShutdownShares()
+	if httpShare != 5*time.Second || workerShare != 10*time.Second || managerShare != 10*time.Second {
+		t.Fatalf("default shares = %v/%v/%v", httpShare, workerShare, managerShare)
+	}
+	cfg.Server.ShutdownBudget = Duration(0)
+	httpShare, workerShare, managerShare = cfg.Server.ShutdownShares()
+	if httpShare+workerShare+managerShare != DefaultShutdownBudget {
+		t.Fatalf("unset budget shares = %v/%v/%v", httpShare, workerShare, managerShare)
+	}
+	cfg.Server.ShutdownBudget = Duration(10 * time.Second)
+	httpShare, workerShare, managerShare = cfg.Server.ShutdownShares()
+	if httpShare+workerShare+managerShare != 10*time.Second {
+		t.Fatalf("shares do not add up to the budget: %v/%v/%v", httpShare, workerShare, managerShare)
+	}
+	if httpShare <= 0 || workerShare <= 0 || managerShare <= 0 {
+		t.Fatalf("a share is empty: %v/%v/%v", httpShare, workerShare, managerShare)
+	}
+}
+
+func TestValidateRejectsTinyShutdownBudget(t *testing.T) {
+	cfg := Default()
+	cfg.Server.ShutdownBudget = Duration(time.Second)
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("a one-second shutdown budget was accepted")
+	}
+}

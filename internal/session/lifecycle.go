@@ -283,6 +283,7 @@ func (m *Manager) Close(id, reason string) error {
 		reason = "closed"
 	}
 	inst.mu.Unlock()
+	m.persistInstance(inst)
 
 	m.hub.Append(id, model.Event{
 		Type:  model.EventControl,
@@ -299,11 +300,20 @@ func (m *Manager) Close(id, reason string) error {
 	return nil
 }
 
-// Delete force-stops a session and marks it failed.
+// Delete force-stops a session and marks it failed. A session restored from
+// the record store has no runtime to stop, so Delete removes what the previous
+// control plane left behind (a stray pod, supporting objects, and the journal)
+// and drops its record. That also settles a session adoption gave up on.
 func (m *Manager) Delete(id string) error {
 	inst, ok := m.instance(id)
 	if !ok {
-		return ErrNotFound
+		_, stored := m.historySession(id)
+		if !stored && !m.pendingAdoption(id) {
+			return ErrNotFound
+		}
+		m.cleanupStored(id)
+		m.dropHistory(id)
+		return nil
 	}
 	inst.mu.Lock()
 	already := inst.finalized
@@ -313,6 +323,62 @@ func (m *Manager) Delete(id string) error {
 	}
 	m.cleanup(inst, true)
 	return nil
+}
+
+// cleanupStored removes a restored session this control plane does not run:
+// retries stop, its pods and supporting objects are deleted, and its journal
+// is dropped.
+func (m *Manager) cleanupStored(id string) {
+	m.clearAdoptPending(id)
+	m.cleanupLeftovers(id)
+}
+
+// cleanupLeftovers removes the pods, supporting objects, and journal of a
+// session this control plane does not run. Object names come from the
+// labelled objects while they exist, and fall back to the conventional names.
+func (m *Manager) cleanupLeftovers(id string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if m.kube != nil {
+		pods, err := m.kube.SessionPods(ctx)
+		if err != nil {
+			m.logger.Warn("cleanup stored session: list pods", "session", id, "error", err)
+		}
+		for _, pod := range pods {
+			if pod.Labels[k8s.LabelSession] != id {
+				continue
+			}
+			if err := m.kube.DeletePod(ctx, pod.Name, 0); err != nil {
+				m.logger.Warn("cleanup stored session: delete pod", "session", id, "pod", pod.Name, "error", err)
+			}
+		}
+		orphans, err := m.kube.OrphanSessions(ctx, m.liveSessionIDs())
+		if err != nil {
+			m.logger.Warn("cleanup stored session: list objects", "session", id, "error", err)
+		}
+		objs := orphans[id]
+		spec := &k8s.SessionSpec{
+			Namespace:           m.cfg.Sessions.Namespace,
+			SessionID:           id,
+			PodName:             "mayfly-" + id,
+			SecretName:          orDefault(objs.Secret, "mayfly-"+id),
+			ConfigMapName:       orDefault(objs.ConfigMap, "mayfly-"+id),
+			PVCName:             orDefault(objs.PVC, "mayfly-"+id+"-workspace"),
+			NetworkPolicyName:   "mayfly-" + id + "-netpol",
+			PersistentWorkspace: true,
+		}
+		if err := m.kube.DeleteSession(ctx, spec, 0); err != nil {
+			m.logger.Warn("cleanup stored session: delete objects", "session", id, "error", err)
+		}
+	}
+	m.deleteJournal(id)
+}
+
+func orDefault(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
 }
 
 func (m *Manager) finalize(inst *instance, status model.SessionStatus, reason, errMsg string) {
@@ -335,6 +401,7 @@ func (m *Manager) finalize(inst *instance, status model.SessionStatus, reason, e
 	inst.sess.LastActivity = now
 	hash := inst.tokenHash
 	inst.mu.Unlock()
+	m.persistInstance(inst)
 
 	m.removeToken(hash)
 	text := "Session " + string(final) + "."
@@ -539,16 +606,86 @@ func (m *Manager) failFallback(inst *instance, reason string, err error) {
 	m.finalize(inst, model.StatusFailed, reason, "runtime did not finalize: "+reason)
 }
 
+// adoptFailure is one session's unresolved adoption: how many passes tried it
+// and why the last one failed.
+type adoptFailure struct {
+	Attempts int
+	Reason   string
+}
+
+// maxAdoptAttempts bounds how often one session's adoption is retried before
+// its record is settled as failed.
+const maxAdoptAttempts = 10
+
 // adopt recovers sessions that were running when this control plane started.
-// It returns the instances that need a replacement pod: sessions whose pod
-// exists but is gone are polled, while sessions whose pod was lost between a
-// DeletePod and a Start have nothing to poll.
+// It returns the instances that need a replacement pod: sessions whose pod is
+// gone are replaced, while sessions whose pod exists are polled.
 func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
+	return m.adoptScan(ctx, true)
+}
+
+// adoptScan recovers sessions from their pods and from saved objects. cleanup
+// also runs garbage collection, which deletes objects no session owns. Only
+// startup does that: a later pass can race a session this control plane is
+// already running, and the keep set cannot see a session created after it was
+// built.
+func (m *Manager) adoptScan(ctx context.Context, cleanup bool) ([]*instance, error) {
+	m.adoptIncomplete.Store(true)
 	pods, err := m.kube.SessionPods(ctx)
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
+	replacements, live, failed := m.adoptPods(ctx, pods, nil, now)
+
+	// A session can lose its pod and keep its objects: the control plane can
+	// stop between a replacement's pod deletion and its start. Those objects
+	// hold everything a replacement needs, so adopt them instead of deleting.
+	orphans, err := m.kube.OrphanSessions(ctx, live)
+	if err != nil {
+		// Garbage collection deletes anything it cannot see an owner for.
+		// Without this list, recovery and collection would disagree about
+		// which objects are resumable, so leave everything for the next pass.
+		m.logger.Warn("adopt: list sessions without a pod; skipping garbage collection", "error", err)
+		m.mergeAdoptFailures(failed, fmt.Sprintf("list sessions without a pod: %v", err))
+		return replacements, nil
+	}
+	for id, objs := range orphans {
+		if _, ok := m.instance(id); ok {
+			continue
+		}
+		inst, preserve := m.adoptPodless(ctx, id, objs, now)
+		if preserve {
+			live[id] = struct{}{}
+		}
+		if inst == nil && preserve {
+			// The objects are resumable but could not be read yet.
+			failed[id] = "read the session objects"
+		}
+		if inst != nil {
+			replacements = append(replacements, inst)
+		}
+	}
+	if cleanup {
+		// Keep every session this control plane runs. A live session between
+		// pods has no row in the lists above, but it owns objects that must
+		// survive. Only startup calls this, before the API serves requests,
+		// so no session can start after this snapshot.
+		for id := range m.liveSessionIDs() {
+			live[id] = struct{}{}
+		}
+		m.garbageCollectSessions(ctx, live)
+	}
+	m.mergeAdoptFailures(failed, "")
+	m.adoptIncomplete.Store(false)
+	return replacements, nil
+}
+
+// adoptPods rebuilds a session for every pod it is given. only, when non-nil,
+// limits the pass to those session IDs. It returns the instances that need a
+// replacement, every session a pod still represents, and the sessions it could
+// not rebuild with the reason.
+func (m *Manager) adoptPods(ctx context.Context, pods []corev1.Pod, only map[string]struct{}, now time.Time) (replacements []*instance, live map[string]struct{}, failed map[string]string) {
 	bySession := map[string][]corev1.Pod{}
 	for i := range pods {
 		id := pods[i].Labels[k8s.LabelSession]
@@ -556,12 +693,17 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 			bySession[id] = append(bySession[id], pods[i])
 		}
 	}
-	live := make(map[string]struct{}, len(bySession))
+	live = make(map[string]struct{}, len(bySession))
 	for id := range bySession {
 		live[id] = struct{}{}
 	}
-	var replacements []*instance
+	failed = map[string]string{}
 	for id, group := range bySession {
+		if only != nil {
+			if _, ok := only[id]; !ok {
+				continue
+			}
+		}
 		if _, ok := m.instance(id); ok {
 			continue
 		}
@@ -589,6 +731,7 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 		}
 		if err != nil {
 			m.logger.Warn("adopt: read config", "pod", pod.Name, "error", err)
+			failed[id] = "read the session config"
 			continue
 		}
 		var cfg sessioncfg.Config
@@ -604,6 +747,7 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 		}
 		if err != nil {
 			m.logger.Warn("adopt: read session credentials", "pod", pod.Name, "error", err)
+			failed[id] = "read the session credentials"
 			continue
 		}
 		token := keys.Token
@@ -665,6 +809,7 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 		empty, err := m.seedSequence(ctx, id)
 		if err != nil {
 			m.logger.Error("adopt: cannot seed session sequence; leaving pod unadopted", "session", id, "error", err)
+			failed[id] = "seed the session sequence"
 			continue
 		}
 		if empty {
@@ -676,36 +821,12 @@ func (m *Manager) adopt(ctx context.Context) ([]*instance, error) {
 		m.mu.Unlock()
 		m.registerGrant(inst)
 		m.hub.Create(id)
+		m.persistInstance(inst)
 		m.hub.Append(id, model.Event{Type: model.EventSystem, Actor: "mayfly", Text: "Session recovered by control plane restart."})
 		m.restoreJournalThread(id)
 		m.logger.Info("adopted session", "session", id, "pod", pod.Name, "restarts", inst.restarts)
 	}
-	// A session can lose its pod and keep its objects: the control plane can
-	// stop between a replacement's pod deletion and its start. Those objects
-	// hold everything a replacement needs, so adopt them instead of deleting.
-	orphans, err := m.kube.OrphanSessions(ctx, live)
-	if err != nil {
-		// Garbage collection deletes anything it cannot see an owner for.
-		// Without this list, recovery and collection would disagree about
-		// which objects are resumable, so leave everything for the next
-		// control-plane start.
-		m.logger.Warn("adopt: list sessions without a pod; skipping garbage collection", "error", err)
-		return replacements, nil
-	}
-	for id, objs := range orphans {
-		if _, ok := m.instance(id); ok {
-			continue
-		}
-		inst, preserve := m.adoptPodless(ctx, id, objs, now)
-		if preserve {
-			live[id] = struct{}{}
-		}
-		if inst != nil {
-			replacements = append(replacements, inst)
-		}
-	}
-	m.garbageCollectSessions(ctx, live)
-	return replacements, nil
+	return replacements, live, failed
 }
 
 // adoptPodless rebuilds an instance whose pod is gone but whose ConfigMap,
@@ -803,6 +924,7 @@ func (m *Manager) adoptPodless(ctx context.Context, id string, objs k8s.OrphanOb
 	m.mu.Unlock()
 	m.registerGrant(inst)
 	m.hub.Create(id)
+	m.persistInstance(inst)
 	m.hub.Append(id, model.Event{Type: model.EventSystem, Actor: "mayfly", Text: "Session recovered by control plane restart."})
 	m.restoreJournalThread(id)
 	m.logger.Info("adopted session without a pod; starting a replacement", "session", id)
@@ -937,6 +1059,14 @@ func mcpNames(in []sessioncfg.MCPServer) []string {
 	return out
 }
 
+// adoptRetryInterval is how long the first retry of an unfinished adoption
+// wait, and maxAdoptRetryInterval caps the backoff. They are variables so tests
+// do not wait for them.
+var (
+	adoptRetryInterval    = 15 * time.Second
+	maxAdoptRetryInterval = 2 * time.Minute
+)
+
 func (m *Manager) maintenance() {
 	reaper := time.NewTicker(5 * time.Second)
 	defer reaper.Stop()
@@ -946,20 +1076,119 @@ func (m *Manager) maintenance() {
 		defer t.Stop()
 		pollC = t.C
 	}
+	delay := adoptRetryInterval
+	var nextAdopt time.Time
 	for {
 		select {
 		case <-m.ctx.Done():
 			return
 		case <-reaper.C:
 			m.reap()
+			if m.adoptNeeded() && (nextAdopt.IsZero() || !time.Now().Before(nextAdopt)) {
+				before := m.pendingCount()
+				m.retryAdopt()
+				if m.pendingCount() < before {
+					delay = adoptRetryInterval
+				} else {
+					delay *= 2
+					if delay > maxAdoptRetryInterval {
+						delay = maxAdoptRetryInterval
+					}
+				}
+				nextAdopt = time.Now().Add(delay)
+			}
+			if !m.adoptNeeded() {
+				nextAdopt = time.Time{}
+				delay = adoptRetryInterval
+			}
 		case <-pollC:
 			m.pollPods(m.ctx)
 		}
 	}
 }
 
+// retryAdopt finishes adoption that could not complete. A pass that never saw
+// every session is repeated without garbage collection. Otherwise only the
+// sessions a previous pass could not rebuild are retried, and no object of any
+// other session is scanned for deletion.
+func (m *Manager) retryAdopt() {
+	if m.kube == nil {
+		return
+	}
+	if m.adoptIncomplete.Load() {
+		replacements, err := m.adoptScan(m.ctx, false)
+		if err != nil {
+			m.logger.Warn("adopt existing sessions", "error", err)
+			return
+		}
+		m.restartAdopted(replacements)
+		m.settleInterrupted()
+		return
+	}
+	pending := m.pendingAdoptions()
+	if len(pending) == 0 {
+		return
+	}
+	pods, err := m.kube.SessionPods(m.ctx)
+	if err != nil {
+		m.logger.Warn("adopt pending sessions", "error", err)
+		m.mergeAdoptFailures(nil, fmt.Sprintf("list session pods: %v", err))
+		return
+	}
+	now := time.Now().UTC()
+	replacements, live, failed := m.adoptPods(m.ctx, pods, pending, now)
+	missing := make(map[string]struct{}, len(pending))
+	for id := range pending {
+		if _, ok := live[id]; ok {
+			continue
+		}
+		if _, ok := failed[id]; ok {
+			continue
+		}
+		missing[id] = struct{}{}
+	}
+	if len(missing) > 0 {
+		// A pending session whose pod is gone can still have saved objects.
+		// Read them; this pass never deletes anything.
+		orphans, err := m.kube.OrphanSessions(m.ctx, m.liveSessionIDs())
+		if err != nil {
+			// The pass could not examine every pending session, so a record is
+			// left as it is until a later pass does.
+			m.logger.Warn("adopt pending sessions: list saved objects", "error", err)
+			m.mergeAdoptFailures(failed, fmt.Sprintf("list sessions without a pod: %v", err))
+			m.restartAdopted(replacements)
+			return
+		}
+		for id := range missing {
+			objs, ok := orphans[id]
+			if !ok {
+				continue
+			}
+			inst, preserve := m.adoptPodless(m.ctx, id, objs, now)
+			if inst != nil {
+				replacements = append(replacements, inst)
+			}
+			if inst == nil && preserve {
+				failed[id] = "read the session objects"
+			}
+		}
+	}
+	m.mergeAdoptFailures(failed, "")
+	m.restartAdopted(replacements)
+	m.settleInterrupted()
+}
+
+// restartAdopted starts the replacement pod of every session a retry rebuilt
+// without a pod.
+func (m *Manager) restartAdopted(replacements []*instance) {
+	for _, inst := range replacements {
+		m.restartSoon(inst, "pod missing while adopting after a restart")
+	}
+}
+
 func (m *Manager) reap() {
 	now := time.Now().UTC()
+	m.pruneRecords(now)
 	retention := m.cfg.Sessions.Retention.Std()
 	for _, inst := range m.snapshot() {
 		inst.mu.Lock()

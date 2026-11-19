@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -70,6 +71,35 @@ type ServerConfig struct {
 	TokenEnv        string   `yaml:"token_env"`
 	AttachTicketTTL Duration `yaml:"attach_ticket_ttl"`
 	MaxBodyBytes    int64    `yaml:"max_body_bytes"`
+	// ShutdownBudget bounds the whole stop sequence: HTTP drain, queue worker
+	// drain, and session manager shutdown. It must fit inside the pod's
+	// terminationGracePeriodSeconds with margin.
+	ShutdownBudget Duration `yaml:"shutdown_budget"`
+}
+
+// DefaultShutdownBudget leaves five seconds of the thirty-second default pod
+// grace period for the runtime to kill the process.
+const DefaultShutdownBudget = 25 * time.Second
+
+// Shutdown budget shares, in percent. The stages run in order, so each one
+// gets its own window inside the budget.
+const (
+	shutdownHTTPShare    = 20
+	shutdownWorkerShare  = 40
+	shutdownManagerShare = 40
+)
+
+// ShutdownShares returns how long each stop stage may take. The session
+// manager gets the remainder, so the three shares always add up to the budget.
+func (c ServerConfig) ShutdownShares() (httpShare, workerShare, managerShare time.Duration) {
+	budget := c.ShutdownBudget.Std()
+	if budget <= 0 {
+		budget = DefaultShutdownBudget
+	}
+	httpShare = budget * shutdownHTTPShare / 100
+	workerShare = budget * shutdownWorkerShare / 100
+	managerShare = budget - httpShare - workerShare
+	return httpShare, workerShare, managerShare
 }
 
 // SessionsConfig controls session defaults and runtime limits.
@@ -96,6 +126,18 @@ type SessionsConfig struct {
 	ShellTimeout        Duration `yaml:"shell_timeout"`
 	WorkspaceDir        string   `yaml:"workspace_dir"`
 	ArtifactsDir        string   `yaml:"artifacts_dir"`
+	// Records selects where session records and the artifact index are kept.
+	Records RecordConfig `yaml:"records"`
+}
+
+// RecordConfig selects the store that keeps session records and the artifact
+// index across restarts.
+type RecordConfig struct {
+	// Backend is memory or bbolt. An empty value follows journal.backend.
+	Backend string `yaml:"backend"`
+	// Path is the bbolt file. An empty value puts sessions.db beside the
+	// journal database.
+	Path string `yaml:"path"`
 }
 
 // JournalConfig selects where agent turn steps are recorded for replay.
@@ -195,6 +237,10 @@ type ArtifactsConfig struct {
 	Local    LocalStoreConfig `yaml:"local"`
 	S3       S3StoreConfig    `yaml:"s3"`
 	MaxBytes int64            `yaml:"max_bytes"`
+	// IndexRetention bounds how long the control plane keeps a stored
+	// bundle's download metadata after the session record is gone. Zero keeps
+	// the metadata, because the bundle itself is the durable output.
+	IndexRetention Duration `yaml:"index_retention"`
 }
 
 // LocalStoreConfig writes artifacts to a directory.
@@ -363,6 +409,7 @@ func Default() *Config {
 			TokenEnv:        "MAYFLY_API_TOKEN",
 			AttachTicketTTL: Duration(60 * time.Second),
 			MaxBodyBytes:    4 << 20,
+			ShutdownBudget:  Duration(DefaultShutdownBudget),
 		},
 		Sessions: SessionsConfig{
 			Namespace:           "mayfly",
@@ -491,6 +538,9 @@ func (c *Config) applyDefaults() {
 	if c.Server.AttachTicketTTL.Std() <= 0 {
 		c.Server.AttachTicketTTL = Duration(60 * time.Second)
 	}
+	if c.Server.ShutdownBudget.Std() <= 0 {
+		c.Server.ShutdownBudget = Duration(DefaultShutdownBudget)
+	}
 	if c.LLM.MaxBodyBytes <= 0 {
 		c.LLM.MaxBodyBytes = 16 << 20
 	}
@@ -541,6 +591,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Journal.Backend == "bbolt" && c.Journal.Bolt.Path == "" {
 		c.Journal.Bolt.Path = ".mayfly/journal.db"
+	}
+	if c.Sessions.Records.Backend == "" {
+		c.Sessions.Records.Backend = c.Journal.Backend
+	}
+	if c.Sessions.Records.Backend == "bbolt" && c.Sessions.Records.Path == "" {
+		c.Sessions.Records.Path = filepath.Join(filepath.Dir(c.Journal.Bolt.Path), "sessions.db")
 	}
 	if c.Runtime.WorkspaceLimit == "" {
 		c.Runtime.WorkspaceLimit = "1Gi"
@@ -668,6 +724,9 @@ func (c *Config) Validate() error {
 	if c.Server.InternalURL == "" {
 		return fmt.Errorf("server.internal_url is required")
 	}
+	if c.Server.ShutdownBudget.Std() < 3*time.Second {
+		return fmt.Errorf("server.shutdown_budget must be at least 3s")
+	}
 	if c.Sessions.DefaultTTL.Std() <= 0 {
 		return fmt.Errorf("sessions.default_ttl must be positive")
 	}
@@ -688,6 +747,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Sessions.MaxRestarts < 0 {
 		return fmt.Errorf("sessions.max_restarts must not be negative")
+	}
+	switch c.Sessions.Records.Backend {
+	case "memory":
+	case "bbolt":
+		if c.Sessions.Records.Path == "" {
+			return fmt.Errorf("sessions.records.path is required for the bbolt backend")
+		}
+	default:
+		return fmt.Errorf("sessions.records.backend must be memory or bbolt")
+	}
+	if c.Artifacts.IndexRetention.Std() < 0 {
+		return fmt.Errorf("artifacts.index_retention must not be negative")
 	}
 	if c.Sources.MaxArtifactBytes <= 0 {
 		return fmt.Errorf("sources.max_artifact_bytes must be positive")

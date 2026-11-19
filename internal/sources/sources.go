@@ -157,8 +157,14 @@ type Input struct {
 	Deps     map[string][]Document
 }
 
-// Result is the output of one plan.
+// FormatVersion is the layout of a stored Result. A reader accepts version 1
+// and rejects anything newer.
+const FormatVersion = 1
+
+// Result is the output of one plan. Version records the layout the result was
+// written in; a result written before the stamp existed decodes as version 0.
 type Result struct {
+	Version   int        `json:"version"`
 	Source    string     `json:"source"`
 	Documents []Document `json:"documents"`
 	Totals    Totals     `json:"totals"`
@@ -197,7 +203,7 @@ func (p *Plan) Run(ctx context.Context, in Input) (Result, error) {
 		}
 		docs[step.Name()] = out
 	}
-	result := Result{Source: p.Terminal, Documents: docs[p.Terminal]}
+	result := Result{Version: FormatVersion, Source: p.Terminal, Documents: docs[p.Terminal]}
 	result.Totals = Count(result.Documents)
 	return result, nil
 }

@@ -124,6 +124,17 @@ func main() {
 		os.Exit(2)
 	}
 
+	records, err := session.OpenRecords(cfg.Sessions.Records)
+	if err != nil {
+		logger.Error("configure session records", "error", err)
+		os.Exit(2)
+	}
+	defer func() {
+		if err := records.Close(); err != nil {
+			logger.Warn("close session records", "error", err)
+		}
+	}()
+
 	var sessionRunner runner.Runner
 	var kube *k8s.Client
 	switch cfg.Runtime.Backend {
@@ -159,6 +170,8 @@ func main() {
 		logger.Error("create session manager", "error", err)
 		os.Exit(2)
 	}
+	// Records load at Start, so the store is attached before it.
+	mgr.SetRecords(records)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -273,15 +286,29 @@ func main() {
 
 	<-ctx.Done()
 	logger.Info("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	_ = server.Shutdown(shutdownCtx)
+	// One budget covers the whole stop sequence, and each stage gets its own
+	// deadline inside it. A stage that runs long cannot hand the next stage an
+	// expired context.
+	budget := cfg.Server.ShutdownBudget.Std()
+	httpShare, workerShare, managerShare := cfg.Server.ShutdownShares()
+	deadline := time.Now().Add(budget)
+	logger.Info("shutdown budget", "budget", budget.String(), "http", httpShare.String(), "worker", workerShare.String(), "manager", managerShare.String())
+
+	httpCtx, cancelHTTP := context.WithDeadline(context.Background(), deadline.Add(-(workerShare + managerShare)))
+	_ = server.Shutdown(httpCtx)
+	cancelHTTP()
+
+	workerCtx, cancelWorker := context.WithDeadline(context.Background(), deadline.Add(-managerShare))
 	select {
 	case <-workerDone:
-	case <-time.After(20 * time.Second):
+	case <-workerCtx.Done():
 		logger.Warn("queue worker did not stop in time; in-flight jobs will be retried")
 	}
-	mgr.Shutdown(shutdownCtx)
+	cancelWorker()
+
+	managerCtx, cancelManager := context.WithDeadline(context.Background(), deadline)
+	mgr.Shutdown(managerCtx)
+	cancelManager()
 }
 
 // startServices starts the service plugin workloads and returns the gateway's

@@ -75,6 +75,12 @@ config:
     persistent_workspace: true
     allow_shell: false
     shell_timeout: 120s
+    # Session records and the artifact index. bbolt keeps them on the state
+    # volume, so GET /api/v1/sessions lists finished sessions and artifact
+    # downloads work after a restart. memory keeps them in the process.
+    records:
+      backend: bbolt
+      path: /var/lib/mayfly/sessions.db
   runtime:
     backend: kubernetes
     network_policy: true
@@ -185,10 +191,18 @@ litellm:
       cpu: "1"
       memory: 1Gi
 
-# The queue database, the local artifact store, and the turn journal live
-# under /var/lib/mayfly. Persistence is on by default: without it a
-# control-plane restart loses accepted webhook work and every in-flight
-# turn's journal, so the runtime cannot resume.
+# The control plane stops within shutdown.budgetSeconds of SIGTERM. The pod
+# gets shutdown.gracePeriodSeconds before SIGKILL, so the budget must be
+# smaller. The budget covers the HTTP drain, the queue worker drain, and the
+# session manager shutdown, in that order.
+shutdown:
+  budgetSeconds: 25
+  gracePeriodSeconds: 30
+
+# The queue database, session records, the local artifact store, and the turn
+# journal live under /var/lib/mayfly. Persistence is on by default: without it
+# a control-plane restart loses accepted webhook work, the session list, and
+# every in-flight turn's journal, so the runtime cannot resume.
 persistence:
   enabled: true
   size: 2Gi

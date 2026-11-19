@@ -3,7 +3,9 @@ package journal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,4 +254,109 @@ func TestStoreRejectsInvalidEntry(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBoltFormatReadsLegacyJournal(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "journal.db")
+	first, err := OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Append(ctx, Entry{SessionID: "s1", Turn: 3, Step: 0, Name: "user", ConvLen: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// A v0.1.0 database carries no stamp.
+	stripJournalFormat(t, path)
+
+	second, err := OpenBolt(path)
+	if err != nil {
+		t.Fatalf("open a legacy journal: %v", err)
+	}
+	entries, err := second.Turn(ctx, "s1", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].ConvLen != 7 {
+		t.Fatalf("Turn = %+v, want the legacy entry", entries)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := journalStoredFormat(t, path); got != "1" {
+		t.Fatalf("stamp after opening a legacy journal = %q, want 1", got)
+	}
+	// A journal that carries the stamp opens like any other.
+	third, err := OpenBolt(path)
+	if err != nil {
+		t.Fatalf("reopen a stamped journal: %v", err)
+	}
+	defer third.Close()
+	if entries, err := third.Turn(ctx, "s1", 3); err != nil || len(entries) != 1 {
+		t.Fatalf("Turn after reopen = %+v, %v", entries, err)
+	}
+}
+
+func TestBoltFormatRejectsNewerJournal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.db")
+	first, err := OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := bolt.Open(path, 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketMeta).Put(keyFormat, []byte("2"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenBolt(path); err == nil || !strings.Contains(err.Error(), "newer") {
+		t.Fatalf("open a newer journal: %v, want a version error", err)
+	}
+}
+
+func stripJournalFormat(t *testing.T, path string) {
+	t.Helper()
+	db, err := bolt.Open(path, 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error { return tx.DeleteBucket(bucketMeta) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func journalStoredFormat(t *testing.T, path string) string {
+	t.Helper()
+	db, err := bolt.Open(path, 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var got string
+	if err := db.View(func(tx *bolt.Tx) error {
+		meta := tx.Bucket(bucketMeta)
+		if meta == nil {
+			return errors.New("format bucket is gone")
+		}
+		got = string(meta.Get(keyFormat))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return got
 }

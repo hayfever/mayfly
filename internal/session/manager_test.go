@@ -43,8 +43,10 @@ func testManager(t *testing.T) *Manager {
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		store:      store,
 		hub:        hub.New(100),
+		records:    NewMemoryRecords(),
 		sessions:   map[string]*instance{},
 		tokenIndex: map[string]string{},
+		history:    map[string]model.Session{},
 		artifacts:  map[string]model.ArtifactInfo{},
 	}
 }
@@ -840,5 +842,25 @@ sidecar:
 	tool, ok := grant.Tools["plugin_notify_post_message"]
 	if !ok || tool.Placement != gateway.Inline {
 		t.Fatalf("grant tool = %+v", tool)
+	}
+}
+
+// TestShutdownStopsAtItsDeadline keeps a stop that outlives the budget from
+// holding the process past the pod's grace period.
+func TestShutdownStopsAtItsDeadline(t *testing.T) {
+	m := testManager(t)
+	m.journal = journal.NewMemory()
+	m.runner = &stopRecorder{}
+	inst := journalInstance(t, m)
+	inst.sess.Status = model.StatusRunning
+	inst.handle = runner.Handle{Backend: "kubernetes", SessionID: "s1", PodName: "mayfly-s1"}
+	m.finalize(inst, model.StatusCompleted, "closed", "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	m.Shutdown(ctx)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Shutdown took %v with a 20ms budget", elapsed)
 	}
 }

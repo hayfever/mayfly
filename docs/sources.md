@@ -408,6 +408,7 @@ whether or not it starts a session:
 
 ```json
 {
+  "version": 1,
   "run_id": "s-...",
   "schedule": "page-watch",
   "source": "watch-pages",
@@ -419,7 +420,8 @@ whether or not it starts a session:
 ```
 
 `sources.max_artifact_bytes` bounds the file. A larger run fails and starts
-no session.
+no session. `version` is the layout of the stored document; a file written
+before the field existed reads as version 0 with the version 1 layout.
 
 The artifact is also the run's checkpoint. When a job is retried, for
 example after a full session pool returned `ErrCapacity`, the control plane

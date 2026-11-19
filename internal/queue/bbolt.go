@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -26,6 +27,8 @@ var (
 	// bucketDoneExpiry indexes acknowledged jobs by tombstone expiry so their
 	// job-to-session records do not accumulate.
 	bucketDoneExpiry = []byte("done_expiry")
+	bucketMeta       = []byte("meta")
+	keyFormat        = []byte("format_version")
 )
 
 // purgeBatch bounds the extra work each Accept does to remove expired dedupe
@@ -45,6 +48,9 @@ func newBolt(cfg config.QueueConfig) (*boltStore, error) {
 		return nil, fmt.Errorf("open queue database: %w", err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
+		if err := checkBoltFormat(tx); err != nil {
+			return err
+		}
 		for _, name := range [][]byte{bucketJobs, bucketReady, bucketSeen, bucketDead, bucketDone, bucketDoneExpiry} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
@@ -71,6 +77,23 @@ func newBolt(cfg config.QueueConfig) (*boltStore, error) {
 		return nil, fmt.Errorf("create queue buckets: %w", err)
 	}
 	return &boltStore{cfg: cfg, db: db}, nil
+}
+
+// checkBoltFormat stamps a database written before the stamp existed as
+// version 1 and rejects a database written by a newer build.
+func checkBoltFormat(tx *bolt.Tx) error {
+	meta, err := tx.CreateBucketIfNotExists(bucketMeta)
+	if err != nil {
+		return err
+	}
+	missing, err := checkFormat(meta.Get(keyFormat))
+	if err != nil {
+		return err
+	}
+	if !missing {
+		return nil
+	}
+	return meta.Put(keyFormat, []byte(strconv.Itoa(formatVersion)))
 }
 
 func (s *boltStore) Accept(_ context.Context, job Job) error {
