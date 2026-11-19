@@ -19,6 +19,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -702,23 +703,33 @@ func liveConfig(id string) sessioncfg.Config {
 	}
 }
 
+// assertSessionObjects reads the tracker directly, so a reactor that makes
+// the API fail cannot hide an object that still exists.
 func assertSessionObjects(t *testing.T, ctx context.Context, cs *fake.Clientset, spec *k8s.SessionSpec, want bool) {
 	t.Helper()
-	_, cmErr := cs.CoreV1().ConfigMaps(spec.Namespace).Get(ctx, spec.ConfigMapName, metav1.GetOptions{})
-	_, secretErr := cs.CoreV1().Secrets(spec.Namespace).Get(ctx, spec.SecretName, metav1.GetOptions{})
-	_, pvcErr := cs.CoreV1().PersistentVolumeClaims(spec.Namespace).Get(ctx, spec.PVCName, metav1.GetOptions{})
-	_, policyErr := cs.NetworkingV1().NetworkPolicies(spec.Namespace).Get(ctx, spec.NetworkPolicyName, metav1.GetOptions{})
-	for name, err := range map[string]error{
-		"configmap": cmErr,
-		"secret":    secretErr,
-		"claim":     pvcErr,
-		"policy":    policyErr,
-	} {
+	_ = ctx
+	checks := []struct {
+		name      string
+		resource  string
+		object    string
+		groupName string
+	}{
+		{"configmap", "configmaps", spec.ConfigMapName, ""},
+		{"secret", "secrets", spec.SecretName, ""},
+		{"claim", "persistentvolumeclaims", spec.PVCName, ""},
+		{"policy", "networkpolicies", spec.NetworkPolicyName, "networking.k8s.io"},
+	}
+	for _, check := range checks {
+		gvr := schema.GroupVersionResource{Version: "v1", Resource: check.resource}
+		if check.groupName != "" {
+			gvr = schema.GroupVersionResource{Group: check.groupName, Version: "v1", Resource: check.resource}
+		}
+		_, err := cs.Tracker().Get(gvr, spec.Namespace, check.object)
 		if want && err != nil {
-			t.Fatalf("%s was removed from a live session: %v", name, err)
+			t.Fatalf("%s was removed from a live session: %v", check.name, err)
 		}
 		if !want && !apierrors.IsNotFound(err) {
-			t.Fatalf("%s still exists: %v", name, err)
+			t.Fatalf("%s still exists: %v", check.name, err)
 		}
 	}
 }
@@ -883,7 +894,7 @@ func TestDeleteCleansPendingAdoptionSession(t *testing.T) {
 
 // TestPendingAdoptionWithoutRecordGetsFailedRecord covers a session adopted
 // from a previous lifetime that left no record. Without a record it cannot be
-// listed or deleted, so settlement creates one and stops the retry.
+// listed or deleted, so settlement creates one, and the retry continues.
 func TestPendingAdoptionWithoutRecordGetsFailedRecord(t *testing.T) {
 	ctx := context.Background()
 	records := NewMemoryRecords()
@@ -905,8 +916,8 @@ func TestPendingAdoptionWithoutRecordGetsFailedRecord(t *testing.T) {
 	if !strings.Contains(got.Error, "could not be adopted") {
 		t.Fatalf("error = %q", got.Error)
 	}
-	if m.pendingCount() != 0 {
-		t.Fatalf("pending = %d, want the session settled", m.pendingCount())
+	if m.pendingCount() != 1 {
+		t.Fatalf("pending = %d, want the retry to continue", m.pendingCount())
 	}
 	stored, err := records.List(ctx)
 	if err != nil {
@@ -920,6 +931,9 @@ func TestPendingAdoptionWithoutRecordGetsFailedRecord(t *testing.T) {
 	}
 	if _, ok := m.Get("u1"); ok {
 		t.Fatal("settled session survived delete")
+	}
+	if m.pendingCount() != 0 {
+		t.Fatalf("pending after delete = %d, want 0", m.pendingCount())
 	}
 }
 
@@ -990,5 +1004,156 @@ func TestSettleNeverCleansLiveSession(t *testing.T) {
 	}
 	if _, stored := m.historySession("live4"); stored {
 		t.Fatal("the stale record of a live session was kept")
+	}
+}
+
+// TestAdoptionWithoutRecordIsListedAndRetried drives a session the previous
+// lifetime left no record for through Start and two retries: it is listed as
+// failed at once, stays in the retry set through a second failure, and is
+// adopted when the API recovers without losing its objects or journal.
+func TestAdoptionWithoutRecordIsListedAndRetried(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	var failRead atomic.Bool
+	failRead.Store(true)
+	cs.PrependReactor("get", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if failRead.Load() {
+			return true, nil, errors.New("api unavailable")
+		}
+		return false, nil, nil
+	})
+	m := adoptTestManager(t, cs)
+	records := NewMemoryRecords()
+	m.SetRecords(records)
+	spec := createSessionObjects(t, ctx, m.kube, "n1", liveConfig("n1"))
+	if err := m.journal.Append(ctx, journal.Entry{SessionID: "n1", Turn: 2, Step: 0, Name: "user"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown(context.Background())
+
+	got, ok := m.Get("n1")
+	if !ok {
+		t.Fatal("a session with no record cannot be listed")
+	}
+	if got.Status != model.StatusFailed || !strings.Contains(got.Error, "after 1 attempt:") {
+		t.Fatalf("first settlement = %+v", got)
+	}
+	if !m.pendingAdoption("n1") {
+		t.Fatal("the first failure stopped the retry")
+	}
+	assertSessionObjects(t, ctx, cs, spec, true)
+	if last, err := m.journal.LastTurn(ctx, "n1"); err != nil || last != 2 {
+		t.Fatalf("journal after the first failure: last turn %d, %v; want 2", last, err)
+	}
+
+	m.retryAdopt()
+	if !m.pendingAdoption("n1") {
+		t.Fatal("the second failure stopped the retry")
+	}
+	assertSessionObjects(t, ctx, cs, spec, true)
+	if last, err := m.journal.LastTurn(ctx, "n1"); err != nil || last != 2 {
+		t.Fatalf("journal after the second failure: last turn %d, %v; want 2", last, err)
+	}
+
+	failRead.Store(false)
+	m.retryAdopt()
+
+	if _, ok := m.instance("n1"); !ok {
+		t.Fatal("the recovered session was not adopted")
+	}
+	if m.pendingAdoption("n1") {
+		t.Fatal("the adopted session stayed in the retry set")
+	}
+	got, ok = m.Get("n1")
+	if !ok || got.Status != model.StatusPending {
+		t.Fatalf("adopted session = %+v, want pending", got)
+	}
+	stored, err := records.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].Session.ID != "n1" || stored[0].Session.Status != model.StatusPending {
+		t.Fatalf("stored records = %+v, want the live session", stored)
+	}
+	assertSessionObjects(t, ctx, cs, spec, true)
+	if last, err := m.journal.LastTurn(ctx, "n1"); err != nil || last != 2 {
+		t.Fatalf("journal after adoption: last turn %d, %v; want 2", last, err)
+	}
+}
+
+// TestAdoptionWithoutRecordTransientErrorKeepsLeftovers checks one failed pass
+// is not enough to remove a session's pod, objects, or journal.
+func TestAdoptionWithoutRecordTransientErrorKeepsLeftovers(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	var failRead atomic.Bool
+	failRead.Store(true)
+	cs.PrependReactor("get", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if failRead.Load() {
+			return true, nil, errors.New("api unavailable")
+		}
+		return false, nil, nil
+	})
+	m := adoptTestManager(t, cs)
+	m.SetRecords(NewMemoryRecords())
+	spec := createSessionObjects(t, ctx, m.kube, "n2", liveConfig("n2"))
+	if err := m.journal.Append(ctx, journal.Entry{SessionID: "n2", Turn: 8, Step: 0, Name: "user"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown(context.Background())
+	assertSessionObjects(t, ctx, cs, spec, true)
+
+	failRead.Store(false)
+	m.retryAdopt()
+
+	if _, ok := m.instance("n2"); !ok {
+		t.Fatal("the session was not adopted after the transient error")
+	}
+	assertSessionObjects(t, ctx, cs, spec, true)
+	if last, err := m.journal.LastTurn(ctx, "n2"); err != nil || last != 8 {
+		t.Fatalf("journal after the transient error: last turn %d, %v; want 8", last, err)
+	}
+}
+
+// TestAdoptCapCleansSettlementWithoutRecord checks a no-record session that
+// reaches the cap is cleaned up once, not on the first failure.
+func TestAdoptCapCleansSettlementWithoutRecord(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	m := adoptTestManager(t, cs)
+	spec := createSessionObjects(t, ctx, m.kube, "n3", liveConfig("n3"))
+	if err := m.journal.Append(ctx, journal.Entry{SessionID: "n3", Turn: 9, Step: 0, Name: "user"}); err != nil {
+		t.Fatal(err)
+	}
+	m.adoptPending = map[string]adoptFailure{
+		"n3": {Attempts: maxAdoptAttempts, Reason: "read the session config"},
+	}
+
+	m.settleInterrupted()
+
+	got, ok := m.Get("n3")
+	if !ok || got.Status != model.StatusFailed {
+		t.Fatalf("capped session = %+v, want a listed failure", got)
+	}
+	if !strings.Contains(got.Error, "after 10 attempts:") {
+		t.Fatalf("error = %q", got.Error)
+	}
+	if m.pendingCount() != 0 {
+		t.Fatalf("pending = %d, want the cap to stop retries", m.pendingCount())
+	}
+	if _, err := cs.CoreV1().Pods("mayfly").Get(ctx, spec.PodName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("pod after the cap: %v, want gone", err)
+	}
+	assertSessionObjects(t, ctx, cs, spec, false)
+	if last, err := m.journal.LastTurn(ctx, "n3"); err != nil || last != 0 {
+		t.Fatalf("journal after the cap: last turn %d, %v; want deleted", last, err)
 	}
 }
