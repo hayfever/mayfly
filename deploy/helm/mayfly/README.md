@@ -121,3 +121,5 @@ For Bedrock on EKS, annotate `litellm.serviceAccount.annotations` with your IRSA
 | `litellm.image.tag` | `v1.110.0` | LiteLLM release tag. The chart rejects a rolling tag such as `main-stable` |
 
 The control plane runs one replica. Session history is in memory; accepted webhook work, the turn journal, and artifacts are durable with `bbolt` plus persistence, or with `redis` for the queue. See [docs/deployment.md](../../../docs/deployment.md).
+
+`values.schema.json` validates every value. `helm install` and `helm upgrade` reject a value that is not in the schema, an unknown value, and a value outside its allowed set. There is no replica count to set: the chart pins one replica, because the control plane keeps its state on one `ReadWriteOnce` volume.
