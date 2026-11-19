@@ -5,10 +5,11 @@ VERSION ?= $(patsubst v%,%,$(shell git describe --tags --dirty 2>/dev/null || ec
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 CLUSTER ?= mayfly
+LOADTEST_ARGS ?= -mode sessions -n 5 -duration 2m
 LDFLAGS := -s -w -X github.com/hayfever/mayfly/internal/version.Version=$(VERSION) -X github.com/hayfever/mayfly/internal/version.Commit=$(COMMIT) -X github.com/hayfever/mayfly/internal/version.Date=$(DATE)
 CMDS := mayflyd mayfly-agent mayfly mayfly-harness mayfly-plugin-shim llmstub mcpstub
 
-.PHONY: build test vet fmt image cluster-create cluster-up cluster-down deploy e2e e2e-up e2e-test e2e-down run-local clean FORCE
+.PHONY: build test vet fmt image cluster-create cluster-up cluster-down deploy e2e e2e-up e2e-test e2e-down run-local loadtest clean FORCE
 
 build: $(addprefix $(BIN)/,$(CMDS))
 
@@ -25,7 +26,7 @@ vet:
 	$(GO) vet ./...
 
 fmt:
-	gofmt -w cmd internal test e2e
+	gofmt -w cmd internal test e2e hack
 
 IMAGE_ARGS := --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE)
 
@@ -63,6 +64,10 @@ e2e-down:
 
 run-local:
 	./hack/run-local.sh
+
+# Load and soak harness; see docs/loadtest.md.
+loadtest:
+	$(GO) run ./hack/loadtest $(LOADTEST_ARGS)
 
 clean:
 	rm -rf $(BIN) .mayfly .e2e

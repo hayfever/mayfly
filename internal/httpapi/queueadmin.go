@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"sort"
 	"time"
@@ -58,6 +59,12 @@ func (s *Server) queueJob(w http.ResponseWriter, r *http.Request) {
 	}
 	record, ok, err := s.queue.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
+		var unreadable *queue.UnreadableError
+		if errors.As(err, &unreadable) {
+			s.logger.Warn("queue job payload is unreadable", "job", unreadable.ID, "error", err)
+			writeErrorDetails(w, http.StatusConflict, codeConflict, unreadable.Error(), map[string]any{"job_id": unreadable.ID})
+			return
+		}
 		s.logger.Warn("queue job lookup", "error", err)
 		writeError(w, http.StatusServiceUnavailable, codeUnavailable, "queue is unavailable")
 		return

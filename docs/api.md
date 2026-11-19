@@ -208,7 +208,7 @@ The stored job is the versioned job envelope described in
 {"job":{"id":"d-...","trigger":"github","state":"done","attempts":0,"accepted_at":"...","finished_at":"...","session_id":"abc123","prompt":"..."}}
 ```
 
-`state` is `queued`, `leased`, `dead`, or `done`. A job that created a session reports `session_id`; the session reports the same id in `trigger.job_id`. Unknown or expired ids return `404 not_found`.
+`state` is `queued`, `leased`, `dead`, or `done`. A job that created a session reports `session_id`; the session reports the same id in `trigger.job_id`. Unknown or expired ids return `404 not_found`. A stored payload that this build cannot decode returns `409 conflict`, with the decoder reason in `message`; the job stays in place.
 
 ### `GET /api/v1/queue/dead?limit=50&cursor=...`
 
