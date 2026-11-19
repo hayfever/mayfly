@@ -120,22 +120,43 @@ func request(method, path string, body []byte) (*http.Response, error) {
 	return http.DefaultClient.Do(req)
 }
 
+// responseError reads the API error envelope. It still accepts a plain string
+// or text body so an older control plane gives a readable message.
+func responseError(resp *http.Response) error {
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var env struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(raw, &env) == nil && len(env.Error) > 0 {
+		var body struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(env.Error, &body) == nil && body.Message != "" {
+			if body.Code != "" {
+				return fmt.Errorf("%s: %s", body.Code, body.Message)
+			}
+			return fmt.Errorf("%s", body.Message)
+		}
+		var text string
+		if json.Unmarshal(env.Error, &text) == nil && text != "" {
+			return fmt.Errorf("%s", text)
+		}
+	}
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		text = resp.Status
+	}
+	return fmt.Errorf("%s", text)
+}
+
 func decodeResponse(resp *http.Response, dst any) error {
+	if resp.StatusCode >= 300 {
+		return responseError(resp)
+	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-	if resp.StatusCode >= 300 {
-		var e struct {
-			Error string `json:"error"`
-		}
-		_ = json.Unmarshal(raw, &e)
-		if e.Error == "" {
-			e.Error = strings.TrimSpace(string(raw))
-		}
-		if e.Error == "" {
-			e.Error = resp.Status
-		}
-		return fmt.Errorf("%s", e.Error)
-	}
 	if dst == nil {
 		return nil
 	}
@@ -275,26 +296,48 @@ func cmdList(args []string) error {
 	if _, err := parseArgs(fs, args); err != nil {
 		return err
 	}
-	resp, err := request(http.MethodGet, "/api/v1/sessions", nil)
+	sessions, err := allSessions()
 	if err != nil {
 		return err
 	}
-	var out struct {
-		Sessions []model.Session `json:"sessions"`
-	}
-	if err := decodeResponse(resp, &out); err != nil {
-		return err
-	}
 	if *asJSON {
-		raw, _ := json.MarshalIndent(out.Sessions, "", "  ")
+		raw, _ := json.MarshalIndent(sessions, "", "  ")
 		fmt.Println(string(raw))
 		return nil
 	}
 	fmt.Printf("%-12s  %-10s  %-20s  %s\n", "ID", "STATUS", "CREATED", "TITLE")
-	for _, s := range out.Sessions {
+	for _, s := range sessions {
 		fmt.Printf("%-12s  %-10s  %-20s  %s\n", s.ID, s.Status, s.CreatedAt.Local().Format("2006-01-02 15:04:05"), truncate(s.Title, 48))
 	}
 	return nil
+}
+
+// allSessions reads every page of the session list.
+func allSessions() ([]model.Session, error) {
+	var out []model.Session
+	cursor := ""
+	for {
+		path := "/api/v1/sessions"
+		if cursor != "" {
+			path += "?cursor=" + url.QueryEscape(cursor)
+		}
+		resp, err := request(http.MethodGet, path, nil)
+		if err != nil {
+			return nil, err
+		}
+		var page struct {
+			Items      []model.Session `json:"items"`
+			NextCursor string          `json:"next_cursor"`
+		}
+		if err := decodeResponse(resp, &page); err != nil {
+			return nil, err
+		}
+		out = append(out, page.Items...)
+		if page.NextCursor == "" {
+			return out, nil
+		}
+		cursor = page.NextCursor
+	}
 }
 
 func cmdGet(args []string) error {
@@ -428,9 +471,7 @@ func openArtifact(id string) (io.ReadCloser, error) {
 		return nil, err
 	}
 	if resp.StatusCode >= 300 {
-		defer resp.Body.Close()
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("%s", strings.TrimSpace(string(raw)))
+		return nil, responseError(resp)
 	}
 	return resp.Body, nil
 }

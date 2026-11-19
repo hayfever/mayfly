@@ -3,14 +3,17 @@
 package httpapi
 
 import (
+	"bufio"
 	"crypto/rand"
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -168,6 +171,39 @@ func WithReadyCheck(check func() error) Option {
 	}
 }
 
+// apiRoute is one registered admin API route. The table drives routing and the
+// spec drift test, so a route cannot exist without a matching OpenAPI
+// operation.
+type apiRoute struct {
+	pattern string
+	handler http.HandlerFunc
+}
+
+// apiRoutes returns the /api/v1 surface. Every entry must appear in
+// api/openapi.yaml; internal_test.go fails when the two disagree.
+func (s *Server) apiRoutes() []apiRoute {
+	return []apiRoute{
+		{"POST /api/v1/sessions", s.admin(s.createSession)},
+		{"GET /api/v1/sessions", s.admin(s.listSessions)},
+		{"GET /api/v1/sessions/{id}", s.admin(s.getSession)},
+		{"DELETE /api/v1/sessions/{id}", s.admin(s.deleteSession)},
+		{"GET /api/v1/sessions/{id}/events", s.admin(s.sessionEvents)},
+		{"POST /api/v1/sessions/{id}/messages", s.admin(s.postMessage)},
+		{"POST /api/v1/sessions/{id}/close", s.admin(s.closeSession)},
+		{"POST /api/v1/sessions/{id}/attach-ticket", s.admin(s.createTicket)},
+		{"GET /api/v1/sessions/{id}/artifact", s.admin(s.downloadArtifact)},
+		{"GET /api/v1/sessions/{id}/ws", s.attachWebSocket},
+		{"GET /api/v1/config", s.admin(s.publicConfig)},
+		{"GET /api/v1/schedules", s.admin(s.listSchedules)},
+		{"POST /api/v1/schedules/{name}/run", s.admin(s.runSchedule)},
+		{"GET /api/v1/queue", s.admin(s.queueStats)},
+		{"GET /api/v1/queue/jobs/{id}", s.admin(s.queueJob)},
+		{"GET /api/v1/queue/dead", s.admin(s.queueDead)},
+		{"POST /api/v1/queue/dead/{id}/retry", s.admin(s.queueRetryDead)},
+		{"DELETE /api/v1/queue/dead/{id}", s.admin(s.queueDeleteDead)},
+	}
+}
+
 // Handler returns the fully wired HTTP handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -183,24 +219,9 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("POST /hooks/{name}", s.receiveWebhook)
 
-	mux.HandleFunc("POST /api/v1/sessions", s.admin(s.createSession))
-	mux.HandleFunc("GET /api/v1/sessions", s.admin(s.listSessions))
-	mux.HandleFunc("GET /api/v1/sessions/{id}", s.admin(s.getSession))
-	mux.HandleFunc("DELETE /api/v1/sessions/{id}", s.admin(s.deleteSession))
-	mux.HandleFunc("GET /api/v1/sessions/{id}/events", s.admin(s.sessionEvents))
-	mux.HandleFunc("POST /api/v1/sessions/{id}/messages", s.admin(s.postMessage))
-	mux.HandleFunc("POST /api/v1/sessions/{id}/close", s.admin(s.closeSession))
-	mux.HandleFunc("POST /api/v1/sessions/{id}/attach-ticket", s.admin(s.createTicket))
-	mux.HandleFunc("GET /api/v1/sessions/{id}/artifact", s.admin(s.downloadArtifact))
-	mux.HandleFunc("GET /api/v1/config", s.admin(s.publicConfig))
-	mux.HandleFunc("GET /api/v1/schedules", s.admin(s.listSchedules))
-	mux.HandleFunc("POST /api/v1/schedules/{name}/run", s.admin(s.runSchedule))
-	mux.HandleFunc("GET /api/v1/queue", s.admin(s.queueStats))
-	mux.HandleFunc("GET /api/v1/queue/jobs/{id}", s.admin(s.queueJob))
-	mux.HandleFunc("GET /api/v1/queue/dead", s.admin(s.queueDead))
-	mux.HandleFunc("POST /api/v1/queue/dead/{id}/retry", s.admin(s.queueRetryDead))
-	mux.HandleFunc("DELETE /api/v1/queue/dead/{id}", s.admin(s.queueDeleteDead))
-	mux.HandleFunc("GET /api/v1/sessions/{id}/ws", s.attachWebSocket)
+	for _, route := range s.apiRoutes() {
+		mux.HandleFunc(route.pattern, route.handler)
+	}
 
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/events", s.internalEvents)
 	mux.HandleFunc("GET /internal/v1/sessions/{id}/journal", s.internalJournal)
@@ -215,7 +236,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/v1/llm/chat/completions", s.internalLLM)
 	mux.HandleFunc("/internal/v1/mcp/{server}", s.internalMCP)
 
-	return s.commonHeaders(s.recoverPanics(s.logRequests(mux)))
+	return s.commonHeaders(s.recoverPanics(s.logRequests(shapeAPIErrors(mux))))
 }
 
 // ready reports whether this replica has finished starting. It checks local
@@ -254,11 +275,74 @@ func (s *Server) recoverPanics(next http.Handler) http.Handler {
 		defer func() {
 			if rec := recover(); rec != nil {
 				s.logger.Error("panic serving request", "path", r.URL.Path, "panic", rec)
-				http.Error(w, "internal server error", http.StatusInternalServerError)
+				writeError(w, http.StatusInternalServerError, codeInternal, "internal server error")
 			}
 		}()
 		next.ServeHTTP(w, r)
 	})
+}
+
+// shapeAPIErrors replaces the plain-text bodies that the mux writes for an
+// unknown path or method with the API error envelope. Handlers that write
+// their own JSON are untouched, and a 405 keeps its Allow header.
+func shapeAPIErrors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") && !strings.HasPrefix(r.URL.Path, "/hooks/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(&errorShapedWriter{ResponseWriter: w}, r)
+	})
+}
+
+type errorShapedWriter struct {
+	http.ResponseWriter
+	shaped bool
+}
+
+func (w *errorShapedWriter) WriteHeader(status int) {
+	if w.shaped {
+		return
+	}
+	shaped := status == http.StatusNotFound || status == http.StatusMethodNotAllowed
+	if shaped && strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
+		shaped = false
+	}
+	if !shaped {
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
+	w.shaped = true
+	delete(w.Header(), "Content-Type")
+	delete(w.Header(), "Content-Length")
+	code, message := codeNotFound, "no such endpoint"
+	if status == http.StatusMethodNotAllowed {
+		code, message = codeMethodNotAllowed, "method not allowed"
+	}
+	writeError(w.ResponseWriter, status, code, message)
+}
+
+func (w *errorShapedWriter) Write(p []byte) (int, error) {
+	if w.shaped {
+		return len(p), nil
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+// Hijack keeps the WebSocket upgrade working through the wrapper.
+func (w *errorShapedWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("response writer cannot be hijacked")
+	}
+	return hijacker.Hijack()
+}
+
+// Flush keeps streamed responses working through the wrapper.
+func (w *errorShapedWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func (s *Server) logRequests(next http.Handler) http.Handler {
@@ -273,12 +357,12 @@ func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		expected := s.cfg.AdminToken
 		if expected == "" {
-			writeError(w, http.StatusUnauthorized, "admin token is not configured")
+			writeError(w, http.StatusUnauthorized, codeUnauthorized, "admin token is not configured")
 			return
 		}
 		got := bearerToken(r)
 		if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
+			writeError(w, http.StatusUnauthorized, codeUnauthorized, "unauthorized")
 			return
 		}
 		next(w, r)
@@ -330,10 +414,6 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
-}
-
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, max int64, dst any) error {

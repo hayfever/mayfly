@@ -13,7 +13,7 @@ func (s *Server) attachWebSocket(w http.ResponseWriter, r *http.Request) {
 	ticket := r.URL.Query().Get("ticket")
 	actor, ok := s.tickets.consume(ticket, id)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "invalid or expired attach ticket")
+		writeError(w, http.StatusUnauthorized, codeUnauthorized, "invalid or expired attach ticket")
 		return
 	}
 	if actor == "" {
@@ -21,7 +21,7 @@ func (s *Server) attachWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, ok := s.mgr.Get(id)
 	if !ok {
-		writeError(w, http.StatusNotFound, "session not found")
+		writeError(w, http.StatusNotFound, codeNotFound, "session not found")
 		return
 	}
 	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)

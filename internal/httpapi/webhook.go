@@ -18,24 +18,24 @@ func (s *Server) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	cfg, ok := s.triggers[name]
 	if !ok {
-		writeError(w, http.StatusNotFound, "unknown trigger")
+		writeError(w, http.StatusNotFound, codeNotFound, "unknown trigger")
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "webhook body is too large")
+		writeError(w, http.StatusRequestEntityTooLarge, codePayloadTooLarge, "webhook body is too large")
 		return
 	}
 	result, err := triggers.Parse(cfg, r.Header, body)
 	if err != nil {
 		switch {
 		case errors.Is(err, triggers.ErrUnauthorized):
-			writeError(w, http.StatusUnauthorized, "webhook verification failed")
+			writeError(w, http.StatusUnauthorized, codeUnauthorized, "webhook verification failed")
 		case errors.Is(err, triggers.ErrBadRequest):
-			writeError(w, http.StatusBadRequest, err.Error())
+			writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
 		default:
-			s.logger.Warn("webhook parse failed", "trigger", name, "error", err)
-			writeError(w, http.StatusBadRequest, err.Error())
+			s.logger.Error("webhook parse failed", "trigger", name, "error", err)
+			writeError(w, http.StatusInternalServerError, codeInternal, "webhook cannot be parsed")
 		}
 		return
 	}
@@ -49,17 +49,17 @@ func (s *Server) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 		seconds := int(limiter.RetryAfter() / time.Second)
 		w.Header().Set("Retry-After", strconv.Itoa(seconds))
 		s.logger.Warn("webhook rate limited", "trigger", name, "retry_after_seconds", seconds)
-		writeError(w, http.StatusTooManyRequests, "trigger rate limit reached")
+		writeError(w, http.StatusTooManyRequests, codeRateLimited, "trigger rate limit reached")
 		return
 	}
 	if s.queue == nil {
-		writeError(w, http.StatusServiceUnavailable, "queue is not configured")
+		writeError(w, http.StatusServiceUnavailable, codeUnavailable, "queue is not configured")
 		return
 	}
 	// Reject requests the worker could never run while the sender is still
 	// listening. Create repeats these checks when the job runs.
 	if err := s.mgr.Validate(result.Options); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
 		return
 	}
 	job := queue.NewJob(cfg.Name, result.DeliveryKey, result.Options, time.Now())
@@ -70,11 +70,11 @@ func (s *Server) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, queue.ErrFull):
 		w.Header().Set("Retry-After", "60")
-		writeError(w, http.StatusTooManyRequests, "queue is full")
+		writeError(w, http.StatusTooManyRequests, codeRateLimited, "queue is full")
 		return
 	case err != nil:
 		s.logger.Error("accept webhook job", "trigger", name, "error", err)
-		writeError(w, http.StatusServiceUnavailable, "queue is unavailable")
+		writeError(w, http.StatusServiceUnavailable, codeUnavailable, "queue is unavailable")
 		return
 	}
 	s.logger.Info("webhook accepted", "trigger", name, "job", job.ID, "delivery", job.Delivery)

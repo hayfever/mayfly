@@ -2,8 +2,8 @@ package httpapi
 
 import (
 	"context"
-	"errors"
 	"net/http"
+	"sort"
 
 	"github.com/hayfever/mayfly/internal/workflow"
 )
@@ -27,30 +27,42 @@ func WithSchedules(service ScheduleService) Option {
 	}
 }
 
+// listSchedules returns the configured schedules in name order.
 func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request) {
+	query, err := parsePage(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
+	}
 	out := []ScheduleInfo{}
 	if s.schedules != nil && s.schedules.List != nil {
-		out = s.schedules.List
+		out = append(out, s.schedules.List...)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"schedules": out})
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	start := 0
+	if query.hasCursor {
+		start = sort.Search(len(out), func(i int) bool { return out[i].Name > query.cursor.ID })
+	}
+	items, next := pageOf(out, start, query.limit, scheduleKey)
+	writePage(w, items, next)
+}
+
+// scheduleKey orders schedules by name, so a cursor is the last name on the
+// page.
+func scheduleKey(info ScheduleInfo) cursorKey {
+	return cursorKey{ID: info.Name}
 }
 
 func (s *Server) runSchedule(w http.ResponseWriter, r *http.Request) {
 	if s.schedules == nil || s.schedules.Run == nil {
-		writeError(w, http.StatusServiceUnavailable, "schedules are not configured")
+		writeError(w, http.StatusServiceUnavailable, codeUnavailable, "schedules are not configured")
 		return
 	}
 	name := r.PathValue("name")
 	jobID, err := s.schedules.Run(r.Context(), name)
-	switch {
-	case errors.Is(err, workflow.ErrUnknownSchedule):
-		writeError(w, http.StatusNotFound, "schedule not found")
-	case errors.Is(err, workflow.ErrUnavailable):
-		writeError(w, http.StatusServiceUnavailable, err.Error())
-	case err != nil:
-		s.logger.Error("run schedule", "schedule", name, "error", err)
-		writeError(w, http.StatusInternalServerError, "schedule run failed")
-	default:
-		writeJSON(w, http.StatusAccepted, map[string]string{"job_id": jobID})
+	if err != nil {
+		s.writeScheduleError(w, name, err)
+		return
 	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"job_id": jobID})
 }
