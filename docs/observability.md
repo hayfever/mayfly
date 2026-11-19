@@ -36,6 +36,8 @@ The `route` label is the registered route template, such as `/api/v1/sessions/{i
 
 A tool call that the gateway answers from the call ledger is a replay, not a new call, and is not counted.
 
+`mayfly_sessions_finished_total` counts the sessions this process saw finish. A session that a restart settles as failed, because its runtime never came back, appears in `mayfly_sessions` with state `failed` but not in the finished counter, because this process never created it.
+
 ## Request logs
 
 Every request writes one line at info level with these fields:
