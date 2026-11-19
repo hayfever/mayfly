@@ -63,8 +63,10 @@ func (m *Manager) loadRecords(ctx context.Context) error {
 // continue it. Adoption owns an ID it saw but could not rebuild, and a pass
 // that failed did not see every session, so those records wait for the retry
 // rather than being reported as failed while their pod may still run. An ID
-// whose attempts reach maxAdoptAttempts is settled with the last reason, so a
-// session that can never be read does not stay in a retry loop forever.
+// whose attempts reach maxAdoptAttempts is settled with the last reason, and a
+// pending ID with no record is settled at once: nothing else could ever list
+// it, so a user could not delete it either. A settled session leaves the retry
+// set and its leftovers are removed.
 func (m *Manager) settleInterrupted() {
 	if m.adoptIncomplete.Load() {
 		return
@@ -73,6 +75,7 @@ func (m *Manager) settleInterrupted() {
 	type settle struct {
 		session model.Session
 		reason  string
+		cleanup bool
 	}
 	m.mu.Lock()
 	var stale []settle
@@ -80,23 +83,61 @@ func (m *Manager) settleInterrupted() {
 		if _, live := m.sessions[id]; live {
 			// Adoption rebuilt this session; the live instance owns it now.
 			delete(m.history, id)
+			delete(m.adoptPending, id)
 			continue
 		}
 		if terminalStatus(sess.Status) {
+			delete(m.adoptPending, id)
 			continue
 		}
-		if entry, ok := m.adoptPending[id]; ok && entry.Attempts < maxAdoptAttempts {
+		entry, pending := m.adoptPending[id]
+		if pending && entry.Attempts < maxAdoptAttempts {
 			continue
 		}
 		reason := "control plane restarted before the session finished"
-		if entry, ok := m.adoptPending[id]; ok {
+		if pending {
 			reason = fmt.Sprintf("session could not be adopted after %d attempts: %s", entry.Attempts, entry.Reason)
 		}
-		stale = append(stale, settle{session: sess, reason: reason})
+		stale = append(stale, settle{session: sess, reason: reason, cleanup: pending})
+	}
+	// A pending session the record store never held has no list entry and no
+	// delete target. Settle it now; the times below are the settlement time
+	// because the previous lifetime left no record.
+	for id, entry := range m.adoptPending {
+		if _, ok := m.history[id]; ok {
+			continue
+		}
+		if _, live := m.sessions[id]; live {
+			// Adoption owns it, so there is nothing to retry.
+			delete(m.adoptPending, id)
+			continue
+		}
+		stale = append(stale, settle{
+			session: model.Session{
+				ID:           id,
+				Title:        "Session " + id,
+				Status:       model.StatusFailed,
+				Backend:      m.cfg.Runtime.Backend,
+				CreatedAt:    now,
+				ExpiresAt:    now,
+				LastActivity: now,
+			},
+			reason:  fmt.Sprintf("session could not be adopted after %d attempts: %s", entry.Attempts, entry.Reason),
+			cleanup: true,
+		})
 	}
 	m.mu.Unlock()
 	for _, item := range stale {
 		sess := item.session
+		if _, live := m.instance(sess.ID); live {
+			// Adoption rebuilt it after the snapshot. Never touch a live
+			// session's objects or journal.
+			m.mu.Lock()
+			delete(m.history, sess.ID)
+			delete(m.adoptPending, sess.ID)
+			m.mu.Unlock()
+			continue
+		}
 		sess.Status = model.StatusFailed
 		sess.Error = item.reason
 		if sess.ClosedAt == nil {
@@ -107,6 +148,9 @@ func (m *Manager) settleInterrupted() {
 		m.history[sess.ID] = sess
 		delete(m.adoptPending, sess.ID)
 		m.mu.Unlock()
+		if item.cleanup {
+			m.cleanupLeftovers(sess.ID)
+		}
 	}
 }
 

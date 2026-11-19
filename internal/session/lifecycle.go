@@ -1152,10 +1152,11 @@ func (m *Manager) retryAdopt() {
 		// Read them; this pass never deletes anything.
 		orphans, err := m.kube.OrphanSessions(m.ctx, m.liveSessionIDs())
 		if err != nil {
+			// The pass could not examine every pending session, so a record is
+			// left as it is until a later pass does.
 			m.logger.Warn("adopt pending sessions: list saved objects", "error", err)
 			m.mergeAdoptFailures(failed, fmt.Sprintf("list sessions without a pod: %v", err))
 			m.restartAdopted(replacements)
-			m.settleInterrupted()
 			return
 		}
 		for id := range missing {

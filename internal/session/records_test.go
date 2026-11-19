@@ -880,3 +880,115 @@ func TestDeleteCleansPendingAdoptionSession(t *testing.T) {
 		t.Fatalf("journal after delete: last turn %d, %v; want deleted", last, err)
 	}
 }
+
+// TestPendingAdoptionWithoutRecordGetsFailedRecord covers a session adopted
+// from a previous lifetime that left no record. Without a record it cannot be
+// listed or deleted, so settlement creates one and stops the retry.
+func TestPendingAdoptionWithoutRecordGetsFailedRecord(t *testing.T) {
+	ctx := context.Background()
+	records := NewMemoryRecords()
+	m := testManager(t)
+	m.SetRecords(records)
+	m.adoptPending = map[string]adoptFailure{
+		"u1": {Attempts: 1, Reason: "read the session config"},
+	}
+
+	m.settleInterrupted()
+
+	got, ok := m.Get("u1")
+	if !ok {
+		t.Fatal("a session with no record is still not listed")
+	}
+	if got.Status != model.StatusFailed || got.ClosedAt == nil {
+		t.Fatalf("settled session = %+v, want failed", got)
+	}
+	if !strings.Contains(got.Error, "could not be adopted") {
+		t.Fatalf("error = %q", got.Error)
+	}
+	if m.pendingCount() != 0 {
+		t.Fatalf("pending = %d, want the session settled", m.pendingCount())
+	}
+	stored, err := records.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].Session.ID != "u1" || stored[0].Session.Status != model.StatusFailed {
+		t.Fatalf("stored records = %+v", stored)
+	}
+	if err := m.Delete("u1"); err != nil {
+		t.Fatalf("delete a settled session: %v", err)
+	}
+	if _, ok := m.Get("u1"); ok {
+		t.Fatal("settled session survived delete")
+	}
+}
+
+// TestAdoptCapCleansSettledSession checks a session that fails adoption to the
+// cap is cleaned up, not left running with no control plane behind it.
+func TestAdoptCapCleansSettledSession(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	m := adoptTestManager(t, cs)
+	spec := createSessionObjects(t, ctx, m.kube, "cap1", liveConfig("cap1"))
+	if err := m.journal.Append(ctx, journal.Entry{SessionID: "cap1", Turn: 6, Step: 0, Name: "user"}); err != nil {
+		t.Fatal(err)
+	}
+	created := time.Now().UTC().Add(-time.Minute)
+	m.history["cap1"] = model.Session{ID: "cap1", Status: model.StatusRunning, CreatedAt: created}
+	m.adoptPending = map[string]adoptFailure{
+		"cap1": {Attempts: maxAdoptAttempts, Reason: "read the session config"},
+	}
+
+	m.settleInterrupted()
+
+	got, ok := m.Get("cap1")
+	if !ok || got.Status != model.StatusFailed {
+		t.Fatalf("settled session = %+v, want failed", got)
+	}
+	if m.pendingCount() != 0 {
+		t.Fatalf("pending = %d, want the session settled", m.pendingCount())
+	}
+	if _, err := cs.CoreV1().Pods("mayfly").Get(ctx, spec.PodName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("pod after settlement: %v, want gone", err)
+	}
+	assertSessionObjects(t, ctx, cs, spec, false)
+	if last, err := m.journal.LastTurn(ctx, "cap1"); err != nil || last != 0 {
+		t.Fatalf("journal after settlement: last turn %d, %v; want deleted", last, err)
+	}
+}
+
+// TestSettleNeverCleansLiveSession keeps settlement from removing the pod,
+// objects, or journal of a session this control plane runs, even when a stale
+// record and a pending entry name it.
+func TestSettleNeverCleansLiveSession(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	m := adoptTestManager(t, cs)
+	spec := createSessionObjects(t, ctx, m.kube, "live4", liveConfig("live4"))
+	if err := m.journal.Append(ctx, journal.Entry{SessionID: "live4", Turn: 7, Step: 0, Name: "user"}); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.sessions["live4"] = &instance{sess: model.Session{ID: "live4", Status: model.StatusRunning}, tokenHash: hashToken("t")}
+	m.history["live4"] = model.Session{ID: "live4", Status: model.StatusRunning, CreatedAt: time.Now().UTC()}
+	m.adoptPending = map[string]adoptFailure{
+		"live4": {Attempts: maxAdoptAttempts, Reason: "read the session config"},
+	}
+	m.mu.Unlock()
+
+	m.settleInterrupted()
+
+	if _, ok := m.instance("live4"); !ok {
+		t.Fatal("the live session was removed")
+	}
+	assertSessionObjects(t, ctx, cs, spec, true)
+	if last, err := m.journal.LastTurn(ctx, "live4"); err != nil || last != 7 {
+		t.Fatalf("journal after settlement: last turn %d, %v; want 7", last, err)
+	}
+	if m.pendingCount() != 0 {
+		t.Fatalf("pending = %d, want the live session removed from retries", m.pendingCount())
+	}
+	if _, stored := m.historySession("live4"); stored {
+		t.Fatal("the stale record of a live session was kept")
+	}
+}
