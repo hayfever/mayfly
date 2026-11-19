@@ -43,7 +43,7 @@ func TestForwardBroken(t *testing.T) {
 	}{
 		{"refused", refused, true},
 		{"reset", fmt.Errorf("GET /readyz: %w", syscall.ECONNRESET), true},
-		{"eof", io.ErrUnexpectedEOF, false},
+		{"unexpected eof", io.ErrUnexpectedEOF, false},
 		{"eof", io.EOF, true},
 		{"closed", net.ErrClosed, true},
 		{"timeout", &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}, false},
