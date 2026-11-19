@@ -14,6 +14,7 @@ Complete example: [examples/config.local.yaml](../examples/config.local.yaml). K
 | `token_env` | `MAYFLY_API_TOKEN` | Environment variable holding the admin token. If empty, a random token is generated and logged at startup |
 | `attach_ticket_ttl` | `60s` | Lifetime of one-time WebSocket attach tickets |
 | `max_body_bytes` | `4194304` | Maximum JSON body for session creation |
+| `shutdown_budget` | `25s` | Whole stop sequence after SIGTERM: HTTP drain, queue worker drain, then session manager shutdown. The stages get 20, 40, and 40 percent of the budget in that order, each on its own deadline. Keep the budget below the pod's `terminationGracePeriodSeconds`; the chart sets both. Minimum `3s` |
 
 ## sessions
 
@@ -28,7 +29,7 @@ Complete example: [examples/config.local.yaml](../examples/config.local.yaml). K
 | `max_steps` | `24` | Maximum model/tool iterations per user message |
 | `max_history_messages` | `120` | Messages sent to the model; oldest are trimmed at a user boundary |
 | `max_concurrent` | `50` | Maximum sessions that have not finalized. Webhook work waits in the queue; direct API calls get `429` and `Retry-After`. `0` removes the cap |
-| `retention` | `30m` | How long a finalized session stays in memory for status and events. Artifact metadata is kept separately. `0` keeps sessions forever |
+| `retention` | `30m` | How long a finalized session stays in the list for status and events, and how long its record stays in the record store. Artifact metadata is kept separately. `0` keeps sessions forever |
 | `connect_timeout` | `2m` | A session whose runtime has not reached the control plane in this time is failed. Measured from launch, including time the pod spends Pending. `0` disables |
 | `max_restarts` | `2` | Replacement containers for a non-terminal session whose pod fails or disappears. `0` disables replacement and falls back immediately; on SIGTERM the runtime then finalizes with its bundle instead of waiting for a replacement |
 | `persistent_workspace` | `true` | Mount one per-session PVC at the workspace and artifact paths. `false` uses EmptyDirs; the workspace and `conversation.jsonl` would not survive a container, so no replacement is started and the session fails instead. On SIGTERM the runtime then finalizes with its bundle instead of waiting for a replacement |
@@ -36,6 +37,8 @@ Complete example: [examples/config.local.yaml](../examples/config.local.yaml). K
 | `shell_timeout` | `120s` | Maximum command duration |
 | `workspace_dir` | `/workspace` | Container workspace path; overridden for the local backend |
 | `artifacts_dir` | `/var/lib/mayfly/artifacts` | Container bundle staging path. The Kubernetes backend uses `/artifacts` on the workspace claim; the local backend uses its state directory |
+| `records.backend` | `journal.backend` | `memory` or `bbolt`. Where session records and the artifact index are kept. `bbolt` keeps finished sessions in `GET /api/v1/sessions` and artifact downloads working across a restart. `memory` keeps them in the process |
+| `records.path` | `sessions.db` beside `journal.bbolt.path` | Record database file, for the `bbolt` backend only. Put it on the control-plane PersistentVolume |
 
 ## runtime
 
@@ -92,6 +95,7 @@ For multiple providers, point `base_url` at LiteLLM and use its model aliases. S
 | `s3.prefix` | — | Object key prefix |
 | `s3.path_style` | `false` | Use path-style URLs (MinIO and most local S3 servers) |
 | `max_bytes` | `256MiB` | Maximum accepted bundle size |
+| `index_retention` | `0` | How long the artifact index keeps a bundle's download metadata. `0` keeps it, because the bundle is the durable output of a session; set a duration to bound the index |
 
 S3-compatible means AWS Signature Version 4 with a configurable endpoint and path style. This covers MinIO, Cloudflare R2, Backblaze B2, and GCS interoperability mode. The native GCS API and Artifact Registry are not implemented; add an `artifact.Store` implementation for them.
 
@@ -168,6 +172,12 @@ journal:
 The journal also rejects a step number of `1 + max_steps × 129` or more within a turn: one user step, then one model step and up to 128 tool calls per round. These bounds keep a compromised or prompt-injected runtime from filling the state volume that the queue and the schedule watermark share.
 
 `bbolt` locks its file, so only one control-plane replica can use it. A session's entries are deleted when it finalizes: the artifact bundle is the durable history. The database also holds a per-session sequence reservation, which keeps a restarted control plane from reusing a turn key, and the tool ledger: one `pending` or `done` record per granted tool call, keyed by `<session>/<turn>/<step>`. The ledger is deleted with the session's journal.
+
+## Persisted formats
+
+Every store the control plane writes carries a format version. The journal, the schedule watermark, the queue, and the session record store each write `format_version: 1` into their own meta bucket or key. A stored source run carries `version: 1` in its JSON.
+
+On open, a store with no stamp is read as version 1: v0.1.0 wrote the version 1 layout without recording it, so its data loads unchanged. A store that reports a newer version stops the control plane with an error that names the store and both versions. Upgrade `mayflyd` instead of opening it. `1.x` adds a migration case per store when a layout changes.
 
 ## plugins
 

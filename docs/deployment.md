@@ -182,13 +182,21 @@ Webhooks are accepted into a queue before a pod exists. Choose the backend by wh
 
 The `memory` backend loses accepted work on restart. Use it only for development.
 
-The turn journal (`journal.bbolt.path`, default `/var/lib/mayfly/journal.db`) shares the control-plane volume, so it survives a restart with the same default persistence. Disabling `persistence` loses the journal on every control-plane restart. A runtime that is mid-turn still finishes its turn, but the thread history from before the restart is gone, and the session's new messages are numbered from the restart time in microseconds so none reuses the in-flight turn's key. The kustomize base (`deploy/k8s/base`) mounts the same state directory from the `mayfly-state` claim.
+The turn journal (`journal.bbolt.path`, default `/var/lib/mayfly/journal.db`) shares the control-plane volume, so it survives a restart with the same default persistence. Session records and the artifact index use `sessions.records.path` (default `/var/lib/mayfly/sessions.db`) on the same volume: after a restart, `GET /api/v1/sessions` still lists finished sessions and `GET /api/v1/sessions/{id}/artifact` still downloads their bundles. Disabling `persistence` loses the journal and the session records on every control-plane restart. A bundle that an older build uploaded has no index entry: the object store still holds it, but the API cannot serve it until a session uploads again. A runtime that is mid-turn still finishes its turn, but the thread history from before the restart is gone, and the session's new messages are numbered from the restart time in microseconds so none reuses the in-flight turn's key. The kustomize base (`deploy/k8s/base`) mounts the same state directory from the `mayfly-state` claim.
+
+## Shutdown
+
+A SIGTERM starts one stop sequence with a single budget, `server.shutdown_budget` (default `25s`). The budget splits into the HTTP listener drain, the queue worker drain, and the session manager shutdown, at 20, 40, and 40 percent in that order. Each stage gets its own deadline inside the budget, so a slow drain cannot leave the session manager with an expired context.
+
+The pod gets `terminationGracePeriodSeconds` before SIGKILL. The chart templates that value from `shutdown.gracePeriodSeconds` (default `30`) and writes `shutdown.budgetSeconds` (default `25`) into `server.shutdown_budget`. `helm template` fails when the budget is not smaller than the grace period. Keep a few seconds of margin: the process needs time to exit after its own budget ends.
+
+With your own manifest, set both values. A budget that reaches the grace period loses the last stage to SIGKILL.
 
 A job that exhausts `queue.max_attempts` is buried. List it with `GET /api/v1/queue/dead`, inspect it with `GET /api/v1/queue/jobs/{id}`, then retry (`POST /api/v1/queue/dead/{id}/retry`) or delete it. Buried jobs are kept until you act; size the queue volume or cache for that. Completed jobs keep a session link for `queue.tombstone_ttl`.
 
 ## Operating notes
 
-- Run one control-plane replica. Session records, thread history, the token index, and the artifact index are in memory. Pod adoption after a restart works from ConfigMap and Secret, and the last journaled turn is replayed into the new thread. Finalized sessions are removed from memory after `sessions.retention`; artifact metadata is kept until restart, so downloads keep working. Accepted webhook work and the in-flight turn's step journal survive with `bbolt` or `redis` (queue) and `journal.backend: bbolt`.
+- Run one control-plane replica. Finished session records and the artifact index survive a restart through `sessions.records`; thread history and the token index do not. Pod adoption after a restart works from ConfigMap and Secret, and the last journaled turn is replayed into the new thread. A session that adoption did not rebuild is recorded as failed, because no runtime can continue its turn. Finalized sessions leave the list after `sessions.retention`; artifact metadata stays until `artifacts.index_retention` passes. Accepted webhook work and the in-flight turn's step journal survive with `bbolt` or `redis` (queue) and `journal.backend: bbolt`.
 - Remote skill archives require outbound network access from the control plane at startup. If you prefer GitOps, sync the skill repository to a volume and use `skills.dirs` instead; the platform then needs no fetch capability.
 
 For multiple model providers, deploy LiteLLM and point `llm.base_url` at its Service. A starting manifest is in [examples/litellm/deployment.yaml](../examples/litellm/deployment.yaml); see [providers.md](providers.md) for keys, IRSA, and model aliases.
