@@ -42,3 +42,17 @@ jobs:
           helm template mayfly deploy/helm/mayfly -n mayfly \
             --set existingSecret=mayfly-secrets >/dev/null
 
+  api-diff:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.x"
+      - name: api diff
+        run: hack/api-diff.sh
+
