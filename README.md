@@ -27,6 +27,7 @@ Sessions are the unit of work. There is no always-on agent.
 - Artifact export on teardown: conversation, events, traces, generated workspace files, and a manifest. Local filesystem or S3-compatible storage.
 - Isolation defaults: non-root, read-only root filesystem, all capabilities dropped, no service account token, default-deny ingress, egress only to the control plane and DNS.
 - LLM and HTTP MCP credentials stay in the control plane. Sessions receive one scoped token.
+- Prometheus metrics on the main port or a separate address, and one structured request log line per request with a request ID. See [docs/observability.md](docs/observability.md).
 - Scheduled source runs: a declarative `http.json` source chain reads providers (Notion, Firecrawl, anything JSON), writes a run artifact, and starts one session on a material change.
 
 ## Architecture

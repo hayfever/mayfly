@@ -16,7 +16,7 @@ Every failed request to `/api/v1` or `/hooks/{name}` returns one envelope:
 {"error": {"code": "invalid_request", "message": "ttl must be a duration such as 30m"}}
 ```
 
-`code` is stable: match on it. `message` is for people: do not match on it. `details` holds optional, code-specific context.
+`code` is stable: match on it. `message` is for people: do not match on it. `details` holds optional, code-specific context, and it always carries `request_id`. The same value is in the `X-Request-ID` response header and in the request log line. See [observability.md](observability.md).
 
 | Code | Status | Meaning |
 |---|---|---|

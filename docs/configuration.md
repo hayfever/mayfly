@@ -15,6 +15,9 @@ Complete example: [examples/config.local.yaml](../examples/config.local.yaml). K
 | `attach_ticket_ttl` | `60s` | Lifetime of one-time WebSocket attach tickets |
 | `max_body_bytes` | `4194304` | Maximum JSON body for session creation |
 | `shutdown_budget` | `25s` | Whole stop sequence after SIGTERM: HTTP drain, queue worker drain, then session manager shutdown. The stages get 20, 40, and 40 percent of the budget in that order, each on its own deadline. Keep the budget below the pod's `terminationGracePeriodSeconds`; the chart sets both. Minimum `3s` |
+| `metrics.enabled` | `true` | Serve the Prometheus endpoint. See [observability.md](observability.md) for every metric |
+| `metrics.address` | empty | Serve `/metrics` on a listener of its own, such as `:9090`. Empty serves it on `addr`. Must differ from `addr` |
+| `metrics.require_auth` | `true` on `addr`, `false` on a separate address | Require the admin token for `/metrics` |
 
 ## sessions
 
