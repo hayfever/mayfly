@@ -177,6 +177,8 @@ The journal also rejects a step number of `1 + max_steps × 129` or more within 
 
 Every store the control plane writes carries a format version. The journal, the schedule watermark, the queue, and the session record store each write `format_version: 1` into their own meta bucket or key. A stored source run carries `version: 1` in its JSON.
 
+A queue job is also a versioned JSON envelope. The store format and the job envelope are versioned separately, and the envelope gains optional fields without a new version. See [queue-jobs.md](queue-jobs.md).
+
 On open, a store with no stamp is read as version 1: v0.1.0 wrote the version 1 layout without recording it, so its data loads unchanged. A store that reports a newer version stops the control plane with an error that names the store and both versions. Upgrade `mayflyd` instead of opening it. `1.x` adds a migration case per store when a layout changes.
 
 ## plugins

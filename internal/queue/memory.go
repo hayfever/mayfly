@@ -47,7 +47,7 @@ func (s *memoryStore) Accept(_ context.Context, job Job) error {
 			delete(s.seen, key)
 		}
 	}
-	if job.Delivery != "" {
+	if job.IdempotencyKey != "" {
 		if _, ok := s.seen[job.ID]; ok {
 			return ErrDuplicate
 		}
@@ -56,7 +56,7 @@ func (s *memoryStore) Accept(_ context.Context, job Job) error {
 		return ErrFull
 	}
 	s.jobs[job.ID] = &memEntry{job: job, readyAt: now}
-	if job.Delivery != "" {
+	if job.IdempotencyKey != "" {
 		s.seen[job.ID] = now.Add(s.cfg.DedupeTTL.Std())
 	}
 	return nil

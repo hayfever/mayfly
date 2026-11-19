@@ -197,6 +197,8 @@ Accepted work that has not run yet.
 ### `GET /api/v1/queue/jobs/{id}`
 
 One accepted job by id, including a completed job for `queue.tombstone_ttl`.
+The stored job is the versioned job envelope described in
+[queue-jobs.md](queue-jobs.md).
 
 ```json
 {"job":{"id":"d-...","trigger":"github","state":"done","attempts":0,"accepted_at":"...","finished_at":"...","session_id":"abc123","prompt":"..."}}

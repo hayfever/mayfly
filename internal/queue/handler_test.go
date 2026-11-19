@@ -123,3 +123,34 @@ func TestSourceJobDeliveryIsStable(t *testing.T) {
 		t.Fatalf("JobKind = %q", first.JobKind())
 	}
 }
+
+// TestSessionHandlerUsesJobIDForIdempotency covers a worker that creates the
+// session and stops before Ack: the retry must ask for the same session.
+func TestSessionHandlerUsesJobIDForIdempotency(t *testing.T) {
+	var got session.CreateOptions
+	handler := SessionHandler(func(_ context.Context, opts session.CreateOptions) (*model.Session, error) {
+		got = opts
+		return &model.Session{ID: "sess-1"}, nil
+	})
+	if _, err := handler(context.Background(), Job{ID: "job-1", Options: session.CreateOptions{Prompt: "hi"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got.IdempotencyKey != "job-1" {
+		t.Fatalf("session idempotency key = %q, want the job id", got.IdempotencyKey)
+	}
+
+	// An options key set by a producer wins.
+	handler = SessionHandler(func(_ context.Context, opts session.CreateOptions) (*model.Session, error) {
+		got = opts
+		return &model.Session{ID: "sess-2"}, nil
+	})
+	if _, err := handler(context.Background(), Job{ID: "job-2", Options: session.CreateOptions{
+		Prompt:         "hi",
+		IdempotencyKey: "explicit",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if got.IdempotencyKey != "explicit" {
+		t.Fatalf("session idempotency key = %q, want explicit", got.IdempotencyKey)
+	}
+}

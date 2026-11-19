@@ -6,17 +6,17 @@ package queue
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"time"
 
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/model"
 	"github.com/hayfever/mayfly/internal/session"
 )
 
 var (
-	// ErrDuplicate means a job with this delivery key was already accepted.
+	// ErrDuplicate means a job with this idempotency key was already accepted.
 	ErrDuplicate = errors.New("job already accepted")
 	// ErrFull means the queue holds max_jobs undelivered jobs.
 	ErrFull = errors.New("queue is full")
@@ -34,22 +34,24 @@ type Kind string
 
 const (
 	// KindSession creates a session from the request in Options.
-	KindSession Kind = "session"
+	KindSession Kind = "session.create"
 	// KindSource runs a scheduled data source and creates a session only when
 	// the run has changes the schedule triggers on.
-	KindSource Kind = "source"
+	KindSource Kind = "source.run"
 )
 
-// Job is one accepted unit of work.
+// Job is one accepted unit of work. Its JSON form is the versioned envelope in
+// api/job.v1.schema.json; see MarshalJSON and UnmarshalJSON in envelope.go.
 type Job struct {
-	ID         string                `json:"id"`
-	Kind       Kind                  `json:"kind,omitempty"`
-	Delivery   string                `json:"delivery,omitempty"`
-	Trigger    string                `json:"trigger"`
-	Options    session.CreateOptions `json:"options"`
-	Source     *SourceJob            `json:"source,omitempty"`
-	AcceptedAt time.Time             `json:"accepted_at"`
-	Attempts   int                   `json:"attempts"`
+	ID             string
+	Kind           Kind
+	IdempotencyKey string
+	Trigger        string
+	Options        session.CreateOptions
+	Source         *SourceJob
+	AcceptedAt     time.Time
+	Attempts       int
+	Metadata       map[string]string
 }
 
 // SourceJob identifies one scheduled run of one data source.
@@ -116,7 +118,7 @@ type Stats struct {
 
 // Store accepts jobs and hands them to workers.
 type Store interface {
-	// Accept stores a job once. A repeated Delivery returns ErrDuplicate.
+	// Accept stores a job once. A repeated idempotency key returns ErrDuplicate.
 	Accept(ctx context.Context, job Job) error
 	// Claim leases up to max due jobs.
 	Claim(ctx context.Context, max int) ([]Lease, error)
@@ -158,39 +160,43 @@ func New(ctx context.Context, cfg config.QueueConfig) (Store, error) {
 	}
 }
 
-// NewJob builds a job with a stable ID. A delivery key makes Accept
-// idempotent; without one every request is a new job.
+// NewJob builds a job with a stable ID. The delivery argument is the job's
+// idempotency key: the same key makes Accept idempotent, and without one every
+// request is a new job.
 func NewJob(trigger, delivery string, options session.CreateOptions, now time.Time) Job {
-	id := randomID()
-	if delivery != "" {
-		sum := sha256.Sum256([]byte(trigger + "\x00" + delivery))
-		id = "d-" + hex.EncodeToString(sum[:16])
-	}
+	id := deriveJobID(KindSession, trigger, delivery)
 	options.Trigger.Delivery = delivery
 	options.Trigger.JobID = id
+	options.IdempotencyKey = id
 	return Job{
-		ID:         id,
-		Kind:       KindSession,
-		Delivery:   delivery,
-		Trigger:    trigger,
-		Options:    options,
-		AcceptedAt: now.UTC(),
+		ID:             id,
+		Kind:           KindSession,
+		IdempotencyKey: delivery,
+		Trigger:        trigger,
+		Options:        options,
+		AcceptedAt:     now.UTC(),
 	}
 }
 
 // NewSourceJob builds a scheduled source run. The delivery key makes a slot
 // idempotent: the same slot accepted twice returns ErrDuplicate.
 func NewSourceJob(delivery string, src SourceJob, now time.Time) Job {
-	id := randomID()
-	if delivery != "" {
-		sum := sha256.Sum256([]byte("schedule\x00" + delivery))
-		id = "s-" + hex.EncodeToString(sum[:16])
-	}
+	id := deriveJobID(KindSource, "", delivery)
 	return Job{
-		ID:         id,
-		Kind:       KindSource,
-		Delivery:   delivery,
-		Trigger:    "schedule",
+		ID:             id,
+		Kind:           KindSource,
+		IdempotencyKey: delivery,
+		Trigger:        "schedule",
+		Options: session.CreateOptions{
+			Trigger: model.TriggerInfo{
+				Kind:     "schedule",
+				Name:     src.Schedule,
+				Event:    "schedule",
+				Delivery: delivery,
+				JobID:    id,
+			},
+			IdempotencyKey: id,
+		},
 		Source:     &src,
 		AcceptedAt: now.UTC(),
 	}
