@@ -5,8 +5,9 @@ envelope to a queue backend. A worker decodes the envelope before it runs the
 job. The envelope is the public queue contract. It is not an HTTP request body.
 
 `api/job.v1.schema.json` is the source of truth for version 1. `api/openapi.yaml`
-references it as `JobEnvelope`. `hack/api-diff.sh` fails when the schema file
-changes from the newest release tag, so version 1 stays frozen.
+references it as `JobEnvelope`. `hack/api-diff.sh` compares the schema with the
+newest release tag. It accepts a new optional property and fails on a removal,
+a rename, a type or constraint change, or a change to a required list.
 
 ## Envelope
 

@@ -27,10 +27,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Builds, scans, then signs each image. Keyless signing uses the workflow's
-  # GitHub OIDC identity, so a signature proves which workflow and tag built
-  # the image. The scan runs before the signature, so an image with a fixable
-  # HIGH or CRITICAL vulnerability is never signed.
+  # Builds, scans, tags, then signs each image. Keyless signing uses the
+  # workflow's GitHub OIDC identity, so a signature proves which workflow and
+  # tag built the image. The build pushes the manifest by digest without a
+  # tag. Trivy scans both architectures, and only a clean scan creates the
+  # version tags. A failed scan therefore leaves no tag and nothing signed;
+  # the untagged manifest is not a release artifact.
   images:
     runs-on: ubuntu-latest
     permissions:
@@ -53,10 +55,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - id: image-name
+        run: |
+          owner="$( echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]' )"
+          echo "value=ghcr.io/${owner}/${{ matrix.image }}" >> "$GITHUB_OUTPUT"
       - id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          images: ${{ steps.image-name.outputs.value }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -65,15 +71,17 @@ jobs:
         run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - id: version
         run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-      - id: push
+      - name: build by digest
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
           target: ${{ matrix.target }}
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          # Push the manifest and layers by digest without a tag. The tag
+          # step below runs only after a clean scan.
+          outputs: type=image,name=${{ steps.image-name.outputs.value }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ steps.version.outputs.value }}
@@ -85,21 +93,49 @@ jobs:
         with:
           version: v0.76.2
       - name: scan
+        id: scan
+        continue-on-error: true
         env:
-          DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE: ${{ steps.image-name.outputs.value }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          image="ghcr.io/$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')/${{ matrix.image }}@${DIGEST}"
-          trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
-            --ignore-unfixed --exit-code 1 "$image"
+          for platform in linux/amd64 linux/arm64; do
+            echo "scanning ${IMAGE}@${DIGEST} for ${platform}"
+            trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
+              --ignore-unfixed --exit-code 1 --platform "${platform}" \
+              "${IMAGE}@${DIGEST}"
+          done
+      - name: report scan findings
+        if: steps.scan.outcome == 'failure'
+        env:
+          IMAGE: ${{ steps.image-name.outputs.value }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          echo "::error::Trivy found a HIGH or CRITICAL vulnerability with a fix in ${IMAGE}@${DIGEST}."
+          echo "::error::No version tag was created and nothing was signed. The untagged manifest is not a release artifact."
+          exit 1
+      - name: tag
+        env:
+          IMAGE: ${{ steps.image-name.outputs.value }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          args=()
+          while IFS= read -r tag; do
+            if [ -n "$tag" ]; then
+              args+=(-t "$tag")
+            fi
+          done <<< "$TAGS"
+          docker buildx imagetools create "${args[@]}" "${IMAGE}@${DIGEST}"
       - uses: sigstore/cosign-installer@v4.1.3
         with:
           cosign-release: v3.1.4
       - name: sign
         env:
-          DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE: ${{ steps.image-name.outputs.value }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          image="ghcr.io/$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')/${{ matrix.image }}@${DIGEST}"
-          cosign sign --yes "$image"
+          cosign sign --yes "${IMAGE}@${DIGEST}"
 
   chart:
     runs-on: ubuntu-latest

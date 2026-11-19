@@ -4,6 +4,7 @@
 
 | Version | Supported |
 |---|---|
+| 0.2.x | Security fixes |
 | 0.1.x | Security fixes |
 
 ## Reporting a vulnerability
@@ -29,7 +30,11 @@ Out of scope: vulnerabilities in Kubernetes, the CNI, the container runtime, Lit
 
 ## Security model
 
-Mayfly is single-tenant. Anyone with the admin token can create sessions, read threads, and download artifacts. Deploy it behind TLS and an authenticating ingress.
+Mayfly is single-tenant. The `/api/v1` surface uses named bearer tokens under `server.tokens`, each with one or more scopes. A token with the `admin` scope can create sessions, read threads, and download artifacts. A scoped token can use only the routes for its scopes. Deploy Mayfly behind TLS and an authenticating ingress.
+
+When `server.tokens` is empty, `server.token_env` supplies one token named `default` with the `admin` scope. A non-empty `server.tokens` list replaces that token. The control plane refuses to start when no token is configured. Each route requires one scope: `sessions:read`, `sessions:write`, `queue:read`, `queue:write`, `schedules:read`, or `schedules:write`. The `admin` scope grants every scope. The control plane compares secrets in constant time and never logs them.
+
+Every authenticated, mutating `/api/v1` request writes one audit line with the token name, method, route, target, status, and request id. A mutating request that the token is not allowed to make is audited with status `403`. Read requests and requests with an unknown token are not audited.
 
 The control plane holds LLM, MCP, and object-store credentials. Sessions receive only a scoped session token. The token authorizes that session's inbox, events, artifact upload, finalize, LLM proxy, and assigned MCP servers.
 
@@ -37,4 +42,4 @@ Session pods run as non-root with a read-only root filesystem, no added capabili
 
 Remote skills, agent manifests, harness images, and MCP servers are trusted operator configuration. Review them before use. Mayfly does not install harness packages or run plugin code at session start.
 
-Known gaps are documented in [docs/security.md](docs/security.md) and the v0.1.0 changelog.
+Known gaps are documented in [docs/security.md](docs/security.md) and [CHANGELOG.md](CHANGELOG.md).

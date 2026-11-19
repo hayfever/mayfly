@@ -33,10 +33,15 @@ fi
 schema="api/job.v1.schema.json"
 if ! git cat-file -e "$base:$schema" 2>/dev/null; then
   echo "api-diff: $base has no $schema; skipping the job envelope comparison" >&2
-elif ! git show "$base:$schema" | cmp -s - "$schema"; then
-  echo "api-diff: $schema changed from $base" >&2
-  echo "api-diff: add a new schema version for a breaking envelope change" >&2
-  exit 1
+else
+  old_schema="$(mktemp)"
+  trap 'rm -f "$old_schema"' EXIT
+  git show "$base:$schema" > "$old_schema"
+  echo "api-diff: comparing $schema at $base with the working tree"
+  if ! go run ./hack/job-schema-diff "$old_schema" "$schema"; then
+    echo "api-diff: add a new schema version for a breaking envelope change" >&2
+    exit 1
+  fi
 fi
 if ! git cat-file -e "$base:$spec" 2>/dev/null; then
   # Before the first tag carries a spec there is no baseline to fail on, but
