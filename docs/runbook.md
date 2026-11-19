@@ -79,14 +79,20 @@ EOF
 kubectl -n mayfly wait --for=condition=Ready pod/state-copy --timeout=120s
 ```
 
-3. Copy the whole directory to your workstation. The archive holds `queue.db`, `sessions.db`, `journal.db`, `schedule.db`, and `artifacts/`:
+3. Copy the whole directory to your workstation. The archive holds `queue.db`, `sessions.db`, `journal.db`, `schedule.db`, and, when the artifact store is `local`, `artifacts/`:
 
 ```bash
 kubectl -n mayfly exec state-copy -- tar -C /state -czf - . \
   > mayfly-state-$(date -u +%Y%m%dT%H%M%SZ).tgz
 ```
 
-4. Remove the pod and start the control plane:
+4. Check that the archive is readable and not empty:
+
+```bash
+tar -tzf mayfly-state-*.tgz >/dev/null
+```
+
+5. Remove the pod and start the control plane:
 
 ```bash
 kubectl -n mayfly delete pod state-copy
@@ -94,7 +100,9 @@ kubectl -n mayfly scale deployment/mayfly --replicas=1
 kubectl -n mayfly rollout status deployment/mayfly --timeout=3m
 ```
 
-5. Store the archive off the cluster. The volume size is `persistence.size`.
+6. Store the archive off the cluster. The volume size is `persistence.size`.
+
+The archive does not include the per-session workspace claims (`mayfly-<id>-workspace`). A session that is running when you take the backup can resume only while its claim and pod still exist. Export the artifact of a session you need before you delete its claim. An S3 artifact store is outside this archive; back it up with the storage provider.
 
 Scheduled source runs and webhook jobs reference session ids. Restore the four databases from one backup, not from different backups.
 
@@ -112,7 +120,9 @@ kubectl -n mayfly exec state-copy -- ls -l /state
 3. Delete the copy pod, then scale the control plane to one replica.
 4. Check `/readyz` and `GET /api/v1/sessions`. A record that the build cannot read stops startup and names the file. Use a backup from the same release line, or restore only the databases that you need and leave the rest empty.
 
-A bbolt file from a newer build can fail the layout check of an older build. Restore the same build that wrote the archive.
+5. Check the sessions that were running at backup time. The archive does not include their workspace claims, and a full cluster loss also removes their pods. A restored session that cannot be adopted is listed as `failed` and keeps its record until you delete it or `sessions.retention` expires.
+
+A bbolt file from a newer build can fail the layout check of an older build. Restore the same build that wrote the archive. A control plane that reads a session record with a newer `format_version` refuses to start; do not downgrade after an upgrade writes the newer format.
 
 ## Rotate the admin token
 
