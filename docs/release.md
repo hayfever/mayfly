@@ -31,36 +31,42 @@ The release workflow builds each image, scans it, tags it, and signs it in that 
 
 1. Docker Buildx builds the multi-arch image and pushes the manifest and layers by digest, without a tag.
 2. `trivy image` scans that digest for `linux/amd64` and `linux/arm64` with `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`. A HIGH or CRITICAL vulnerability that has a fixed version fails the job. A finding without a fix is reported and does not block.
-3. Only a clean scan creates the version, `major.minor`, and `latest` tags with `docker buildx imagetools create`.
+3. Only a clean scan creates the image tags with `docker buildx imagetools create`: the version tag, and for a final release `major.minor` and `latest`.
 4. `cosign sign` signs the digest with the workflow's GitHub OIDC identity. No key and no stored secret is involved.
-5. The chart job waits for both images, pushes the chart to GHCR, and signs it with the same identity.
+5. The chart job waits for both images to be scanned, tagged, and signed, then pushes the chart to GHCR and signs it with the same identity.
 
 A failed scan fails the job before any tag exists, so the release has no image tag and no signature. The untagged manifest is not a release artifact, and the registry garbage collector removes it. A tag that does not verify is not a release artifact.
 
 ### Verify a published release
 
+The workflow signs the digest of each image and the chart. A tag can move; a digest cannot. Resolve the tag first with `crane` (from go-containerregistry), then verify the digest:
+
 ```bash
-owner=<owner>
-version=0.2.0
-identity="https://github.com/${owner}/mayfly/.github/workflows/release.yml@refs/tags/v${version}"
+owner=hayfever
+tag=vX.Y.Z
+version="${tag#v}"
+identity="https://github.com/${owner}/mayfly/.github/workflows/release.yml@refs/tags/${tag}"
 
+digest="$(crane digest ghcr.io/${owner}/mayflyd:${version})"
 cosign verify \
   --certificate-identity "$identity" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/${owner}/mayflyd:${version}
+  "ghcr.io/${owner}/mayflyd@${digest}"
 
+digest="$(crane digest ghcr.io/${owner}/mayfly-agent:${version})"
 cosign verify \
   --certificate-identity "$identity" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/${owner}/mayfly-agent:${version}
+  "ghcr.io/${owner}/mayfly-agent@${digest}"
 
+digest="$(crane digest ghcr.io/${owner}/charts/mayfly:${version})"
 cosign verify \
   --certificate-identity "$identity" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/${owner}/charts/mayfly:${version}
+  "ghcr.io/${owner}/charts/mayfly@${digest}"
 ```
 
-Each command must print the workflow identity and the tag. The OIDC issuer is the only trust anchor; there is no public key to fetch. The images also carry BuildKit SBOM and provenance attestations. Check the provenance with the same identity flags and `cosign verify-attestation --type slsaprovenance`.
+Each command must print the workflow identity and the tag. The OIDC issuer is the only trust anchor; there is no public key to fetch. Both images also carry BuildKit SBOM and provenance attestations. Verify them with the same identity flags and `cosign verify-attestation --type slsaprovenance`. The chart has no attestation; its signature covers the chart digest.
 
 ## Pre-release checklist
 
@@ -96,7 +102,7 @@ go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
 ## Tag
 
 ```bash
-git tag -a v0.1.0 -m "Mayfly v0.1.0"
+git tag -a vX.Y.Z -m "Mayfly vX.Y.Z"
 git push origin main --tags
 ```
 
@@ -112,20 +118,20 @@ The release workflow runs on `v*` tags:
 Tag a candidate to exercise the full release path before the final tag:
 
 ```bash
-git tag -a v0.1.0-rc.1 -m "Mayfly v0.1.0-rc.1"
-git push origin v0.1.0-rc.1
+git tag -a vX.Y.Z-rc.1 -m "Mayfly vX.Y.Z-rc.1"
+git push origin vX.Y.Z-rc.1
 ```
 
-The same workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`), images are tagged `0.1.0-rc.1` without `latest` or `0.1`, and the chart is pushed as `0.1.0-rc.1`. Install it with `--version 0.1.0-rc.1`. When the candidate passes, tag `v0.1.0` on the same commit.
+The same workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`). Images get the candidate version and no `latest` tag, and the chart is pushed as the same version. Install it with `--version X.Y.Z-rc.1`. When the candidate passes, tag `vX.Y.Z` on the same commit.
 
 ## Post-release verification
 
 Run the commands in [Verify a published release](#verify-a-published-release) first. All three must print the workflow identity and the tag.
 
 ```bash
-docker pull ghcr.io/<owner>/mayflyd:0.1.0
-docker pull ghcr.io/<owner>/mayfly-agent:0.1.0
-helm show chart oci://ghcr.io/<owner>/charts/mayfly --version 0.1.0
+docker pull ghcr.io/<owner>/mayflyd:<version>
+docker pull ghcr.io/<owner>/mayfly-agent:<version>
+helm show chart oci://ghcr.io/<owner>/charts/mayfly --version <version>
 ```
 
 Install from the published chart in a clean namespace, create a session, attach, close it, download the artifact, and verify the session pod is gone.
