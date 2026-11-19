@@ -566,3 +566,52 @@ func TestValidateRejectsTinyShutdownBudget(t *testing.T) {
 		t.Fatal("a one-second shutdown budget was accepted")
 	}
 }
+
+func TestMetricsDefaults(t *testing.T) {
+	cfg := Default()
+	if !cfg.Server.MetricsEnabled() || !cfg.Server.MetricsOnMainPort() || !cfg.Server.MetricsRequireAuth() {
+		t.Fatal("metrics must default to enabled, on the main port, with the admin token")
+	}
+	cfg.Server.Metrics.Address = ":9090"
+	if cfg.Server.MetricsOnMainPort() {
+		t.Fatal("a metrics address must move the endpoint off the main port")
+	}
+	if cfg.Server.MetricsRequireAuth() {
+		t.Fatal("a separate metrics address must not require the admin token by default")
+	}
+	cfg.Server.Metrics.RequireAuth = new(true)
+	if !cfg.Server.MetricsRequireAuth() {
+		t.Fatal("require_auth = true must apply on a separate address")
+	}
+	cfg.Server.Metrics.Enabled = new(false)
+	if cfg.Server.MetricsEnabled() {
+		t.Fatal("enabled = false must turn the endpoint off")
+	}
+}
+
+func TestLoadMetricsSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := []byte("runtime:\n  backend: local\n  agent_binary: /usr/local/bin/mayfly-agent\nllm:\n  base_url: http://127.0.0.1:1/v1\n  model: test-model\nserver:\n  metrics:\n    address: \":9090\"\n    require_auth: true\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.Metrics.Address != ":9090" || cfg.Server.MetricsOnMainPort() {
+		t.Fatalf("metrics address = %q", cfg.Server.Metrics.Address)
+	}
+	if !cfg.Server.MetricsRequireAuth() {
+		t.Fatal("require_auth was not read")
+	}
+}
+
+func TestValidateRejectsMetricsOnMainAddress(t *testing.T) {
+	cfg := Default()
+	cfg.Server.Metrics.Address = cfg.Server.Addr
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("the main address was accepted as the metrics address")
+	}
+}
