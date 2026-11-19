@@ -29,6 +29,9 @@ type Summary struct {
 	JobFailures     []string
 	CleanupFailures []string
 
+	LateSessionsCleaned int
+	LateSessionsLeft    int
+
 	Runtime []RuntimeSample
 }
 
@@ -201,6 +204,10 @@ func printSummary(w io.Writer, s *Summary) {
 			roundDuration(Percentile(s.Lifecycle, 0.50)),
 			roundDuration(Percentile(s.Lifecycle, 0.95)),
 			roundDuration(Percentile(s.Lifecycle, 0.99)))
+	}
+	if s.LateSessionsCleaned > 0 || s.LateSessionsLeft > 0 {
+		fmt.Fprintf(w, "  late sessions cleaned up: %d, left behind: %d\n",
+			s.LateSessionsCleaned, s.LateSessionsLeft)
 	}
 
 	printFailures(w, "wait failures", s.WaitFailures)

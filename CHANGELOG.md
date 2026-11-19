@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
+## [0.3.0] - Unreleased
+
+### Fixed
+
+- The load harness deletes a webhook job's session when the job creates it after the harness stops waiting for that job. The final report counts the sessions it cleans up and the ones it leaves behind.
+
 ## [0.2.0] - 2026-11-19
 
 Operators moving from 0.1.x or a release candidate should read

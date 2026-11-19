@@ -90,23 +90,26 @@ func runLoad(parent context.Context, cfg loadConfig, client *apiClient, lost <-c
 
 	result := runWorkers(ctx, cfg, client)
 	cancel()
+	lateCleaned, lateLeft := cleanLateJobs(client, result.lateJobs, cfg.pollInterval)
 	runtimeSamples := <-samples
 
 	summary := &Summary{
-		Mode:              cfg.mode,
-		Workers:           cfg.concurrency,
-		Window:            time.Since(start),
-		Ops:               map[string]*opStats{},
-		SessionsCreated:   result.sessionsCreated,
-		SessionsFinalized: result.completed + result.failed + result.expired,
-		SessionCompleted:  result.completed,
-		SessionFailed:     result.failed,
-		SessionExpired:    result.expired,
-		Lifecycle:         result.lifecycle,
-		WaitFailures:      result.waitFailures,
-		JobFailures:       result.jobFailures,
-		CleanupFailures:   result.cleanupFailures,
-		Runtime:           runtimeSamples,
+		Mode:                cfg.mode,
+		Workers:             cfg.concurrency,
+		Window:              time.Since(start),
+		Ops:                 map[string]*opStats{},
+		SessionsCreated:     result.sessionsCreated,
+		SessionsFinalized:   result.completed + result.failed + result.expired,
+		SessionCompleted:    result.completed,
+		SessionFailed:       result.failed,
+		SessionExpired:      result.expired,
+		Lifecycle:           result.lifecycle,
+		WaitFailures:        result.waitFailures,
+		JobFailures:         result.jobFailures,
+		CleanupFailures:     result.cleanupFailures,
+		LateSessionsCleaned: lateCleaned,
+		LateSessionsLeft:    lateLeft,
+		Runtime:             runtimeSamples,
 	}
 	for op, latencies := range result.ops {
 		summary.Ops[op] = &opStats{Latencies: latencies}
@@ -139,6 +142,7 @@ type workerResult struct {
 	waitFailures    []string
 	jobFailures     []string
 	cleanupFailures []string
+	lateJobs        []string
 }
 
 type opFailure struct {
@@ -188,6 +192,7 @@ func mergeWorker(dst *workerResult, src workerResult) {
 	dst.waitFailures = append(dst.waitFailures, src.waitFailures...)
 	dst.jobFailures = append(dst.jobFailures, src.jobFailures...)
 	dst.cleanupFailures = append(dst.cleanupFailures, src.cleanupFailures...)
+	dst.lateJobs = append(dst.lateJobs, src.lateJobs...)
 }
 
 type worker struct {
@@ -269,6 +274,9 @@ func (w *worker) webhook(ctx context.Context, n int) {
 
 	id, err := w.client.waitJob(ctx, jobID, w.cfg.pollInterval, w.cfg.sessionTimeout)
 	if err != nil {
+		// The job can still create its session after this wait ends. The
+		// final pass checks the job again and deletes that session.
+		w.result.lateJobs = append(w.result.lateJobs, jobID)
 		if ctx.Err() == nil {
 			w.result.jobFailures = append(w.result.jobFailures, err.Error())
 		}
@@ -294,14 +302,51 @@ func (w *worker) webhook(ctx context.Context, n int) {
 	}
 }
 
+// cleanupGrace bounds a delete after a wait, and the final pass over webhook
+// jobs whose wait ended without a session id.
+const cleanupGrace = 10 * time.Second
+
 // cleanup deletes a session after a terminal state or a failed wait. It uses
 // its own context so the end of the load window does not skip the delete.
 func cleanup(w *worker, id string) {
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := w.client.deleteSession(cleanupCtx, id); err != nil {
+	if err := deleteSessionBounded(w.client, id); err != nil {
 		w.result.cleanupFailures = append(w.result.cleanupFailures, err.Error())
 	}
+}
+
+// deleteSessionBounded deletes one session with its own bounded context.
+func deleteSessionBounded(client *apiClient, id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupGrace)
+	defer cancel()
+	return client.deleteSession(ctx, id)
+}
+
+// cleanLateJobs gives each webhook job whose wait ended without a session id
+// one more bounded chance to report one, and deletes any session the job
+// created after the wait. It runs after the window with its own context. The
+// pass is bounded as a whole, so a large worker count cannot stretch it.
+func cleanLateJobs(client *apiClient, jobs []string, poll time.Duration) (cleaned, left int) {
+	if len(jobs) == 0 {
+		return 0, 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupGrace)
+	defer cancel()
+	for _, jobID := range jobs {
+		if ctx.Err() != nil {
+			return cleaned, left
+		}
+		id, err := client.waitJob(ctx, jobID, poll, cleanupGrace)
+		if err != nil {
+			// The job is dead, or it still has no session. Nothing to delete.
+			continue
+		}
+		if err := deleteSessionBounded(client, id); err != nil {
+			left++
+			continue
+		}
+		cleaned++
+	}
+	return cleaned, left
 }
 
 func (c *apiClient) request(ctx context.Context, method, path string, body []byte, header http.Header) (int, []byte, error) {

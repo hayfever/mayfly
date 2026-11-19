@@ -31,6 +31,8 @@ type fakeControlPlane struct {
 	badSignatures  int
 	sessions       map[string]int
 	jobs           map[string]string
+	jobPolls       map[string]int
+	jobDelay       int
 	failCreates    bool
 	metricsScrapes atomic.Int64
 }
@@ -42,6 +44,7 @@ func newFakeControlPlane(t *testing.T, token, secret string) *fakeControlPlane {
 		secret:   secret,
 		sessions: map[string]int{},
 		jobs:     map[string]string{},
+		jobPolls: map[string]int{},
 	}
 }
 
@@ -133,7 +136,9 @@ func (f *fakeControlPlane) handler() http.Handler {
 		jobID := fmt.Sprintf("j%d", f.hooks)
 		sessionID := fmt.Sprintf("w%d", f.hooks)
 		f.jobs[jobID] = sessionID
-		f.sessions[sessionID] = 0
+		if f.jobDelay == 0 {
+			f.sessions[sessionID] = 0
+		}
 		writeJSONTest(w, http.StatusAccepted, map[string]any{
 			"accepted": true, "duplicate": false, "job_id": jobID,
 			"delivery": r.Header.Get("Idempotency-Key"), "status": "queued",
@@ -142,10 +147,21 @@ func (f *fakeControlPlane) handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/queue/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		sessionID, ok := f.jobs[r.PathValue("id")]
+		jobID := r.PathValue("id")
+		sessionID, ok := f.jobs[jobID]
 		if !ok {
 			writeJSONTest(w, http.StatusNotFound, errBody("not_found", "job not found"))
 			return
+		}
+		f.jobPolls[jobID]++
+		if f.jobDelay > 0 && f.jobPolls[jobID] <= f.jobDelay {
+			writeJSONTest(w, http.StatusOK, map[string]any{
+				"job": map[string]any{"state": "queued"},
+			})
+			return
+		}
+		if _, ok := f.sessions[sessionID]; !ok {
+			f.sessions[sessionID] = 0
 		}
 		writeJSONTest(w, http.StatusOK, map[string]any{
 			"job": map[string]any{"state": "done", "session_id": sessionID},
@@ -383,5 +399,64 @@ func TestCleanupUsesBackgroundContext(t *testing.T) {
 	fake.mu.Unlock()
 	if deletes != 1 {
 		t.Errorf("deleted sessions = %d, want 1 after the window closed", deletes)
+	}
+}
+
+// TestLateWebhookSessionIsCleanedUp covers a job that creates its session
+// after the harness stops waiting for that job. The fake reports no session
+// for the first 20 job polls, more than a 10ms wait can make, and then the
+// final pass finds the session and deletes it.
+func TestLateWebhookSessionIsCleanedUp(t *testing.T) {
+	fake := newFakeControlPlane(t, "test-token", "test-secret")
+	fake.jobDelay = 20
+	server := httptest.NewServer(fake.handler())
+	defer server.Close()
+
+	client := newAPIClient(server.URL, "test-token", "test-secret")
+	summary, err := runLoad(context.Background(), loadConfig{
+		mode:           "webhooks",
+		concurrency:    1,
+		iterations:     1,
+		duration:       30 * time.Second,
+		prompt:         "loadtest",
+		ttl:            "1m",
+		sessionTimeout: 10 * time.Millisecond,
+		pollInterval:   2 * time.Millisecond,
+		sampleInterval: 10 * time.Millisecond,
+		webhookTrigger: "generic",
+		metricsURL:     server.URL + "/metrics",
+	}, client, nil)
+	if err != nil {
+		t.Fatalf("runLoad: %v", err)
+	}
+
+	if got, want := len(summary.JobFailures), 1; got != want {
+		t.Errorf("job failures = %d, want %d", got, want)
+	}
+	if got, want := summary.LateSessionsCleaned, 1; got != want {
+		t.Errorf("late sessions cleaned up = %d, want %d", got, want)
+	}
+	if got, want := summary.LateSessionsLeft, 0; got != want {
+		t.Errorf("late sessions left behind = %d, want %d", got, want)
+	}
+	if got, want := summary.SessionsCreated, 0; got != want {
+		t.Errorf("sessions created = %d, want %d (the wait never saw the session)", got, want)
+	}
+
+	fake.mu.Lock()
+	deletes := fake.deletes
+	_, stillThere := fake.sessions["w1"]
+	fake.mu.Unlock()
+	if deletes != 1 {
+		t.Errorf("deleted sessions = %d, want 1", deletes)
+	}
+	if stillThere {
+		t.Error("late session w1 is still present after the run")
+	}
+
+	var out bytes.Buffer
+	printSummary(&out, summary)
+	if want := "late sessions cleaned up: 1, left behind: 0"; !strings.Contains(out.String(), want) {
+		t.Errorf("report does not contain %q:\n%s", want, out.String())
 	}
 }
