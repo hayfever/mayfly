@@ -154,18 +154,32 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           helm package deploy/helm/mayfly --version "$version" --app-version "$version" -d dist
       - name: push
+        id: push
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
-          helm push dist/mayfly-*.tgz "oci://ghcr.io/${owner}/charts"
+          helm push dist/mayfly-*.tgz "oci://ghcr.io/${owner}/charts" 2>&1 | tee "$RUNNER_TEMP/helm-push.log"
+          digest="$(sed -n 's/^Digest: //p' "$RUNNER_TEMP/helm-push.log")"
+          if [[ -z "$digest" ]]; then
+            echo "::error::helm push printed no digest" >&2
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
           gh release upload "$GITHUB_REF_NAME" dist/mayfly-*.tgz --clobber
+      # helm registry login does not write the Docker config that cosign reads.
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: sigstore/cosign-installer@v4.1.3
         with:
           cosign-release: v3.1.4
       - name: sign
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
-          version="${GITHUB_REF_NAME#v}"
-          cosign sign --yes "ghcr.io/${owner}/charts/mayfly:${version}"
+          cosign sign --yes "ghcr.io/${owner}/charts/mayfly@${DIGEST}"
