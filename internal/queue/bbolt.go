@@ -105,7 +105,7 @@ func (s *boltStore) Accept(_ context.Context, job Job) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		seen := tx.Bucket(bucketSeen)
 		ready := tx.Bucket(bucketReady)
-		if job.Delivery != "" {
+		if job.IdempotencyKey != "" {
 			if raw := seen.Get([]byte(job.ID)); raw != nil {
 				expiry := time.Unix(0, int64(binary.BigEndian.Uint64(raw)))
 				if now.Before(expiry) {
@@ -128,7 +128,7 @@ func (s *boltStore) Accept(_ context.Context, job Job) error {
 		if err := ready.Put(readyKey(now, job.ID), nil); err != nil {
 			return err
 		}
-		if job.Delivery != "" {
+		if job.IdempotencyKey != "" {
 			expiry := make([]byte, 8)
 			binary.BigEndian.PutUint64(expiry, uint64(now.Add(s.cfg.DedupeTTL.Std()).UnixNano()))
 			dedupeKey := []byte(job.ID)
@@ -169,8 +169,26 @@ func (s *boltStore) Claim(_ context.Context, max int) ([]Lease, error) {
 			}
 			var job Job
 			if err := json.Unmarshal(payload, &job); err != nil {
-				return err
+				// A payload this build cannot read must not block the queue.
+				// Bury it with the decode reason so an operator can see it.
+				buried, berr := json.Marshal(deadRecord{
+					Job:      Job{ID: id, Trigger: "unknown"},
+					Error:    "job payload does not decode: " + err.Error(),
+					FailedAt: now,
+				})
+				if berr != nil {
+					return berr
+				}
+				if err := tx.Bucket(bucketDead).Put([]byte(id), buried); err != nil {
+					return err
+				}
+				if err := jobs.Delete([]byte(id)); err != nil {
+					return err
+				}
+				moves = append(moves, move{from: append([]byte(nil), key...)})
+				continue
 			}
+			job.ID = id
 			leases = append(leases, Lease{ID: id, Job: job, Deadline: deadline})
 			moves = append(moves, move{from: append([]byte(nil), key...)})
 		}
@@ -406,7 +424,9 @@ func (s *boltStore) Stats(_ context.Context) (Stats, error) {
 			}
 			var job Job
 			if err := json.Unmarshal(payload, &job); err != nil {
-				return err
+				// An unreadable payload is buried on the next claim. It does
+				// not stop the counters from reporting the rest of the queue.
+				return nil
 			}
 			if stats.Oldest.IsZero() || job.AcceptedAt.Before(stats.Oldest) {
 				stats.Oldest = job.AcceptedAt

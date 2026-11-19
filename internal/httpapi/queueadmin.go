@@ -28,7 +28,7 @@ func queueView(record queue.Record, withPrompt bool) queueRecord {
 	view := queueRecord{
 		ID:         record.Job.ID,
 		Trigger:    record.Job.Trigger,
-		Delivery:   record.Job.Delivery,
+		Delivery:   record.Job.IdempotencyKey,
 		State:      record.State,
 		Attempts:   record.Job.Attempts,
 		AcceptedAt: record.Job.AcceptedAt,

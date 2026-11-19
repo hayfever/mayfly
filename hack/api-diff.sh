@@ -27,6 +27,17 @@ if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
   echo "api-diff: base ref $base does not exist" >&2
   exit 2
 fi
+# The job envelope is versioned: v1 may gain optional fields, but an existing
+# field may not change shape or meaning. A breaking change adds
+# api/job.v2.schema.json instead of editing v1.
+schema="api/job.v1.schema.json"
+if ! git cat-file -e "$base:$schema" 2>/dev/null; then
+  echo "api-diff: $base has no $schema; skipping the job envelope comparison" >&2
+elif ! git show "$base:$schema" | cmp -s - "$schema"; then
+  echo "api-diff: $schema changed from $base" >&2
+  echo "api-diff: add a new schema version for a breaking envelope change" >&2
+  exit 1
+fi
 if ! git cat-file -e "$base:$spec" 2>/dev/null; then
   echo "api-diff: $base has no $spec; skipping the spec comparison" >&2
   exit 0

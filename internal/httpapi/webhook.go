@@ -77,7 +77,7 @@ func (s *Server) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, codeUnavailable, "queue is unavailable")
 		return
 	}
-	s.logger.Info("webhook accepted", "trigger", name, "job", job.ID, "delivery", job.Delivery)
+	s.logger.Info("webhook accepted", "trigger", name, "job", job.ID, "delivery", job.IdempotencyKey)
 	if cfg.Type == "slack" {
 		// Slack wants an answer within three seconds; the link is not known yet.
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -94,7 +94,7 @@ func writeAccepted(w http.ResponseWriter, job queue.Job, duplicate bool) {
 		"accepted":  true,
 		"duplicate": duplicate,
 		"job_id":    job.ID,
-		"delivery":  job.Delivery,
+		"delivery":  job.IdempotencyKey,
 		"status":    "queued",
 	})
 }

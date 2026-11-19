@@ -930,6 +930,12 @@ components:
             $ref: "#/components/schemas/Session"
         next_cursor:
           type: string
+    JobEnvelope:
+      $ref: "job.v1.schema.json"
+      description: >
+        The versioned queue job body. It is not an HTTP request or response
+        body; it is the JSON a producer writes to a queue backend and a worker
+        decodes. The schema file is the source of truth for the queue contract.
     Job:
       type: object
       required: [id, trigger, state, attempts, accepted_at]
