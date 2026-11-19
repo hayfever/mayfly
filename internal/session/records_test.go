@@ -10,6 +10,7 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -417,6 +418,75 @@ func TestDeleteDropsStoredSession(t *testing.T) {
 	if err := m.Delete("gone"); err != ErrNotFound {
 		t.Fatalf("second delete = %v, want ErrNotFound", err)
 	}
+}
+
+// TestPersistInstanceOrdersSnapshots forces two transitions to overlap and
+// checks the later state is the one stored: a snapshot taken earlier must not
+// land after a newer one.
+func TestPersistInstanceOrdersSnapshots(t *testing.T) {
+	m := testManager(t)
+	gated := &gatedRecords{
+		RecordStore: NewMemoryRecords(),
+		entered:     make(chan model.Session, 4),
+		release:     make(chan struct{}),
+	}
+	m.SetRecords(gated)
+	inst := &instance{sess: model.Session{ID: "s1", Status: model.StatusRunning}}
+
+	go m.persistInstance(inst)
+	if got := <-gated.entered; got.Status != model.StatusRunning {
+		t.Fatalf("first snapshot = %q, want running", got.Status)
+	}
+	inst.mu.Lock()
+	inst.sess.Status = model.StatusCompleted
+	inst.mu.Unlock()
+
+	secondDone := make(chan struct{})
+	go func() {
+		m.persistInstance(inst)
+		close(secondDone)
+	}()
+	select {
+	case got := <-gated.entered:
+		t.Fatalf("second snapshot entered the store while the first was in flight: %+v", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	gated.release <- struct{}{}
+	select {
+	case got := <-gated.entered:
+		if got.Status != model.StatusCompleted {
+			t.Fatalf("second snapshot = %q, want completed", got.Status)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second snapshot was never written")
+	}
+	gated.release <- struct{}{}
+	<-secondDone
+
+	gated.mu.Lock()
+	last := gated.saved[len(gated.saved)-1]
+	gated.mu.Unlock()
+	if last.Status != model.StatusCompleted {
+		t.Fatalf("last stored status = %q, want completed", last.Status)
+	}
+}
+
+type gatedRecords struct {
+	RecordStore
+	entered chan model.Session
+	release chan struct{}
+	mu      sync.Mutex
+	saved   []model.Session
+}
+
+func (s *gatedRecords) Save(_ context.Context, rec Record) error {
+	s.entered <- rec.Session
+	<-s.release
+	s.mu.Lock()
+	s.saved = append(s.saved, rec.Session)
+	s.mu.Unlock()
+	return nil
 }
 
 // TestLoadRecordsWaitsForAdoptionRetry covers a control plane whose adoption

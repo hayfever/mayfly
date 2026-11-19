@@ -137,6 +137,9 @@ type instance struct {
 	// journalBytes counts what this session journaled in this control-plane
 	// lifetime, for journal.max_session_bytes. It is guarded by journalMu.
 	journalBytes int64
+	// persistMu orders the snapshot and the write of one record, so two
+	// transitions cannot store their snapshots out of order.
+	persistMu sync.Mutex
 }
 
 // Manager is the control plane session registry and lifecycle engine.

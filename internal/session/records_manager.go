@@ -133,8 +133,12 @@ func (m *Manager) persistRecord(sess model.Session) {
 	}
 }
 
-// persistInstance writes the current snapshot of a live session.
+// persistInstance writes the current snapshot of a live session. The instance
+// lock orders snapshot and save together, so a transition that finishes later
+// cannot be overwritten by one that copied its state earlier.
 func (m *Manager) persistInstance(inst *instance) {
+	inst.persistMu.Lock()
+	defer inst.persistMu.Unlock()
 	m.persistRecord(m.copySession(inst))
 }
 
