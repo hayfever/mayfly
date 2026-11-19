@@ -25,7 +25,7 @@ order for one session.
 | `session_id` | string | Session that owns the event. |
 | `step_key` | string | Idempotency key for a journaled step. The control plane drops a repeat. |
 | `time` | string | RFC 3339 timestamp. Always present. |
-| `type` | string | Event type. Always present. |
+| `type` | string | Event type. Always present. The set is open: ignore a type this build does not know. |
 | `actor` | string | Writer: `user`, `agent`, `mayfly`, or a trigger name. |
 | `text` | string | Human-readable text. |
 | `data` | object | Payload. The schema depends on `type`. |

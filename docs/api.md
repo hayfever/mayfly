@@ -20,7 +20,7 @@ Every failed request to `/api/v1` or `/hooks/{name}` returns one envelope:
 
 | Code | Status | Meaning |
 |---|---|---|
-| `invalid_request` | 400 | Bad JSON, a bad `limit` or `cursor`, an unknown agent, skill, or MCP server, a bad TTL, a bad tool turn or step, or an unverifiable webhook body |
+| `invalid_request` | 400 | Bad JSON, an unknown request field, a bad `limit` or `cursor`, an unknown agent, skill, or MCP server, a bad TTL, a bad tool turn or step, or an unverifiable webhook body |
 | `unauthenticated` | 401 | Missing, unknown, or expired API token, invalid webhook signature, or invalid attach ticket |
 | `forbidden` | 403 | The token does not carry the scope of the route, or the session may not use the requested tool |
 | `not_found` | 404 | Unknown route, session, trigger, artifact, job, dead job, or schedule; a tool route for a non-built-in harness |
@@ -54,6 +54,18 @@ A new session, or a job that changes state, can move between pages while you rea
 
 ## Public
 
+These routes do not require an API token, on purpose:
+
+| Route | Authentication |
+|---|---|
+| `GET /healthz`, `GET /readyz` | None. Probes must work before a token is loaded. |
+| `GET /`, `/app.js`, `/style.css` | None. The UI shell holds no session data; every data request still needs a token. |
+| `POST /hooks/{trigger}` | The trigger verifies the sender: a signature or a shared token, and `allow_unsigned` when an operator disables it. An unverifiable delivery is `401`. |
+| `GET /api/v1/sessions/{id}/ws` | A one-time ticket from `POST /api/v1/sessions/{id}/attach-ticket`. |
+| `GET /metrics` | A token with the `admin` scope on the main listener unless `server.metrics.require_auth` is false. A separate `server.metrics.address` listener is open by default. |
+
+Every other `/api/v1` route requires a named API token and the scope named in the spec.
+
 ### `GET /healthz`, `GET /readyz`
 
 `/healthz` returns `{"status":"ok"}` whenever the process is alive. `/readyz` returns `200 {"status":"ready"}` once the lifecycle engine has started, and `503` before that or during shutdown. It checks local state only: the artifact store and other remote dependencies stay out of the probe, because this replica also serves live session traffic through the same Service. No authentication.
@@ -69,7 +81,7 @@ Receives a webhook for a configured trigger. The session is created after the re
 Responses:
 
 - Slack: `200 {"response_type":"in_channel","text":"Mayfly session queued."}`.
-- Others: `202 {"accepted":true,"duplicate":false,"job_id":"...","delivery":"...","status":"queued"}`.
+- Others: `202 {"accepted":true,"duplicate":false,"job_id":"...","delivery":"...","status":"queued"}`. The manual schedule run and the dead-job retry return the same object.
 - Duplicate delivery (same `X-GitHub-Delivery`, Slack `trigger_id`, or `Idempotency-Key`): `202` with `"duplicate":true`. No second job is stored.
 - Slack URL verification: `200 {"challenge":"..."}`.
 - Session options the control plane cannot run (unknown agent, skill, or MCP server; model not in `llm.allow_models`; empty prompt): `400` with `code: invalid_request` and the reason. Nothing is queued.
@@ -94,6 +106,10 @@ Find the session created for a delivery with `GET /api/v1/queue/jobs/{job_id}`: 
 ```
 
 `prompt` is required. Empty `agent` selects the default agent. Empty `skills` or `mcp_servers` selects the agent defaults. `model` must be the default or in `llm.allow_models`.
+
+A request body with a field this build does not know returns `400 invalid_request`. A typo in an option is therefore visible, not silently ignored. The same rule applies to the message, close, and attach-ticket bodies.
+
+The session object holds the id, title, status, prompt, agent, harness, model, skills, MCP servers, plugins, trigger, TTL, timestamps, message count, artifact metadata, and error. The runtime backend, the pod name, and the artifact store URI are control-plane internals and never appear in a response. Download the bundle through `GET /api/v1/sessions/{id}/artifact`.
 
 Response `201`:
 
@@ -120,12 +136,16 @@ One page of sessions, newest first.
 
 ### `DELETE /api/v1/sessions/{id}`
 
-Force-stops the session, marks it failed, and keeps the record until `sessions.retention` expires. `204`.
+Force-stops the session and marks it failed. A live session keeps its record until `sessions.retention` expires; a session restored from the record store is removed at once. `204`.
+
+DELETE is safe while an adoption retry is in flight. The retry either registers first, and DELETE stops that session, or DELETE removes it first, and the retry refuses to register it. The session is not listed again after the `204`.
 
 ### `GET /api/v1/sessions/{id}/events?after=<seq>`
 
 Returns retained events with sequence greater than `after`. The event object
-and every payload schema are documented in [events.md](events.md).
+and every payload schema are documented in [events.md](events.md). The
+`type` field is open: a new event type and a new optional payload field are
+additive, and a client must ignore a type this build does not know.
 
 ```json
 {"session_id":"abc123","events":[{"seq":4,"type":"assistant_message","text":"...","time":"..."}]}
@@ -222,7 +242,7 @@ The queue store has no cursor, so this route reads the buried set and cuts the p
 
 ### `POST /api/v1/queue/dead/{id}/retry`
 
-Puts a buried job back on the queue with its attempt count reset. `202 {"retried":true,"id":"..."}`. Unknown job: `404 not_found`.
+Puts a buried job back on the queue with its attempt count reset. `202` with the accepted-job object: `{"accepted":true,"duplicate":false,"job_id":"d-...","delivery":"...","status":"queued"}`. Unknown job: `404 not_found`.
 
 ### `DELETE /api/v1/queue/dead/{id}`
 
@@ -238,7 +258,7 @@ The schedules compiled from agent files at startup, sorted by name.
 
 ### `POST /api/v1/schedules/{name}/run`
 
-Enqueues one manual run of the named schedule and returns `202 {"job_id":"s-..."}`. The run writes its artifact and creates a session when the change totals match the schedule trigger, the same as a cron slot. Manual runs use a random delivery key, so they do not consume or block a cron slot. Unknown schedule: `404 not_found`. Scheduler not started: `503 unavailable`.
+Enqueues one manual run of the named schedule and returns `202` with the accepted-job object: `{"accepted":true,"duplicate":false,"job_id":"s-...","delivery":"manual:...","status":"queued"}`. The run writes its artifact and creates a session when the change totals match the schedule trigger, the same as a cron slot. Manual runs use a random delivery key, so they do not consume or block a cron slot. Unknown schedule: `404 not_found`. Scheduler not started: `503 unavailable`.
 
 ### `GET /api/v1/config`
 
