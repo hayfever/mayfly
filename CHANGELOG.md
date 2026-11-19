@@ -2,6 +2,24 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
+## [0.3.0] - Unreleased
+
+### Added
+
+- `--json` on `mayfly get`, `mayfly send`, and `mayfly version`. Every command that prints data now accepts it.
+- `mayfly artifact --output FILE` as the long form of `-o`.
+- `mayfly help` lists every command and every flag.
+
+### Breaking changes
+
+- `mayfly get` printed JSON with no flag. It now prints a readable summary by default; add `--json` to get the API object.
+- `--json` output for a session no longer includes a `backend` field. The CLI decoded the API response into a local struct and wrote it back; it now writes the API object unchanged.
+- `mayfly send` parses flags before and after the positional arguments. A message text that starts with `-` must follow `--`.
+
+### Changed
+
+- `--json` output for `run`, `ls`, `agents`, and `events` is the API object unchanged. Fields the CLI does not model pass through, and the CLI no longer adds or drops fields.
+
 ## [0.2.0] - 2026-11-19
 
 Operators moving from 0.1.x or a release candidate should read
