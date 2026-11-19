@@ -323,7 +323,12 @@ func (p *portForward) stop() {
 // startPortForward replaces any existing forward with a new one to the
 // control plane Service. It must run after the control plane pod is replaced.
 func (c *cluster) startPortForward() (string, error) {
-	p, err := c.forward("svc/"+c.service, 8080, 60*time.Second)
+	return c.startForward(60 * time.Second)
+}
+
+// startForward is startPortForward with the caller's deadline.
+func (c *cluster) startForward(deadline time.Duration) (string, error) {
+	p, err := c.forward("svc/"+c.service, 8080, deadline)
 	if err != nil {
 		return "", err
 	}
@@ -354,7 +359,7 @@ func (c *cluster) liveForward(deadline time.Duration) (string, error) {
 	if pf != nil && pf.alive() {
 		return pf.base, nil
 	}
-	return c.startPortForward()
+	return c.startForward(deadline)
 }
 
 // forward retries kubectl until it reports a local port or the deadline
@@ -463,8 +468,15 @@ func (c *cluster) waitReady(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var last string
 	reported := false
-	for time.Now().Before(deadline) {
-		base, err := c.liveForward(60 * time.Second)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		if remaining > 60*time.Second {
+			remaining = 60 * time.Second
+		}
+		base, err := c.liveForward(remaining)
 		if err != nil {
 			last = "reconnect the port-forward: " + err.Error()
 			time.Sleep(time.Second)
