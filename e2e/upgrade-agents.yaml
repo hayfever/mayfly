@@ -1,0 +1,15 @@
+# Agents for the upgrade test. Unlike e2e/agents.yaml this file has no plugin
+# agents: a control plane refuses to start when an agent names a plugin whose
+# manifest is not mounted, and the upgrade test only needs one deterministic
+# agent.
+schemaVersion: 1
+name: mayfly/e2e-upgrade
+version: 0.1.0
+agents:
+  - name: e2e
+    description: Deterministic agent for the upgrade test (backed by llmstub).
+    systemPrompt: |
+      You are the Mayfly upgrade probe. Write report.md, call the echo tool, then reply.
+    mcpServers:
+      - echo
+    maxSteps: 8

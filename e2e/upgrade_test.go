@@ -164,9 +164,9 @@ func TestUpgradeFromLastRelease(t *testing.T) {
 	sessions = append(sessions, s)
 }
 
-// install runs helm upgrade --install for the upgrade release with the e2e
-// values, the e2e agent, and the incident-triage skill. controlPlane and agent
-// are full image references with a tag or digest.
+// installRelease runs helm upgrade --install for the upgrade release with the
+// release-stable values and one agent. controlPlane and agent are full image
+// references with a tag.
 func (c *cluster) installRelease(t *testing.T, root, chart string, extra []string, controlPlane, agent, pullSecret string) {
 	t.Helper()
 	cpRepo, cpTag, ok := splitImage(controlPlane)
@@ -181,13 +181,12 @@ func (c *cluster) installRelease(t *testing.T, root, chart string, extra []strin
 		"upgrade", "--install", c.release, chart,
 		"--namespace", c.namespace, "--create-namespace",
 		"--wait", "--timeout", "5m",
-		"-f", filepath.Join(root, "e2e", "values.yaml"),
+		"-f", filepath.Join(root, "e2e", "upgrade-values.yaml"),
 		"--set", "image.repository=" + cpRepo,
 		"--set", "image.tag=" + cpTag,
 		"--set", "agentImage.repository=" + agentRepo,
 		"--set", "agentImage.tag=" + agentTag,
-		"--set-file", `agents.files.e2e\.yaml=` + filepath.Join(root, "e2e", "agents.yaml"),
-		"--set-file", `skills.files.incident-triage\.md=` + filepath.Join(root, "examples", "skills", "incident-triage.md"),
+		"--set-file", `agents.files.e2e\.yaml=` + filepath.Join(root, "e2e", "upgrade-agents.yaml"),
 	}
 	if c.kubeContext != "" {
 		args = append(args, "--kube-context", c.kubeContext)
@@ -321,6 +320,25 @@ func (c *cluster) trySessionIDs() ([]string, error) {
 	return sessionListIDs(body)
 }
 
+// dumpDiagnostics logs the upgrade namespace state, so a failed install or
+// upgrade explains itself in the test output.
+func (c *cluster) dumpDiagnostics(t *testing.T) {
+	t.Helper()
+	for _, args := range [][]string{
+		{"get", "pods", "-o", "wide"},
+		{"describe", "pods"},
+		{"get", "events", "--sort-by=.lastTimestamp"},
+		{"logs", "deployment/" + c.release, "--all-containers", "--tail=-1"},
+		{"logs", "deployment/" + c.release, "--all-containers", "--previous", "--tail=-1"},
+	} {
+		out, err := c.kubectl(args...)
+		t.Logf("upgrade diagnostics: kubectl %s:\n%s", strings.Join(args, " "), out)
+		if err != nil {
+			t.Logf("upgrade diagnostics: %v", err)
+		}
+	}
+}
+
 // cleanupUpgrade deletes the upgrade namespace with its release, sessions, and
 // stubs. The release under test lives in another namespace, so nothing of it is
 // touched.
@@ -328,6 +346,7 @@ func (c *cluster) cleanupUpgrade(t *testing.T) {
 	t.Helper()
 	c.stopPortForward()
 	if t.Failed() {
+		c.dumpDiagnostics(t)
 		t.Logf("keeping namespace %s for diagnostics; delete it with: kubectl delete namespace %s", c.namespace, c.namespace)
 		return
 	}

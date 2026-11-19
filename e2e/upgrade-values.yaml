@@ -1,0 +1,55 @@
+# Helm values for the upgrade test. installRelease gives this file to the
+# released chart and then to the chart from HEAD, so it must stay valid for
+# every release under test: stable keys only, no fixture-specific plugins.
+existingSecret: mayfly-e2e-secrets
+logLevel: debug
+
+persistence:
+  enabled: true
+  size: 1Gi
+
+config:
+  server:
+    public_url: http://localhost:8080
+  sessions:
+    default_ttl: 10m
+    max_ttl: 30m
+    idle_timeout: 15m
+    close_grace: 60s
+    max_concurrent: 3 # the upgrade test fills every slot
+    retention: 30m
+    connect_timeout: 2m
+    allow_shell: false
+  runtime:
+    workspace_limit: 256Mi
+    artifact_volume_limit: 256Mi
+    poll_interval: 2s
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  llm:
+    base_url: http://llmstub:9099/v1
+    model: stub
+    allow_models: [stub]
+    timeout: 60s
+  agents:
+    allowed_images: []
+  queue:
+    max_attempts: 2
+    retry_base: 1s
+    poll_interval: 1s
+    tombstone_ttl: 1h
+  mcp:
+    servers:
+      - name: echo
+        transport: http
+        url: http://mcpstub:9100/mcp
+  triggers:
+    - name: generic
+      type: generic
+      secret_env: MAYFLY_WEBHOOK_SECRET
+      rate_limit: {requests: 600, interval: 1m, burst: 100}
