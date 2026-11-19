@@ -77,7 +77,7 @@ jobs:
       - name: previous release
         id: previous
         run: |
-          tag="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+          tag="$(git -c versionsort.suffix=-rc tag --list 'v*' --sort=-v:refname | head -n1)"
           if [[ -z "$tag" ]]; then
             echo "no v* release tag; the upgrade job needs a published release" >&2
             exit 1
