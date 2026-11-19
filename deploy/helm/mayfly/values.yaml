@@ -57,6 +57,10 @@ config:
   server:
     public_url: "http://localhost:8080"
     token_env: MAYFLY_API_TOKEN
+    # Named API tokens with explicit scopes. A non-empty list replaces
+    # token_env. Each token reads its secret from the variable named by
+    # secret_env. Put those variables in controlPlane.tokensSecret.
+    tokens: []
     attach_ticket_ttl: 60s
     max_body_bytes: 4194304
   sessions:
@@ -226,6 +230,9 @@ controlPlane:
   # Optional Secret whose keys become control-plane environment variables.
   # Source connections read provider credentials from here.
   sourcesSecret: ""
+  # Optional Secret that holds the secret variables of config.server.tokens.
+  # Its keys become control-plane environment variables.
+  tokensSecret: ""
   securityContext:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true

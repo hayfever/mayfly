@@ -58,6 +58,10 @@ spec:
             - secretRef:
                 name: {{ . }}
             {{- end }}
+            {{- with .Values.controlPlane.tokensSecret }}
+            - secretRef:
+                name: {{ . }}
+            {{- end }}
           env:
             - name: MAYFLY_LOG_LEVEL
               value: {{ default "info" .Values.logLevel | quote }}

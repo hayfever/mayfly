@@ -56,6 +56,9 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	created, err := s.mgr.Create(r.Context(), opts)
+	if created != nil {
+		setAuditTarget(r, created.ID)
+	}
 	if err != nil {
 		if created == nil {
 			s.writeSessionError(w, err)

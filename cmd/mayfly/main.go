@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/gorilla/websocket"
 
@@ -70,8 +71,9 @@ func usage() {
 	fmt.Fprint(os.Stderr, `mayfly - ephemeral agent sessions
 
 Environment:
-  MAYFLY_URL    control plane URL (default http://localhost:8080)
-  MAYFLY_TOKEN  admin API token
+  MAYFLY_URL        control plane URL (default http://localhost:8080)
+  MAYFLY_API_TOKEN  API token from the control plane
+  MAYFLY_TOKEN      deprecated alias for MAYFLY_API_TOKEN
 
 Commands:
   version
@@ -100,7 +102,28 @@ func baseURL() string {
 	return strings.TrimRight(u, "/")
 }
 
-func token() string { return os.Getenv("MAYFLY_TOKEN") }
+// resolveToken reads the control-plane token. MAYFLY_TOKEN is a deprecated
+// alias for MAYFLY_API_TOKEN; the alias prints one warning per process.
+func resolveToken(getenv func(string) string, warn io.Writer) string {
+	if value := strings.TrimSpace(getenv("MAYFLY_API_TOKEN")); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(getenv("MAYFLY_TOKEN")); value != "" {
+		fmt.Fprintln(warn, "mayfly: MAYFLY_TOKEN is deprecated; set MAYFLY_API_TOKEN instead")
+		return value
+	}
+	return ""
+}
+
+var (
+	tokenOnce  sync.Once
+	tokenValue string
+)
+
+func token() string {
+	tokenOnce.Do(func() { tokenValue = resolveToken(os.Getenv, os.Stderr) })
+	return tokenValue
+}
 
 func request(method, path string, body []byte) (*http.Response, error) {
 	var reader io.Reader
