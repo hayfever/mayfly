@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"path"
@@ -42,8 +43,17 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 // Std returns the standard library duration.
 func (d Duration) Std() time.Duration { return time.Duration(d) }
 
+// CurrentVersion is the config file format this build reads. A file without a
+// version field is read as version 1. Any other value is an error, so a
+// downgrade fails at startup instead of silently ignoring keys it does not
+// understand.
+const CurrentVersion = 1
+
 // Config is the root configuration document.
 type Config struct {
+	// Version is the config file format version. Load writes CurrentVersion
+	// when the file omits the field.
+	Version   int             `yaml:"version"`
 	Server    ServerConfig    `yaml:"server"`
 	Sessions  SessionsConfig  `yaml:"sessions"`
 	Runtime   RuntimeConfig   `yaml:"runtime"`
@@ -58,19 +68,25 @@ type Config struct {
 	Plugins   PluginsConfig   `yaml:"plugins"`
 	Triggers  []TriggerConfig `yaml:"triggers"`
 
-	// AdminToken is resolved from the environment at load time and never
-	// serialized.
+	// AdminToken is the token from server.token_env, resolved at load time
+	// and never serialized. APITokens exposes it as the token named "default"
+	// with the admin scope when server.tokens is empty.
 	AdminToken string `yaml:"-"`
 }
 
 // ServerConfig covers the public HTTP listener.
 type ServerConfig struct {
-	Addr            string   `yaml:"addr"`
-	PublicURL       string   `yaml:"public_url"`
-	InternalURL     string   `yaml:"internal_url"`
-	TokenEnv        string   `yaml:"token_env"`
-	AttachTicketTTL Duration `yaml:"attach_ticket_ttl"`
-	MaxBodyBytes    int64    `yaml:"max_body_bytes"`
+	Addr        string `yaml:"addr"`
+	PublicURL   string `yaml:"public_url"`
+	InternalURL string `yaml:"internal_url"`
+	// TokenEnv names the environment variable that holds the single admin
+	// token. It is used only when Tokens is empty.
+	TokenEnv string `yaml:"token_env"`
+	// Tokens declares named bearer tokens with explicit scopes. A non-empty
+	// list replaces TokenEnv.
+	Tokens          []APITokenConfig `yaml:"tokens"`
+	AttachTicketTTL Duration         `yaml:"attach_ticket_ttl"`
+	MaxBodyBytes    int64            `yaml:"max_body_bytes"`
 	// ShutdownBudget bounds the whole stop sequence: HTTP drain, queue worker
 	// drain, and session manager shutdown. It must fit inside the pod's
 	// terminationGracePeriodSeconds with margin.
@@ -85,8 +101,8 @@ type MetricsConfig struct {
 	// Address serves metrics on a listener of its own. Empty serves /metrics
 	// on the main HTTP listener.
 	Address string `yaml:"address"`
-	// RequireAuth demands the admin token. A nil value means required on the
-	// main listener and no auth on a separate address.
+	// RequireAuth demands a token with the admin scope. A nil value means
+	// required on the main listener and no auth on a separate address.
 	RequireAuth *bool `yaml:"require_auth"`
 }
 
@@ -101,9 +117,9 @@ func (c ServerConfig) MetricsOnMainPort() bool {
 	return c.MetricsEnabled() && c.Metrics.Address == ""
 }
 
-// MetricsRequireAuth reports whether the metrics endpoint needs the admin
-// token. An unset value means required on the main listener, which is the
-// public API, and not required on a separate address.
+// MetricsRequireAuth reports whether the metrics endpoint needs a token with
+// the admin scope. An unset value means required on the main listener, which
+// is the public API, and not required on a separate address.
 func (c ServerConfig) MetricsRequireAuth() bool {
 	return Bool(c.Metrics.RequireAuth, c.MetricsOnMainPort())
 }
@@ -434,6 +450,7 @@ type RateLimitConfig struct {
 // Default returns a configuration with safe defaults applied.
 func Default() *Config {
 	return &Config{
+		Version: CurrentVersion,
 		Server: ServerConfig{
 			Addr:            ":8080",
 			PublicURL:       "http://localhost:8080",
@@ -527,6 +544,9 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	cfg := Default()
+	// Zero the version so a file that omits the field is distinguishable from
+	// one that sets it to the current version.
+	cfg.Version = 0
 	decoder := yaml.NewDecoder(bytes.NewReader(raw))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
@@ -539,6 +559,15 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config %s: multiple YAML documents are not supported", path)
 	} else if !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	switch cfg.Version {
+	case 0:
+		cfg.Version = CurrentVersion
+		slog.Warn("config has no version field; assuming the current version",
+			"path", path, "version", CurrentVersion)
+	case CurrentVersion:
+	default:
+		return nil, fmt.Errorf("config %s: version %d is not supported by this build, which reads version %d", path, cfg.Version, CurrentVersion)
 	}
 	cfg.applyDefaults()
 	if err := cfg.resolveSecrets(); err != nil {
@@ -683,7 +712,20 @@ const (
 )
 
 func (c *Config) resolveSecrets() error {
-	c.AdminToken = os.Getenv(c.Server.TokenEnv)
+	if err := c.Server.validateTokens(); err != nil {
+		return err
+	}
+	if len(c.Server.Tokens) == 0 {
+		c.AdminToken = os.Getenv(c.Server.TokenEnv)
+	} else {
+		for i := range c.Server.Tokens {
+			token := &c.Server.Tokens[i]
+			token.Secret = os.Getenv(token.SecretEnv)
+			if token.Secret == "" {
+				return fmt.Errorf("server.tokens[%d] (%s): environment variable %s is not set", i, token.Name, token.SecretEnv)
+			}
+		}
+	}
 	if c.LLM.APIKeyEnv != "" {
 		c.LLM.APIKey = os.Getenv(c.LLM.APIKeyEnv)
 	}
@@ -757,6 +799,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.ShutdownBudget.Std() < 3*time.Second {
 		return fmt.Errorf("server.shutdown_budget must be at least 3s")
+	}
+	if err := c.Server.validateTokens(); err != nil {
+		return err
 	}
 	if c.Server.MetricsEnabled() && c.Server.Metrics.Address != "" && c.Server.Metrics.Address == c.Server.Addr {
 		return fmt.Errorf("server.metrics.address must differ from server.addr")
@@ -1093,6 +1138,9 @@ func (c *Config) SecretEnvNames() []string {
 		}
 	}
 	add(c.Server.TokenEnv)
+	for _, token := range c.Server.Tokens {
+		add(token.SecretEnv)
+	}
 	add(c.LLM.APIKeyEnv)
 	addHeaders(c.LLM.Headers)
 	add(c.Artifacts.S3.AccessKeyEnv)

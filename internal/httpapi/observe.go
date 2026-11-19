@@ -2,13 +2,11 @@ package httpapi
 
 import (
 	"bufio"
-	"crypto/rand"
-	"encoding/hex"
+	"context"
 	"errors"
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -16,11 +14,7 @@ import (
 )
 
 // requestIDHeader carries the request id in the request and the response.
-const requestIDHeader = "X-Request-ID"
-
-// maxRequestIDLength bounds an id accepted from a caller, so one header cannot
-// grow every log line.
-const maxRequestIDLength = 128
+const requestIDHeader = "X-Request-Id"
 
 // requestRecorder records the status and body size of one response and
 // answers the request id for the error envelope. It forwards the optional
@@ -90,16 +84,21 @@ func (r *requestRecorder) ReadFrom(src io.Reader) (int64, error) {
 	return io.Copy(struct{ io.Writer }{r}, src)
 }
 
-// observeRequests assigns a request id, records the outcome, writes the info
-// log line, and feeds the HTTP metrics. The route label is the mux pattern,
-// never the raw path, so label cardinality stays bounded.
+// observeRequests is the single request-id path. It keeps a valid caller id or
+// generates one, echoes it in the response header, exposes it in the request
+// context for the audit log, and records the outcome in the request log and the
+// HTTP metrics. The route label is the mux pattern, never the raw path, so
+// label cardinality stays bounded.
 func (s *Server) observeRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := sanitizeRequestID(r.Header.Get(requestIDHeader))
-		if id == "" {
+		id := r.Header.Get(requestIDHeader)
+		if !validRequestID(id) {
 			id = newRequestID()
 		}
-		w.Header().Set(requestIDHeader, id)
+		if id != "" {
+			w.Header().Set(requestIDHeader, id)
+		}
+		r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, id))
 
 		rec := &requestRecorder{ResponseWriter: w, id: id}
 		start := time.Now()
@@ -138,31 +137,4 @@ func routeLabel(r *http.Request) string {
 		return path
 	}
 	return r.Pattern
-}
-
-// sanitizeRequestID accepts an id a caller supplied when it is short and made
-// of characters that cannot break a log line.
-func sanitizeRequestID(value string) string {
-	if value == "" || len(value) > maxRequestIDLength {
-		return ""
-	}
-	for i := range len(value) {
-		c := value[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case c == '-', c == '_', c == '.', c == ':':
-		default:
-			return ""
-		}
-	}
-	return value
-}
-
-// newRequestID returns a random 128-bit id in hex.
-func newRequestID() string {
-	buf := make([]byte, 16)
-	if _, err := rand.Read(buf); err != nil {
-		return strconv.FormatInt(time.Now().UnixNano(), 36)
-	}
-	return hex.EncodeToString(buf)
 }

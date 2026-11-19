@@ -249,7 +249,7 @@ func (m *Manager) restart(inst *instance, reason string) {
 		Type:  model.EventStatus,
 		Actor: "mayfly",
 		Text:  "Session container restarted; resuming the journaled turn.",
-		Data:  map[string]any{"status": string(model.StatusRunning), "restart": attempt},
+		Data:  model.StatusData{Status: model.StatusRunning, Restart: attempt},
 	})
 	m.logger.Info("session container replaced", "session", id, "pod", podName, "attempt", attempt)
 	if h.Done != nil {

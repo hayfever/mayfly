@@ -178,7 +178,7 @@ func (s *redisStore) Accept(ctx context.Context, job Job) error {
 		time.Now().UTC().UnixMilli(),
 		s.cfg.MaxJobs,
 		int64(s.cfg.DedupeTTL.Std().Seconds()),
-		dedupeFlag(job.Delivery),
+		dedupeFlag(job.IdempotencyKey),
 	).Int()
 	if err != nil {
 		return fmt.Errorf("queue accept: %w", err)
@@ -213,7 +213,13 @@ func (s *redisStore) Claim(ctx context.Context, max int) ([]Lease, error) {
 		payload, _ := values[i+1].(string)
 		var job Job
 		if err := json.Unmarshal([]byte(payload), &job); err != nil {
-			buried, _ := json.Marshal(deadRecord{Job: Job{ID: id}, Error: "payload does not decode", FailedAt: time.Now().UTC()})
+			// A payload this build cannot read must not block the queue.
+			// Bury it with the decode reason so an operator can see it.
+			buried, _ := json.Marshal(deadRecord{
+				Job:      Job{ID: id, Trigger: "unknown"},
+				Error:    "job payload does not decode: " + err.Error(),
+				FailedAt: time.Now().UTC(),
+			})
 			pipe := s.client.TxPipeline()
 			pipe.ZRem(ctx, s.queue, id)
 			pipe.HDel(ctx, s.jobs, id)
@@ -223,6 +229,7 @@ func (s *redisStore) Claim(ctx context.Context, max int) ([]Lease, error) {
 			}
 			continue
 		}
+		job.ID = id
 		leases = append(leases, Lease{ID: id, Job: job, Deadline: deadline})
 	}
 	return leases, nil

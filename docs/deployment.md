@@ -13,7 +13,7 @@ The script:
 1. Builds `mayflyd:dev`, `mayfly-agent:dev`, `mayfly-llmstub:dev`, `mayfly-mcpstub:dev`.
 2. Creates the `mayfly` k3d cluster from [deploy/k3d.yaml](../deploy/k3d.yaml) if absent. k3s enforces NetworkPolicy; the cluster publishes NodePort 30080 as host port 8080.
 3. Imports the images into the k3d node.
-4. Creates the `mayfly` namespace and the `mayfly-secrets` Secret with an admin token and webhook secret.
+4. Creates the `mayfly` namespace and the `mayfly-secrets` Secret with an API token and webhook secret.
 5. Applies the local overlay and waits for rollouts.
 
 The overlay includes deterministic LLM and MCP stubs and an example agent manifest. Remove the stubs and point `llm.base_url` at a real provider for normal use.
@@ -125,7 +125,7 @@ Use `envFrom` for additional variables or add them to the Deployment. Do not put
 
 4. Set `server.public_url` to the externally reachable URL, and `server.internal_url` to the in-cluster Service URL. Attach tickets and session links use `public_url`; session pods use `internal_url`.
 
-5. Expose the API through an ingress with TLS and authentication. The admin token is a shared bearer token and is not a substitute for SSO.
+5. Expose the API through an ingress with TLS and authentication. The default API token has the admin scope and is not a substitute for SSO. Prefer named tokens with narrow scopes.
 
 ## S3-compatible artifacts
 

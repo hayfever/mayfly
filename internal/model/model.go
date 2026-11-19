@@ -3,6 +3,7 @@
 package model
 
 import (
+	"encoding/json"
 	"time"
 )
 
@@ -81,16 +82,37 @@ const (
 	EventControl          EventType = "control"
 )
 
-// Event is one thread item. Seq is assigned by the control plane.
+// Event is one thread item. Seq is assigned by the control plane. Data is
+// the payload that belongs to Type; see DecodeEventData.
 type Event struct {
-	Seq       int64          `json:"seq"`
-	SessionID string         `json:"session_id,omitempty"`
-	StepKey   string         `json:"step_key,omitempty"`
-	Time      time.Time      `json:"time"`
-	Type      EventType      `json:"type"`
-	Actor     string         `json:"actor,omitempty"`
-	Text      string         `json:"text,omitempty"`
-	Data      map[string]any `json:"data,omitempty"`
+	Seq       int64     `json:"seq"`
+	SessionID string    `json:"session_id,omitempty"`
+	StepKey   string    `json:"step_key,omitempty"`
+	Time      time.Time `json:"time"`
+	Type      EventType `json:"type"`
+	Actor     string    `json:"actor,omitempty"`
+	Text      string    `json:"text,omitempty"`
+	Data      EventData `json:"data,omitempty"`
+}
+
+// UnmarshalJSON decodes an event and the typed payload that belongs to its
+// type. Clients ignore an unknown event type and an unknown payload field.
+func (e *Event) UnmarshalJSON(b []byte) error {
+	type event Event
+	var raw struct {
+		*event
+		Data json.RawMessage `json:"data"`
+	}
+	raw.event = (*event)(e)
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	data, err := DecodeEventData(e.Type, raw.Data)
+	if err != nil {
+		return err
+	}
+	e.Data = data
+	return nil
 }
 
 // IsInbox reports whether an event must be delivered to the session runtime.

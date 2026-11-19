@@ -294,13 +294,13 @@ func (m *Manager) Close(id, reason string) error {
 	m.hub.Append(id, model.Event{
 		Type:  model.EventControl,
 		Actor: "mayfly",
-		Data:  map[string]any{"action": "close", "reason": reason},
+		Data:  model.ControlData{Action: "close", Reason: reason},
 	})
 	m.hub.Append(id, model.Event{
 		Type:  model.EventStatus,
 		Actor: "mayfly",
 		Text:  "Close requested.",
-		Data:  map[string]any{"status": string(model.StatusClosing), "reason": reason},
+		Data:  model.StatusData{Status: model.StatusClosing, Reason: reason},
 	})
 	m.logger.Info("close requested", "session", id, "reason", reason)
 	return nil
@@ -419,7 +419,7 @@ func (m *Manager) finalize(inst *instance, status model.SessionStatus, reason, e
 		Type:  model.EventStatus,
 		Actor: "mayfly",
 		Text:  text,
-		Data:  map[string]any{"status": string(final), "reason": reason, "error": errMsg},
+		Data:  model.StatusData{Status: final, Reason: reason, Error: errMsg},
 	})
 	// Shutdown waits for cleanup. A control plane that exits partway through
 	// would otherwise leave objects that adoption reads as a resumable
@@ -597,7 +597,7 @@ func (m *Manager) fallback(id, reason string) {
 		Type:  model.EventArtifact,
 		Actor: "mayfly",
 		Text:  "Partial artifact exported after runtime failure.",
-		Data:  map[string]any{"key": key, "uri": uri, "size": info.Size(), "sha256": digest, "partial": true},
+		Data:  model.ArtifactData{Key: key, URI: uri, Size: info.Size(), SHA256: digest, Partial: true},
 	})
 	finalStatus := model.StatusFailed
 	if closeReason == "expired" {

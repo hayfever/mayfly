@@ -1,0 +1,726 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mayfly chart values",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Control-plane image. The tag falls back to the chart appVersion.",
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "digest": {
+          "type": "string",
+          "description": "sha256 digest. Wins over tag when set."
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+    "agentImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Image for session pods. The tag falls back to the chart appVersion.",
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "digest": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "logLevel": {
+      "type": "string",
+      "enum": ["debug", "info", "warn", "error"]
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "controlPlaneName": { "type": "string" },
+        "agentName": { "type": "string" },
+        "annotations": { "type": "object" },
+        "agentAnnotations": { "type": "object" }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["ClusterIP", "NodePort", "LoadBalancer"]
+        },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "nodePort": {
+          "type": ["integer", "null"],
+          "minimum": 30000,
+          "maximum": 32767
+        },
+        "annotations": { "type": "object" }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "address": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "requireAuth": { "type": ["boolean", "null"] },
+        "prometheusAnnotations": { "type": "boolean" },
+        "serviceMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "interval": { "type": "string" },
+            "scrapeTimeout": { "type": "string" },
+            "labels": { "type": "object" },
+            "namespace": { "type": "string" },
+            "bearerTokenSecret": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": "string" },
+                "key": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "annotations": { "type": "object" },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["host"],
+            "properties": {
+              "host": { "type": "string", "minLength": 1 },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["path", "pathType"],
+                  "properties": {
+                    "path": { "type": "string", "minLength": 1 },
+                    "pathType": {
+                      "type": "string",
+                      "enum": ["Prefix", "Exact", "ImplementationSpecific"]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "secretName": { "type": "string" },
+              "hosts": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "existingSecret": {
+      "type": "string",
+      "description": "Secret with the admin token and provider keys. Required unless secret.create is true."
+    },
+    "secret": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "literals": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "description": "Mayfly config file body. mayflyd rejects keys that it does not know, so the chart validates only the types and allowed values listed here.",
+      "properties": {
+        "version": {
+          "type": "integer",
+          "enum": [1],
+          "description": "Config file format version."
+        },
+        "server": {
+          "type": "object",
+          "properties": {
+            "addr": { "type": "string" },
+            "public_url": { "type": "string" },
+            "internal_url": { "type": "string" },
+            "token_env": { "type": "string" },
+            "tokens": {
+              "type": "array",
+              "description": "Named API tokens with explicit scopes. A non-empty list replaces token_env.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "scopes", "secret_env"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "scopes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "enum": ["admin", "sessions:read", "sessions:write", "queue:read", "queue:write", "schedules:read", "schedules:write"]
+                    }
+                  },
+                  "secret_env": { "type": "string", "minLength": 1 },
+                  "expires_at": { "type": "string" }
+                }
+              }
+            },
+            "attach_ticket_ttl": { "type": "string" },
+            "max_body_bytes": { "type": "integer", "minimum": 0 },
+            "shutdown_budget": { "type": "string" }
+          }
+        },
+        "sessions": {
+          "type": "object",
+          "properties": {
+            "namespace": { "type": "string" },
+            "default_ttl": { "type": "string" },
+            "max_ttl": { "type": "string" },
+            "idle_timeout": { "type": "string" },
+            "close_grace": { "type": "string" },
+            "event_buffer": { "type": "integer", "minimum": 0 },
+            "max_steps": { "type": "integer", "minimum": 0 },
+            "max_history_messages": { "type": "integer", "minimum": 0 },
+            "max_concurrent": { "type": "integer", "minimum": 0 },
+            "retention": { "type": "string" },
+            "connect_timeout": { "type": "string" },
+            "max_restarts": { "type": "integer", "minimum": 0 },
+            "persistent_workspace": { "type": "boolean" },
+            "allow_shell": { "type": "boolean" },
+            "shell_timeout": { "type": "string" },
+            "workspace_dir": { "type": "string" },
+            "artifacts_dir": { "type": "string" },
+            "records": {
+              "type": "object",
+              "properties": {
+                "backend": {
+                  "type": "string",
+                  "enum": ["", "memory", "bbolt"]
+                },
+                "path": { "type": "string" }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "type": "object",
+          "properties": {
+            "backend": {
+              "type": "string",
+              "enum": ["kubernetes", "local"]
+            },
+            "image": { "type": "string" },
+            "image_pull_policy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            },
+            "image_pull_secrets": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "agent_binary": { "type": "string" },
+            "state_dir": { "type": "string" },
+            "service_account": { "type": "string" },
+            "platform_namespace": { "type": "string" },
+            "platform_labels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "network_policy": { "type": "boolean" },
+            "dns_namespace": { "type": "string" },
+            "egress": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["cidr"],
+                "properties": {
+                  "cidr": { "type": "string", "minLength": 1 },
+                  "ports": {
+                    "type": "array",
+                    "items": { "type": "integer", "minimum": 1, "maximum": 65535 }
+                  }
+                }
+              }
+            },
+            "workspace_limit": { "type": "string" },
+            "artifact_volume_limit": { "type": "string" },
+            "plugin_volume_limit": { "type": "string" },
+            "storage_class": { "type": "string" },
+            "resources": {
+              "type": "object",
+              "properties": {
+                "requests": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                },
+                "limits": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                }
+              }
+            },
+            "env": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "poll_interval": { "type": "string" },
+            "pod_labels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
+        "llm": {
+          "type": "object",
+          "properties": {
+            "base_url": { "type": "string" },
+            "api_key_env": { "type": "string" },
+            "model": { "type": "string" },
+            "allow_models": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "timeout": { "type": "string" },
+            "headers": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "max_body_bytes": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "artifacts": {
+          "type": "object",
+          "properties": {
+            "store": {
+              "type": "string",
+              "enum": ["local", "s3"]
+            },
+            "local": {
+              "type": "object",
+              "properties": {
+                "dir": { "type": "string" }
+              }
+            },
+            "s3": {
+              "type": "object",
+              "properties": {
+                "endpoint": { "type": "string" },
+                "region": { "type": "string" },
+                "bucket": { "type": "string" },
+                "access_key_env": { "type": "string" },
+                "secret_key_env": { "type": "string" },
+                "session_token_env": { "type": "string" },
+                "prefix": { "type": "string" },
+                "path_style": { "type": "boolean" }
+              }
+            },
+            "max_bytes": { "type": "integer", "minimum": 0 },
+            "index_retention": { "type": "string" }
+          }
+        },
+        "sources": {
+          "type": "object",
+          "properties": {
+            "state_path": { "type": "string" },
+            "max_artifact_bytes": { "type": "integer", "minimum": 0 },
+            "concurrency": { "type": "integer", "minimum": 0 },
+            "timeout": { "type": "string" },
+            "job_timeout": { "type": "string" }
+          }
+        },
+        "skills": {
+          "type": "object",
+          "properties": {
+            "dirs": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "sources": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "repo": { "type": "string" },
+                  "ref": { "type": "string" },
+                  "url": { "type": "string" },
+                  "sha256": { "type": "string" },
+                  "subdir": { "type": "string" },
+                  "strip_components": { "type": "integer", "minimum": 0 },
+                  "headers": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                  },
+                  "timeout": { "type": "string" }
+                }
+              }
+            },
+            "default": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "agents": {
+          "type": "object",
+          "properties": {
+            "dirs": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "allowed_images": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "queue": {
+          "type": "object",
+          "properties": {
+            "backend": {
+              "type": "string",
+              "enum": ["memory", "bbolt", "redis"]
+            },
+            "max_jobs": { "type": "integer", "minimum": 0 },
+            "max_attempts": { "type": "integer", "minimum": 0 },
+            "retry_base": { "type": "string" },
+            "visibility_timeout": { "type": "string" },
+            "dedupe_ttl": { "type": "string" },
+            "tombstone_ttl": { "type": "string" },
+            "poll_interval": { "type": "string" },
+            "bbolt": {
+              "type": "object",
+              "properties": {
+                "path": { "type": "string" }
+              }
+            },
+            "redis": {
+              "type": "object",
+              "properties": {
+                "url": { "type": "string" },
+                "username": { "type": "string" },
+                "password_env": { "type": "string" },
+                "key_prefix": { "type": "string" },
+                "cluster": { "type": "boolean" }
+              }
+            }
+          }
+        },
+        "journal": {
+          "type": "object",
+          "properties": {
+            "backend": {
+              "type": "string",
+              "enum": ["memory", "bbolt"]
+            },
+            "bbolt": {
+              "type": "object",
+              "properties": {
+                "path": { "type": "string" }
+              }
+            },
+            "max_entry_bytes": { "type": "integer", "minimum": 0 },
+            "max_session_bytes": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "plugins": {
+          "type": "object",
+          "properties": {
+            "namespace": { "type": "string" },
+            "reconcile_interval": { "type": "string" },
+            "prune": { "type": "boolean" },
+            "audit_path": { "type": "string" },
+            "max_inflight_calls": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "mcp": {
+          "type": "object",
+          "properties": {
+            "servers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "transport": {
+                    "type": "string",
+                    "enum": ["stdio", "http"]
+                  },
+                  "command": { "type": "string" },
+                  "args": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  },
+                  "env": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                  },
+                  "url": { "type": "string" },
+                  "headers": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                  },
+                  "opt_in": { "type": "boolean" },
+                  "init_timeout": { "type": "string" },
+                  "scope": {
+                    "type": "string",
+                    "pattern": "^(shared|agent:.+)?$"
+                  },
+                  "tools": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  },
+                  "idempotent_tools": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "triggers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "type"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "type": {
+                "type": "string",
+                "enum": ["generic", "github", "slack", "datadog"]
+              },
+              "secret_env": { "type": "string" },
+              "allow_unsigned": { "type": "boolean" },
+              "template": { "type": "string" },
+              "ttl": { "type": "string" },
+              "model": { "type": "string" },
+              "agent": { "type": "string" },
+              "skills": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "mcp_servers": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "rate_limit": {
+                "type": "object",
+                "properties": {
+                  "requests": { "type": "integer", "minimum": 0 },
+                  "interval": { "type": "string" },
+                  "burst": { "type": "integer", "minimum": 0 }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "skills": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "type": "object",
+          "description": "Skill Markdown files, keyed by file name.",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "type": "object",
+          "description": "Agent manifests, keyed by file name.",
+          "additionalProperties": { "type": "string" }
+        },
+        "bundlesConfigMap": {
+          "type": "string",
+          "description": "Existing ConfigMap mounted at /etc/mayfly-bundles. The chart never creates it."
+        }
+      }
+    },
+    "litellm": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "tag": {
+              "type": "string",
+              "pattern": "^v?[0-9]+\\.[0-9]+\\.[0-9]+([-.][0-9A-Za-z.-]+)?$",
+              "description": "A release version. Rolling tags such as main-stable are rejected."
+            },
+            "digest": {
+              "type": "string",
+              "description": "sha256 digest. Wins over tag when set."
+            }
+          }
+        },
+        "existingSecret": {
+          "type": "string",
+          "description": "Secret with the provider keys and the master key. Required when enabled."
+        },
+        "masterKeyEnv": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "serviceAccount": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "annotations": { "type": "object" }
+          }
+        },
+        "models": {
+          "type": "array",
+          "description": "LiteLLM model_list entries, passed through unchanged.",
+          "items": {
+            "type": "object",
+            "required": ["model_name", "litellm_params"],
+            "properties": {
+              "model_name": { "type": "string", "minLength": 1 },
+              "litellm_params": { "type": "object" }
+            }
+          }
+        },
+        "podSecurityContext": { "type": "object" },
+        "securityContext": { "type": "object" },
+        "resources": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "limits": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "shutdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The control plane stops within budgetSeconds of SIGTERM, which must be less than gracePeriodSeconds.",
+      "properties": {
+        "budgetSeconds": { "type": "integer", "minimum": 3 },
+        "gracePeriodSeconds": { "type": "integer", "minimum": 4 }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "size": { "type": "string", "minLength": 1 },
+        "storageClass": { "type": "string" },
+        "accessMode": {
+          "type": "string",
+          "enum": ["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany", "ReadWriteOncePod"]
+        }
+      }
+    },
+    "controlPlane": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resources": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "limits": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "podAnnotations": { "type": "object" },
+        "podLabels": { "type": "object" },
+        "extraEnv": { "type": "array" },
+        "sourcesSecret": {
+          "type": "string",
+          "description": "Secret whose keys become control-plane environment variables."
+        },
+        "tokensSecret": {
+          "type": "string",
+          "description": "Optional Secret whose keys are the secret_env variables of config.server.tokens."
+        },
+        "securityContext": { "type": "object" }
+      }
+    }
+  }
+}

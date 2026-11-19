@@ -6,7 +6,7 @@ The admin API at `/api/v1` and the webhook receivers at `/hooks/{name}` are the 
 
 `/internal/v1` is the session runtime protocol. It is versioned with the runtime image and is **outside** this API promise. The sections below that describe `/internal/v1` are notes for runtime authors, not a compatibility commitment.
 
-Admin endpoints require `Authorization: Bearer <MAYFLY_API_TOKEN>`. Internal endpoints require the session token. JSON bodies use `Content-Type: application/json`.
+Admin endpoints require a named API token: `Authorization: Bearer <token>`. Each operation in the spec lists the scope the token needs, and [security.md](security.md#api-authentication) maps every route to its scope. A missing, unknown, or expired token gets `401`; a token without the scope of the route gets `403`. Internal endpoints require the session token. JSON bodies use `Content-Type: application/json`.
 
 ## Errors
 
@@ -16,13 +16,13 @@ Every failed request to `/api/v1` or `/hooks/{name}` returns one envelope:
 {"error": {"code": "invalid_request", "message": "ttl must be a duration such as 30m"}}
 ```
 
-`code` is stable: match on it. `message` is for people: do not match on it. `details` holds optional, code-specific context, and it always carries `request_id`. The same value is in the `X-Request-ID` response header and in the request log line. See [observability.md](observability.md).
+`code` is stable: match on it. `message` is for people: do not match on it. `details` holds optional, code-specific context, and it always carries `request_id`. The same value is in the `X-Request-Id` response header and in the request log line. See [observability.md](observability.md).
 
 | Code | Status | Meaning |
 |---|---|---|
 | `invalid_request` | 400 | Bad JSON, a bad `limit` or `cursor`, an unknown agent, skill, or MCP server, a bad TTL, a bad tool turn or step, or an unverifiable webhook body |
-| `unauthorized` | 401 | Missing or wrong token, invalid webhook signature, invalid attach ticket |
-| `forbidden` | 403 | The session may not use the requested tool |
+| `unauthenticated` | 401 | Missing, unknown, or expired API token, invalid webhook signature, or invalid attach ticket |
+| `forbidden` | 403 | The token does not carry the scope of the route, or the session may not use the requested tool |
 | `not_found` | 404 | Unknown route, session, trigger, artifact, job, dead job, or schedule; a tool route for a non-built-in harness |
 | `method_not_allowed` | 405 | The route exists with another method; `Allow` names the method |
 | `conflict` | 409 | The session is closed, or a tool call key was reused with another tool or other arguments |
@@ -124,7 +124,8 @@ Force-stops the session, marks it failed, and keeps the record until `sessions.r
 
 ### `GET /api/v1/sessions/{id}/events?after=<seq>`
 
-Returns retained events with sequence greater than `after`.
+Returns retained events with sequence greater than `after`. The event object
+and every payload schema are documented in [events.md](events.md).
 
 ```json
 {"session_id":"abc123","events":[{"seq":4,"type":"assistant_message","text":"...","time":"..."}]}
@@ -176,7 +177,10 @@ Client messages:
 {"type":"user_message","text":"message text"}
 ```
 
-The actor name comes from the ticket. Multiple clients share the thread. The server sends ping frames every 30 seconds. Events are replayed from `after` (default 0); reconnect with `after=0` to rebuild the view.
+The actor name comes from the ticket. Multiple clients share the thread. The
+server sends ping frames every 30 seconds. Events are replayed from `after`
+(default 0); reconnect with `after=0` to rebuild the view. The event object and
+the compatibility rules are documented in [events.md](events.md).
 
 The message types are `WebSocketServerMessage` and `WebSocketClientMessage` in the spec.
 
@@ -197,6 +201,8 @@ Accepted work that has not run yet.
 ### `GET /api/v1/queue/jobs/{id}`
 
 One accepted job by id, including a completed job for `queue.tombstone_ttl`.
+The stored job is the versioned job envelope described in
+[queue-jobs.md](queue-jobs.md).
 
 ```json
 {"job":{"id":"d-...","trigger":"github","state":"done","attempts":0,"accepted_at":"...","finished_at":"...","session_id":"abc123","prompt":"..."}}
@@ -240,7 +246,7 @@ UI metadata: default and allowed models, agents with effective harness/model/ima
 
 ## Internal (session runtime only, outside the API promise)
 
-These endpoints accept the scoped session token, never the admin token. They keep the plain `{"error":"..."}` body and the shapes below for the runtime image of the same release. They are not covered by `api/openapi.yaml` and may change in any release.
+These endpoints accept the scoped session token, never an API token. They keep the plain `{"error":"..."}` body and the shapes below for the runtime image of the same release. They are not covered by `api/openapi.yaml` and may change in any release.
 
 | Endpoint | Purpose |
 |---|---|

@@ -650,13 +650,13 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		Type:  model.EventUserMessage,
 		Actor: "trigger",
 		Text:  prompt,
-		Data: map[string]any{
-			"kind":  opts.Trigger.Kind,
-			"name":  opts.Trigger.Name,
-			"event": opts.Trigger.Event,
+		Data: model.UserMessageData{
+			Kind:  opts.Trigger.Kind,
+			Name:  opts.Trigger.Name,
+			Event: opts.Trigger.Event,
 		},
 	})
-	m.appendEvent(inst, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session created.", Data: map[string]any{"status": string(model.StatusPending)}})
+	m.appendEvent(inst, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session created.", Data: model.StatusData{Status: model.StatusPending}})
 
 	startCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
@@ -691,7 +691,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		m.dropGrant(id)
 		m.persistInstance(inst)
 		m.hub.Append(id, model.Event{Type: model.EventError, Actor: "mayfly", Text: "Failed to start session: " + err.Error()})
-		m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session failed.", Data: map[string]any{"status": string(model.StatusFailed)}})
+		m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session failed.", Data: model.StatusData{Status: model.StatusFailed}})
 		m.notifyFinished(model.StatusFailed)
 		snapshot := m.copySession(inst)
 		return &snapshot, err
@@ -701,7 +701,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 	inst.handle = h
 	inst.sess.LastActivity = time.Now().UTC()
 	inst.mu.Unlock()
-	m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session container started.", Data: map[string]any{"status": string(model.StatusPending)}})
+	m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session container started.", Data: model.StatusData{Status: model.StatusPending}})
 
 	if h.Done != nil {
 		m.watchLocal(inst, h)
@@ -865,7 +865,7 @@ func (m *Manager) RuntimeConnected(id string) {
 	inst.sess.LastActivity = now
 	inst.mu.Unlock()
 	m.persistInstance(inst)
-	m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session running.", Data: map[string]any{"status": string(model.StatusRunning)}})
+	m.hub.Append(id, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session running.", Data: model.StatusData{Status: model.StatusRunning}})
 	m.logger.Info("session runtime connected", "session", id)
 }
 

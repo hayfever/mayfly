@@ -45,7 +45,7 @@ No API keys are needed: `llmstub` answers every model call. A full run takes abo
 | `TestControlPlaneRestartContinuesTurn` | Replacing `mayflyd` while the final model call is in flight adopts the pod, restores the journaled thread, finishes the turn, and does not repeat the tool call or the user message |
 | `TestSessionImagePullFailure` | A session whose image cannot be pulled fails with the reason instead of waiting for its TTL |
 | `TestDeleteSession` | `DELETE` stops a running session at once |
-| `TestControlPlaneAuth` | Probes are open; the admin API needs the admin token; the admin token is refused by the session-only LLM proxy |
+| `TestControlPlaneAuth` | Probes are open; the admin API needs an API token; an admin-scoped token is refused by the session-only LLM proxy |
 | `TestGenericWebhookSignatures` | The generic trigger accepts an HMAC signature or the shared token, and rejects unsigned, malformed, wrong-secret, and wrong-body requests without queueing anything |
 | `TestGitHubWebhook` | GitHub triggers accept only a signature (not the static token), dedupe by `X-GitHub-Delivery`, and carry the delivery to the session |
 | `TestSlackWebhook` | Slack signing, the URL verification challenge, rejection of requests older than 5 minutes, and a slash command that starts a session |

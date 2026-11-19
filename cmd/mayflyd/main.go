@@ -3,8 +3,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -75,14 +73,9 @@ func main() {
 		return
 	}
 
-	if cfg.AdminToken == "" {
-		buf := make([]byte, 24)
-		if _, err := rand.Read(buf); err != nil {
-			logger.Error("generate admin token", "error", err)
-			os.Exit(1)
-		}
-		cfg.AdminToken = hex.EncodeToString(buf)
-		logger.Warn("MAYFLY_API_TOKEN is not set; generated a session token for this process", "admin_token", cfg.AdminToken)
+	if len(cfg.APITokens()) == 0 {
+		logger.Error("no API token is configured: declare server.tokens or set the variable named by server.token_env")
+		os.Exit(2)
 	}
 
 	store, err := artifact.New(context.Background(), cfg.Artifacts)

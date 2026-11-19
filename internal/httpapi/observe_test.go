@@ -39,7 +39,7 @@ func TestRequestIDIsEchoedOrGenerated(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	generated := rec.Header().Get("X-Request-ID")
-	if len(generated) != 32 {
+	if len(generated) != 16 {
 		t.Fatalf("generated request id = %q", generated)
 	}
 
@@ -56,8 +56,27 @@ func TestRequestIDIsEchoedOrGenerated(t *testing.T) {
 	req.Header.Set("X-Request-ID", "bad id")
 	rec = httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
-	if got := rec.Header().Get("X-Request-ID"); got == "bad id" || len(got) != 32 {
+	if got := rec.Header().Get("X-Request-ID"); got == "bad id" || len(got) != 16 {
 		t.Fatalf("invalid request id was kept: %q", got)
+	}
+
+	// 64 characters pass; 65 are replaced, and a colon is not allowed.
+	accepted := strings.Repeat("a", 64)
+	req = httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Header.Set("X-Request-ID", accepted)
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if got := rec.Header().Get("X-Request-ID"); got != accepted {
+		t.Fatalf("64-character request id was replaced: %q", got)
+	}
+	for _, rejected := range []string{strings.Repeat("a", 65), "trace:42"} {
+		req = httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		req.Header.Set("X-Request-ID", rejected)
+		rec = httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+		if got := rec.Header().Get("X-Request-ID"); got == rejected || len(got) != 16 {
+			t.Fatalf("invalid request id %q was kept as %q", rejected, got)
+		}
 	}
 }
 
@@ -105,7 +124,7 @@ func TestRequestsAreCountedByRouteTemplate(t *testing.T) {
 	}
 }
 
-func TestMetricsEndpointRequiresTheAdminTokenByDefault(t *testing.T) {
+func TestMetricsEndpointRequiresTheAdminScopeByDefault(t *testing.T) {
 	cfg := config.Default()
 	cfg.AdminToken = "admin-token"
 	s, _ := metricsServer(t, cfg, testLogger())
@@ -115,9 +134,37 @@ func TestMetricsEndpointRequiresTheAdminTokenByDefault(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status = %d", rec.Code)
 	}
+	var envelope errorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil || envelope.Error.Code != codeUnauthenticated {
+		t.Fatalf("unauthenticated body = %s", rec.Body.String())
+	}
 	body := scrape(t, s.Handler(), "admin-token")
 	if !strings.Contains(body, "mayfly_build_info") {
 		t.Fatalf("metrics body has no build info:\n%s", body)
+	}
+}
+
+func TestMetricsEndpointRejectsATokenWithoutTheAdminScope(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.Tokens = []config.APITokenConfig{
+		{Name: "reader", Scopes: []string{config.ScopeSessionsRead}, Secret: "reader-secret"},
+		{Name: "root", Scopes: []string{config.ScopeAdmin}, Secret: "root-secret"},
+	}
+	s, _ := metricsServer(t, cfg, testLogger())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer reader-secret")
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("token without admin status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var envelope errorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil || envelope.Error.Code != codeForbidden {
+		t.Fatalf("forbidden body = %s", rec.Body.String())
+	}
+	if body := scrape(t, s.Handler(), "root-secret"); !strings.Contains(body, "mayfly_build_info") {
+		t.Fatalf("admin token was refused:\n%s", body)
 	}
 }
 

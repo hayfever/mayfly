@@ -13,7 +13,7 @@ import (
 // api/openapi.yaml: add a code here and in the spec together.
 const (
 	codeInvalidRequest   = "invalid_request"
-	codeUnauthorized     = "unauthorized"
+	codeUnauthenticated  = "unauthenticated"
 	codeForbidden        = "forbidden"
 	codeNotFound         = "not_found"
 	codeMethodNotAllowed = "method_not_allowed"
@@ -90,7 +90,7 @@ func (s *Server) writeSessionError(w http.ResponseWriter, err error) {
 	case errors.Is(err, session.ErrClosed):
 		writeError(w, http.StatusConflict, codeConflict, err.Error())
 	case errors.Is(err, session.ErrUnauthorized):
-		writeError(w, http.StatusUnauthorized, codeUnauthorized, err.Error())
+		writeError(w, http.StatusUnauthorized, codeUnauthenticated, err.Error())
 	case errors.Is(err, session.ErrCapacity):
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, codeRateLimited, err.Error())

@@ -5,6 +5,7 @@ metadata:
   namespace: mayfly
 data:
   config.yaml: |
+    version: 1
     server:
       addr: ":8080"
       public_url: "http://localhost:8080"

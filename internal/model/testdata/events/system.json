@@ -1,0 +1,22 @@
+{
+  "seq": 7,
+  "session_id": "abc123",
+  "step_key": "1/2/result",
+  "time": "2026-01-02T03:04:05Z",
+  "type": "system",
+  "actor": "mayfly",
+  "text": "text",
+  "data": {
+    "model": "test-model",
+    "skills": [
+      "review"
+    ],
+    "mcp_servers": [
+      "echo"
+    ],
+    "plugins": [
+      "inline"
+    ],
+    "tool_count": 3
+  }
+}

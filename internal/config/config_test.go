@@ -318,6 +318,56 @@ func TestLoadAcceptsEmptyFile(t *testing.T) {
 	}
 }
 
+// loadableConfig is the shortest document that passes Validate: the local
+// runtime needs a binary, and every backend needs an LLM base URL.
+const loadableConfig = "runtime: {backend: local, agent_binary: ./mayfly-agent}\n" +
+	"llm: {base_url: \"http://localhost:9099/v1\", model: stub, allow_models: [stub]}\n"
+
+func TestLoadAcceptsCurrentVersion(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"+loadableConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Version != CurrentVersion {
+		t.Fatalf("version = %d, want %d", cfg.Version, CurrentVersion)
+	}
+}
+
+func TestLoadAssumesVersionWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(loadableConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Version != CurrentVersion {
+		t.Fatalf("version = %d, want %d", cfg.Version, CurrentVersion)
+	}
+}
+
+func TestLoadRejectsUnknownVersion(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected an error for an unsupported version")
+	}
+	if !strings.Contains(err.Error(), "version 2") || !strings.Contains(err.Error(), "version 1") {
+		t.Fatalf("error must name the rejected and the supported version: %v", err)
+	}
+}
+
 func TestLoadRejectsMultipleDocuments(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -340,10 +390,14 @@ func TestShippedConfigsHaveNoUnknownFields(t *testing.T) {
 			t.Fatal(err)
 		}
 		cfg := Default()
+		cfg.Version = 0
 		decoder := yaml.NewDecoder(bytes.NewReader(raw))
 		decoder.KnownFields(true)
 		if err := decoder.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
 			t.Fatalf("%s: %v", path, err)
+		}
+		if cfg.Version != CurrentVersion {
+			t.Fatalf("%s: version = %d, want %d", path, cfg.Version, CurrentVersion)
 		}
 	}
 
@@ -367,8 +421,13 @@ func TestShippedConfigsHaveNoUnknownFields(t *testing.T) {
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(sub))
 	decoder.KnownFields(true)
-	if err := decoder.Decode(Default()); err != nil && !errors.Is(err, io.EOF) {
+	decoded := Default()
+	decoded.Version = 0
+	if err := decoder.Decode(decoded); err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("%s config subtree: %v", path, err)
+	}
+	if decoded.Version != CurrentVersion {
+		t.Fatalf("%s config subtree: version = %d, want %d", path, decoded.Version, CurrentVersion)
 	}
 }
 

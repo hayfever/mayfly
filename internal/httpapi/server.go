@@ -5,7 +5,6 @@ package httpapi
 import (
 	"bufio"
 	"crypto/rand"
-	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -89,6 +88,7 @@ type Server struct {
 	broker     *broker.Broker
 	gateway    *gateway.Gateway
 	logger     *slog.Logger
+	tokens     []config.APITokenConfig
 	triggers   map[string]config.TriggerConfig
 	limiters   map[string]*ratelimit.Limiter
 	mcpServers map[string]config.MCPServerConfig
@@ -121,6 +121,7 @@ func New(cfg *config.Config, mgr *session.Manager, q queue.Store, logger *slog.L
 		mgr:        mgr,
 		queue:      q,
 		logger:     logger,
+		tokens:     cfg.APITokens(),
 		triggers:   triggersByName,
 		limiters:   limiters,
 		mcpServers: mcpServers,
@@ -181,11 +182,15 @@ func WithReadyCheck(check func() error) Option {
 	}
 }
 
-// apiRoute is one registered admin API route. The table drives routing and the
-// spec drift test, so a route cannot exist without a matching OpenAPI
-// operation.
+// apiRoute is one registered admin API route. The table drives routing, token
+// scopes, and the spec drift test, so a route cannot exist without a matching
+// OpenAPI operation and an explicit scope.
 type apiRoute struct {
 	pattern string
+	// scope is the API token scope the route requires. An empty scope means
+	// the handler authenticates the request itself; only the attach WebSocket
+	// does that, with a one-time ticket.
+	scope   string
 	handler http.HandlerFunc
 }
 
@@ -193,24 +198,24 @@ type apiRoute struct {
 // api/openapi.yaml; internal_test.go fails when the two disagree.
 func (s *Server) apiRoutes() []apiRoute {
 	return []apiRoute{
-		{"POST /api/v1/sessions", s.admin(s.createSession)},
-		{"GET /api/v1/sessions", s.admin(s.listSessions)},
-		{"GET /api/v1/sessions/{id}", s.admin(s.getSession)},
-		{"DELETE /api/v1/sessions/{id}", s.admin(s.deleteSession)},
-		{"GET /api/v1/sessions/{id}/events", s.admin(s.sessionEvents)},
-		{"POST /api/v1/sessions/{id}/messages", s.admin(s.postMessage)},
-		{"POST /api/v1/sessions/{id}/close", s.admin(s.closeSession)},
-		{"POST /api/v1/sessions/{id}/attach-ticket", s.admin(s.createTicket)},
-		{"GET /api/v1/sessions/{id}/artifact", s.admin(s.downloadArtifact)},
-		{"GET /api/v1/sessions/{id}/ws", s.attachWebSocket},
-		{"GET /api/v1/config", s.admin(s.publicConfig)},
-		{"GET /api/v1/schedules", s.admin(s.listSchedules)},
-		{"POST /api/v1/schedules/{name}/run", s.admin(s.runSchedule)},
-		{"GET /api/v1/queue", s.admin(s.queueStats)},
-		{"GET /api/v1/queue/jobs/{id}", s.admin(s.queueJob)},
-		{"GET /api/v1/queue/dead", s.admin(s.queueDead)},
-		{"POST /api/v1/queue/dead/{id}/retry", s.admin(s.queueRetryDead)},
-		{"DELETE /api/v1/queue/dead/{id}", s.admin(s.queueDeleteDead)},
+		{"POST /api/v1/sessions", config.ScopeSessionsWrite, s.createSession},
+		{"GET /api/v1/sessions", config.ScopeSessionsRead, s.listSessions},
+		{"GET /api/v1/sessions/{id}", config.ScopeSessionsRead, s.getSession},
+		{"DELETE /api/v1/sessions/{id}", config.ScopeSessionsWrite, s.deleteSession},
+		{"GET /api/v1/sessions/{id}/events", config.ScopeSessionsRead, s.sessionEvents},
+		{"POST /api/v1/sessions/{id}/messages", config.ScopeSessionsWrite, s.postMessage},
+		{"POST /api/v1/sessions/{id}/close", config.ScopeSessionsWrite, s.closeSession},
+		{"POST /api/v1/sessions/{id}/attach-ticket", config.ScopeSessionsWrite, s.createTicket},
+		{"GET /api/v1/sessions/{id}/artifact", config.ScopeSessionsRead, s.downloadArtifact},
+		{"GET /api/v1/sessions/{id}/ws", "", s.attachWebSocket},
+		{"GET /api/v1/config", config.ScopeSessionsRead, s.publicConfig},
+		{"GET /api/v1/schedules", config.ScopeSchedulesRead, s.listSchedules},
+		{"POST /api/v1/schedules/{name}/run", config.ScopeSchedulesWrite, s.runSchedule},
+		{"GET /api/v1/queue", config.ScopeQueueRead, s.queueStats},
+		{"GET /api/v1/queue/jobs/{id}", config.ScopeQueueRead, s.queueJob},
+		{"GET /api/v1/queue/dead", config.ScopeQueueRead, s.queueDead},
+		{"POST /api/v1/queue/dead/{id}/retry", config.ScopeQueueWrite, s.queueRetryDead},
+		{"DELETE /api/v1/queue/dead/{id}", config.ScopeQueueWrite, s.queueDeleteDead},
 	}
 }
 
@@ -230,7 +235,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /hooks/{name}", s.receiveWebhook)
 
 	for _, route := range s.apiRoutes() {
-		mux.HandleFunc(route.pattern, route.handler)
+		mux.HandleFunc(route.pattern, s.authorizedRoute(route))
 	}
 
 	mux.HandleFunc("POST /internal/v1/sessions/{id}/events", s.internalEvents)
@@ -253,8 +258,9 @@ func (s *Server) Handler() http.Handler {
 	return s.commonHeaders(s.observeRequests(s.recoverPanics(shapeAPIErrors(mux))))
 }
 
-// metricsHandler serves the registry and applies the admin token when the
-// configuration asks for it. It returns nil when no registry is wired.
+// metricsHandler serves the registry. When server.metrics.require_auth asks
+// for it, the caller must present a token with the admin scope; it returns nil
+// when no registry is wired.
 func (s *Server) metricsHandler() http.Handler {
 	if s.metrics == nil {
 		return nil
@@ -264,15 +270,22 @@ func (s *Server) metricsHandler() http.Handler {
 		return handler
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.admin(func(w http.ResponseWriter, r *http.Request) {
-			handler.ServeHTTP(w, r)
-		})(w, r)
+		token, ok := s.authenticate(r)
+		if !ok {
+			writeError(w, http.StatusUnauthorized, codeUnauthenticated, "missing or invalid bearer token")
+			return
+		}
+		if !token.HasScope(config.ScopeAdmin) {
+			writeError(w, http.StatusForbidden, codeForbidden, "token lacks the required scope: "+config.ScopeAdmin)
+			return
+		}
+		handler.ServeHTTP(w, r)
 	})
 }
 
 // MetricsHandler returns the metrics endpoint for a listener of its own. It
-// returns nil when no registry is wired, and it applies the admin token when
-// server.metrics.require_auth asks for it.
+// returns nil when no registry is wired, and it requires a token with the
+// admin scope when server.metrics.require_auth asks for it.
 func (s *Server) MetricsHandler() http.Handler { return s.metricsHandler() }
 
 // ready reports whether this replica has finished starting. It checks local
@@ -399,22 +412,6 @@ func (w *errorShapedWriter) ReadFrom(r io.Reader) (int64, error) {
 		return readerFrom.ReadFrom(r)
 	}
 	return io.Copy(struct{ io.Writer }{w}, r)
-}
-
-func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		expected := s.cfg.AdminToken
-		if expected == "" {
-			writeError(w, http.StatusUnauthorized, codeUnauthorized, "admin token is not configured")
-			return
-		}
-		got := bearerToken(r)
-		if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
-			writeError(w, http.StatusUnauthorized, codeUnauthorized, "unauthorized")
-			return
-		}
-		next(w, r)
-	}
 }
 
 func (s *Server) internalSession(r *http.Request) (string, bool) {

@@ -10,9 +10,9 @@ The endpoint serves the Prometheus text format. It is enabled by default.
 |---|---|---|
 | `server.metrics.enabled` | `true` | Serve the endpoint |
 | `server.metrics.address` | empty | Serve metrics on a listener of its own, such as `:9090`. Empty serves `/metrics` on the main HTTP port |
-| `server.metrics.require_auth` | `true` on the main port, `false` on a separate address | Require the admin token as `Authorization: Bearer <token>` |
+| `server.metrics.require_auth` | `true` on the main port, `false` on a separate address | Require a token with the `admin` scope as `Authorization: Bearer <token>` |
 
-On the main port, `/metrics` is part of the public API listener, so it requires the admin token by default. A separate address is meant for an in-cluster scrape and needs no token unless you set `require_auth: true`. A separate address does not serve any other path.
+On the main port, `/metrics` is part of the public API listener, so it requires a token with the `admin` scope by default. A missing or unknown token is `401`, and a valid token without `admin` is `403`. A separate address is meant for an in-cluster scrape and needs no token unless you set `require_auth: true`. A separate address does not serve any other path.
 
 `server.metrics.address` must differ from `server.addr`. The control plane rejects a configuration where the two match.
 
@@ -49,7 +49,7 @@ Every request writes one line at info level with these fields:
 - `duration_ms`
 - `bytes`
 
-The control plane accepts an incoming `X-Request-ID` header when it holds 1 to 128 characters from `A-Z a-z 0-9 . _ - :`. Otherwise it generates one. It returns the id in the `X-Request-ID` response header and in `error.details.request_id` for a failed `/api/v1` or `/hooks` request.
+The control plane accepts an incoming `X-Request-Id` header when it holds 1 to 64 characters from `A-Z a-z 0-9 . _ -`. Otherwise it generates one. It returns the id in the `X-Request-Id` response header and in `error.details.request_id` for a failed `/api/v1` or `/hooks` request.
 
 ```json
 {"time":"2026-01-02T03:04:05Z","level":"INFO","msg":"http request","request_id":"7f3c9a1b2d4e5f60","method":"POST","route":"/api/v1/sessions","status":201,"duration_ms":12,"bytes":348}
@@ -69,10 +69,10 @@ The control plane accepts an incoming `X-Request-ID` header when it holds 1 to 1
 | `metrics.serviceMonitor.scrapeTimeout` | `10s` | Scrape timeout |
 | `metrics.serviceMonitor.labels` | empty | Extra labels, such as the selector your Prometheus instance uses |
 | `metrics.serviceMonitor.namespace` | empty | Create the `ServiceMonitor` in this namespace and select the Service across namespaces |
-| `metrics.serviceMonitor.bearerTokenSecret.name` | empty | Secret that holds the admin token for an authenticated scrape |
+| `metrics.serviceMonitor.bearerTokenSecret.name` | empty | Secret that holds a token with the `admin` scope for an authenticated scrape |
 | `metrics.serviceMonitor.bearerTokenSecret.key` | `token` | Key in that Secret |
 
-A `ServiceMonitor` that scrapes the main port needs the admin token. Set `bearerTokenSecret`, or serve metrics on `metrics.address` with `metrics.requireAuth: false` and let an in-cluster scrape reach that port. The chart stops the render with an error when neither is set.
+A `ServiceMonitor` that scrapes the main port needs a token with the `admin` scope. Set `bearerTokenSecret`, or serve metrics on `metrics.address` with `metrics.requireAuth: false` and let an in-cluster scrape reach that port. The chart stops the render with an error when neither is set.
 
 ```bash
 helm upgrade --install mayfly deploy/helm/mayfly \

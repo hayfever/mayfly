@@ -1,6 +1,6 @@
 {{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled }}
 {{- if and (not .Values.metrics.address) (ne .Values.metrics.requireAuth false) (not .Values.metrics.serviceMonitor.bearerTokenSecret.name) }}
-{{- fail "metrics.serviceMonitor needs a bearer token Secret: set metrics.serviceMonitor.bearerTokenSecret, or set metrics.address with metrics.requireAuth: false" }}
+{{- fail "metrics.serviceMonitor needs a bearer token with the admin scope: set metrics.serviceMonitor.bearerTokenSecret, or set metrics.address with metrics.requireAuth: false" }}
 {{- end }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor

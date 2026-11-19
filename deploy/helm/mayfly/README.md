@@ -43,6 +43,28 @@ kubectl -n mayfly port-forward svc/mayfly 8080:8080
 
 Set `config.server.public_url=http://localhost:8080` when using port-forward. Ingress and TLS must use the external URL.
 
+## Named API tokens
+
+Set `config.server.tokens` to replace the single token from `MAYFLY_API_TOKEN` with scoped tokens. Put each `secret_env` variable in one Secret, and name that Secret in `controlPlane.tokensSecret`:
+
+```bash
+kubectl -n mayfly create secret generic mayfly-tokens \
+  --from-literal=MAYFLY_CI_TOKEN="$(openssl rand -hex 24)"
+```
+
+```yaml
+config:
+  server:
+    tokens:
+      - name: ci
+        scopes: [sessions:read, sessions:write]
+        secret_env: MAYFLY_CI_TOKEN
+controlPlane:
+  tokensSecret: mayfly-tokens
+```
+
+The chart passes that Secret to the control plane as environment variables. A missing variable stops startup. The token name appears in the audit log. See [security.md](../../docs/security.md#api-authentication) for the scope of each route.
+
 ## Agents and skills
 
 Inline files:
@@ -108,6 +130,7 @@ For Bedrock on EKS, annotate `litellm.serviceAccount.annotations` with your IRSA
 | `imagePullSecrets` | empty | Secrets for control-plane, LiteLLM, and session images |
 | `existingSecret` | empty | Secret with control-plane env |
 | `secret.create` | false | Create the Secret from `secret.literals` |
+| `config.version` | `1` | Config file format version. `mayflyd` reads version 1 |
 | `config.server.public_url` | `http://localhost:8080` | External URL |
 | `config.llm.base_url` | empty | OpenAI by default; LiteLLM URL when enabled |
 | `config.agents.allowed_images` | empty | Image allowlist for manifests |
@@ -121,5 +144,8 @@ For Bedrock on EKS, annotate `litellm.serviceAccount.annotations` with your IRSA
 | `ingress.enabled` | false | Create an Ingress |
 | `controlPlane.resources` | small | Control-plane resources |
 | `litellm.enabled` | false | Deploy LiteLLM |
+| `litellm.image.tag` | `v1.110.0` | LiteLLM release tag. The chart rejects a rolling tag such as `main-stable` |
 
 The control plane runs one replica. Session history is in memory; accepted webhook work, the turn journal, and artifacts are durable with `bbolt` plus persistence, or with `redis` for the queue. See [docs/deployment.md](../../../docs/deployment.md).
+
+`values.schema.json` validates every value. `helm install` and `helm upgrade` reject a value that is not in the schema, an unknown value, and a value outside its allowed set. There is no replica count to set: the chart pins one replica, because the control plane keeps its state on one `ReadWriteOnce` volume.

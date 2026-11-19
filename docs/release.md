@@ -7,6 +7,8 @@
 - Images are published as `ghcr.io/<owner>/mayflyd:<version>` and `ghcr.io/<owner>/mayfly-agent:<version>`.
 - The chart is published to `oci://ghcr.io/<owner>/charts/mayfly`.
 - 0.x minor releases may contain breaking changes. Patch releases should not.
+- From 1.0.0, a removal waits for a major version. See [deprecation.md](deprecation.md).
+- Upgrade, backup, and recovery steps are in [runbook.md](runbook.md).
 
 ## API compatibility
 
@@ -21,22 +23,69 @@ hack/api-diff.sh v0.2.0     # a tag, branch, or commit
 
 If the base ref has no `api/openapi.yaml`, the script prints a notice and exits 0. That is the case for a tag that predates the spec.
 
+## Supply chain
+
+CI runs `govulncheck ./...` in the `vulncheck` job. The job fails when the module graph reaches a known vulnerability in our code paths. Fix it by bumping the dependency in `go.mod`. The scan runs with the latest vulnerability database, so a new advisory can fail a pull request that changes nothing.
+
+The release workflow builds each image, scans it, and signs it in that order:
+
+1. Docker Buildx pushes the multi-arch image and reports the manifest digest.
+2. `trivy image` scans that digest with `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`. A HIGH or CRITICAL vulnerability that has a fixed version fails the job. A finding without a fix is reported and does not block.
+3. `cosign sign` signs the digest with the workflow's GitHub OIDC identity. No key and no stored secret is involved.
+4. The chart job waits for both images, pushes the chart to GHCR, and signs it with the same identity.
+
+The signature comes after the scan, so an image that fails the scan stays unsigned. A tag that does not verify is not a release artifact.
+
+### Verify a published release
+
+```bash
+owner=<owner>
+version=0.2.0
+identity="https://github.com/${owner}/mayfly/.github/workflows/release.yml@refs/tags/v${version}"
+
+cosign verify \
+  --certificate-identity "$identity" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/${owner}/mayflyd:${version}
+
+cosign verify \
+  --certificate-identity "$identity" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/${owner}/mayfly-agent:${version}
+
+cosign verify \
+  --certificate-identity "$identity" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/${owner}/charts/mayfly:${version}
+```
+
+Each command must print the workflow identity and the tag. The OIDC issuer is the only trust anchor; there is no public key to fetch. The images also carry BuildKit SBOM and provenance attestations. Check the provenance with the same identity flags and `cosign verify-attestation --type slsaprovenance`.
+
 ## Pre-release checklist
 
 1. Update `CHANGELOG.md` and the chart `version` and `appVersion` if they differ from the tag.
 2. Run the full test path:
 
 ```bash
-gofmt -l cmd internal test
+gofmt -l cmd internal test e2e
 go vet ./...
+go vet -tags e2e ./e2e
 go test ./...
+govulncheck ./...
 helm lint deploy/helm/mayfly --set existingSecret=mayfly-secrets
 helm template mayfly deploy/helm/mayfly -n mayfly --set existingSecret=mayfly-secrets >/dev/null
+helm lint deploy/helm/mayfly -f e2e/values.yaml
 goreleaser check
 actionlint .github/workflows/*.yml
 hack/api-diff.sh
 make e2e
 E2E_QUEUE=redis make e2e
+```
+
+The `vulncheck` job installs govulncheck v1.10.0. Install the same version locally for the same result:
+
+```bash
+go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
 ```
 
 3. Build both images locally. Check that `mayfly version`, `mayflyd --version`, and `mayfly-agent --version` show the release version, commit, and date.
@@ -54,7 +103,8 @@ The release workflow runs on `v*` tags:
 
 - GoReleaser builds CLI archives, checksums, and the GitHub release.
 - Docker Buildx publishes multi-arch control-plane and agent images with SBOM and provenance.
-- Helm packages the chart, pushes it to GHCR OCI, and attaches it to the release.
+- Trivy scans each image digest and fails the job on a HIGH or CRITICAL vulnerability that has a fix.
+- Cosign signs each image digest with the workflow identity, then the chart job pushes and signs the chart.
 
 ## Release candidates
 
@@ -68,6 +118,8 @@ git push origin v0.1.0-rc.1
 The same workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`), images are tagged `0.1.0-rc.1` without `latest` or `0.1`, and the chart is pushed as `0.1.0-rc.1`. Install it with `--version 0.1.0-rc.1`. When the candidate passes, tag `v0.1.0` on the same commit.
 
 ## Post-release verification
+
+Run the commands in [Verify a published release](#verify-a-published-release) first. All three must print the workflow identity and the tag.
 
 ```bash
 docker pull ghcr.io/<owner>/mayflyd:0.1.0

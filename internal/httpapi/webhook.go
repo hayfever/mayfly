@@ -30,7 +30,7 @@ func (s *Server) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, triggers.ErrUnauthorized):
-			writeError(w, http.StatusUnauthorized, codeUnauthorized, "webhook verification failed")
+			writeError(w, http.StatusUnauthorized, codeUnauthenticated, "webhook verification failed")
 		case errors.Is(err, triggers.ErrBadRequest):
 			writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
 		default:
@@ -77,7 +77,7 @@ func (s *Server) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, codeUnavailable, "queue is unavailable")
 		return
 	}
-	s.logger.Info("webhook accepted", "trigger", name, "job", job.ID, "delivery", job.Delivery)
+	s.logger.Info("webhook accepted", "trigger", name, "job", job.ID, "delivery", job.IdempotencyKey)
 	if cfg.Type == "slack" {
 		// Slack wants an answer within three seconds; the link is not known yet.
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -94,7 +94,7 @@ func writeAccepted(w http.ResponseWriter, job queue.Job, duplicate bool) {
 		"accepted":  true,
 		"duplicate": duplicate,
 		"job_id":    job.ID,
-		"delivery":  job.Delivery,
+		"delivery":  job.IdempotencyKey,
 		"status":    "queued",
 	})
 }

@@ -4,6 +4,14 @@
 
 Complete example: [examples/config.local.yaml](../examples/config.local.yaml). Kubernetes example: [deploy/k8s/base/configmap.yaml](../deploy/k8s/base/configmap.yaml).
 
+## version
+
+| Key | Default | Meaning |
+|---|---|---|
+| `version` | `1` | Config file format version. This build reads version 1 |
+
+Set `version: 1` in every file. A file without the key is read as version 1, and `mayflyd` logs a warning at startup. Any other value fails the load with an error that names the rejected version and the supported version, and the process exits with code 2.
+
 ## server
 
 | Key | Default | Meaning |
@@ -11,13 +19,18 @@ Complete example: [examples/config.local.yaml](../examples/config.local.yaml). K
 | `addr` | `:8080` | HTTP listen address |
 | `public_url` | `http://localhost:8080` | URL used in session links and WebSocket URLs |
 | `internal_url` | `public_url` | URL that session pods use to reach the control plane; use a cluster Service URL in Kubernetes |
-| `token_env` | `MAYFLY_API_TOKEN` | Environment variable holding the admin token. If empty, a random token is generated and logged at startup |
+| `token_env` | `MAYFLY_API_TOKEN` | Environment variable holding the single admin token. Used only when `tokens` is empty. If no token resolves, `mayflyd` exits with code 2 |
+| `tokens` | `[]` | Named API tokens with explicit scopes. A non-empty list replaces `token_env`. See [security.md](security.md#api-authentication) |
+| `tokens[].name` | — | Token name. Unique. The name appears in the audit log, never the secret |
+| `tokens[].scopes` | — | At least one of `admin`, `sessions:read`, `sessions:write`, `queue:read`, `queue:write`, `schedules:read`, `schedules:write`. `admin` grants every scope |
+| `tokens[].secret_env` | — | Environment variable that holds the token secret. Required and unique per token. A missing variable stops startup |
+| `tokens[].expires_at` | — | Optional RFC 3339 time. A token at or past this time is refused with `401` |
 | `attach_ticket_ttl` | `60s` | Lifetime of one-time WebSocket attach tickets |
 | `max_body_bytes` | `4194304` | Maximum JSON body for session creation |
 | `shutdown_budget` | `25s` | Whole stop sequence after SIGTERM: HTTP drain, queue worker drain, then session manager shutdown. The stages get 20, 40, and 40 percent of the budget in that order, each on its own deadline. Keep the budget below the pod's `terminationGracePeriodSeconds`; the chart sets both. Minimum `3s` |
 | `metrics.enabled` | `true` | Serve the Prometheus endpoint. See [observability.md](observability.md) for every metric |
 | `metrics.address` | empty | Serve `/metrics` on a listener of its own, such as `:9090`. Empty serves it on `addr`. Must differ from `addr` |
-| `metrics.require_auth` | `true` on `addr`, `false` on a separate address | Require the admin token for `/metrics` |
+| `metrics.require_auth` | `true` on `addr`, `false` on a separate address | Require a token with the `admin` scope for `/metrics` |
 
 ## sessions
 
@@ -179,6 +192,8 @@ The journal also rejects a step number of `1 + max_steps × 129` or more within 
 ## Persisted formats
 
 Every store the control plane writes carries a format version. The journal, the schedule watermark, the queue, and the session record store each write `format_version: 1` into their own meta bucket or key. A stored source run carries `version: 1` in its JSON.
+
+A queue job is also a versioned JSON envelope. The store format and the job envelope are versioned separately, and the envelope gains optional fields without a new version. See [queue-jobs.md](queue-jobs.md).
 
 On open, a store with no stamp is read as version 1: v0.1.0 wrote the version 1 layout without recording it, so its data loads unchanged. A store that reports a newer version stops the control plane with an error that names the store and both versions. Upgrade `mayflyd` instead of opening it. `1.x` adds a migration case per store when a layout changes.
 
@@ -361,9 +376,10 @@ Signature behavior:
 
 | Variable | Used by | Meaning |
 |---|---|---|
-| `MAYFLY_API_TOKEN` | control plane | Admin bearer token |
+| `MAYFLY_API_TOKEN` | control plane | Default `server.token_env`: one admin-scoped token named `default` |
 | `MAYFLY_CONFIG` | all binaries | Default config path |
 | `MAYFLY_LOG_LEVEL` | control plane, runtime | `debug`, `info`, `warn`, `error` |
+| `MAYFLY_TOKEN` | CLI | Deprecated alias for `MAYFLY_API_TOKEN`. The CLI prints one warning when it uses the alias |
 | `MAYFLY_SESSION_TOKEN` | runtime | Injected per session; do not set manually |
 | `KUBECONFIG` | control plane | Used when not running in-cluster |
 

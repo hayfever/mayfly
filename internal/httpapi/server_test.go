@@ -650,7 +650,7 @@ func TestErrorEnvelope(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("missing token status = %d", rec.Code)
 	}
-	if body := decodeEnvelope(t, rec); body.Code != codeUnauthorized {
+	if body := decodeEnvelope(t, rec); body.Code != codeUnauthenticated {
 		t.Fatalf("missing token code = %q", body.Code)
 	}
 
@@ -693,7 +693,7 @@ func TestSessionErrorMapping(t *testing.T) {
 	}{
 		{fmt.Errorf("lookup: %w", session.ErrNotFound), http.StatusNotFound, codeNotFound, false},
 		{fmt.Errorf("post: %w", session.ErrClosed), http.StatusConflict, codeConflict, false},
-		{fmt.Errorf("auth: %w", session.ErrUnauthorized), http.StatusUnauthorized, codeUnauthorized, false},
+		{fmt.Errorf("auth: %w", session.ErrUnauthorized), http.StatusUnauthorized, codeUnauthenticated, false},
 		{session.ErrCapacity, http.StatusTooManyRequests, codeRateLimited, true},
 		{session.ErrEmptyMessage, http.StatusBadRequest, codeInvalidRequest, false},
 		{fmt.Errorf("%w: 40000 bytes (limit 32768)", session.ErrMessageTooLong), http.StatusBadRequest, codeInvalidRequest, false},

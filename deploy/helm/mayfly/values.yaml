@@ -14,7 +14,6 @@ agentImage:
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
-replicaCount: 1
 logLevel: info
 
 serviceAccount:
@@ -34,8 +33,8 @@ service:
   annotations: {}
 
 # Prometheus metrics. The endpoint is enabled on the main HTTP port by default
-# and needs the admin token there. Set metrics.address to serve it on a
-# listener of its own instead, which has no auth unless metrics.requireAuth.
+# and needs a token with the admin scope there. Set metrics.address to serve it
+# on a listener of its own instead, which has no auth unless metrics.requireAuth.
 metrics:
   enabled: true
   # Example: ":9090". Must end in ":<metrics.port>".
@@ -79,10 +78,16 @@ secret:
 
 # Mayfly configuration. The chart fills runtime.image, service accounts,
 # platform labels, internal URL, and LiteLLM defaults when empty.
+# The version key selects the config file format; mayflyd reads version 1.
 config:
+  version: 1
   server:
     public_url: "http://localhost:8080"
     token_env: MAYFLY_API_TOKEN
+    # Named API tokens with explicit scopes. A non-empty list replaces
+    # token_env. Each token reads its secret from the variable named by
+    # secret_env. Put those variables in controlPlane.tokensSecret.
+    tokens: []
     attach_ticket_ttl: 60s
     max_body_bytes: 4194304
   sessions:
@@ -189,7 +194,9 @@ litellm:
   enabled: false
   image:
     repository: ghcr.io/berriai/litellm
-    tag: main-stable
+    # A release tag, not a rolling tag. LiteLLM deprecates main-stable and
+    # publishes vX.Y.Z tags that it never overwrites. Bump this deliberately.
+    tag: v1.110.0
     digest: ""
   existingSecret: litellm-secrets
   masterKeyEnv: LITELLM_MASTER_KEY
@@ -252,6 +259,9 @@ controlPlane:
   # Optional Secret whose keys become control-plane environment variables.
   # Source connections read provider credentials from here.
   sourcesSecret: ""
+  # Optional Secret that holds the secret variables of config.server.tokens.
+  # Its keys become control-plane environment variables.
+  tokensSecret: ""
   securityContext:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
