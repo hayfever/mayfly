@@ -30,7 +30,7 @@ func (s *Server) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, triggers.ErrUnauthorized):
-			writeError(w, http.StatusUnauthorized, codeUnauthorized, "webhook verification failed")
+			writeError(w, http.StatusUnauthorized, codeUnauthenticated, "webhook verification failed")
 		case errors.Is(err, triggers.ErrBadRequest):
 			writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
 		default:

@@ -6,7 +6,7 @@ The admin API at `/api/v1` and the webhook receivers at `/hooks/{name}` are the 
 
 `/internal/v1` is the session runtime protocol. It is versioned with the runtime image and is **outside** this API promise. The sections below that describe `/internal/v1` are notes for runtime authors, not a compatibility commitment.
 
-Admin endpoints require `Authorization: Bearer <MAYFLY_API_TOKEN>`. Internal endpoints require the session token. JSON bodies use `Content-Type: application/json`.
+Admin endpoints require a named API token: `Authorization: Bearer <token>`. Each operation in the spec lists the scope the token needs, and [security.md](security.md#api-authentication) maps every route to its scope. A missing, unknown, or expired token gets `401`; a token without the scope of the route gets `403`. Internal endpoints require the session token. JSON bodies use `Content-Type: application/json`.
 
 ## Errors
 
@@ -21,8 +21,8 @@ Every failed request to `/api/v1` or `/hooks/{name}` returns one envelope:
 | Code | Status | Meaning |
 |---|---|---|
 | `invalid_request` | 400 | Bad JSON, a bad `limit` or `cursor`, an unknown agent, skill, or MCP server, a bad TTL, a bad tool turn or step, or an unverifiable webhook body |
-| `unauthorized` | 401 | Missing or wrong token, invalid webhook signature, invalid attach ticket |
-| `forbidden` | 403 | The session may not use the requested tool |
+| `unauthenticated` | 401 | Missing, unknown, or expired API token, invalid webhook signature, or invalid attach ticket |
+| `forbidden` | 403 | The token does not carry the scope of the route, or the session may not use the requested tool |
 | `not_found` | 404 | Unknown route, session, trigger, artifact, job, dead job, or schedule; a tool route for a non-built-in harness |
 | `method_not_allowed` | 405 | The route exists with another method; `Allow` names the method |
 | `conflict` | 409 | The session is closed, or a tool call key was reused with another tool or other arguments |
@@ -240,7 +240,7 @@ UI metadata: default and allowed models, agents with effective harness/model/ima
 
 ## Internal (session runtime only, outside the API promise)
 
-These endpoints accept the scoped session token, never the admin token. They keep the plain `{"error":"..."}` body and the shapes below for the runtime image of the same release. They are not covered by `api/openapi.yaml` and may change in any release.
+These endpoints accept the scoped session token, never an API token. They keep the plain `{"error":"..."}` body and the shapes below for the runtime image of the same release. They are not covered by `api/openapi.yaml` and may change in any release.
 
 | Endpoint | Purpose |
 |---|---|

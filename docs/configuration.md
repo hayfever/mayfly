@@ -11,7 +11,12 @@ Complete example: [examples/config.local.yaml](../examples/config.local.yaml). K
 | `addr` | `:8080` | HTTP listen address |
 | `public_url` | `http://localhost:8080` | URL used in session links and WebSocket URLs |
 | `internal_url` | `public_url` | URL that session pods use to reach the control plane; use a cluster Service URL in Kubernetes |
-| `token_env` | `MAYFLY_API_TOKEN` | Environment variable holding the admin token. If empty, a random token is generated and logged at startup |
+| `token_env` | `MAYFLY_API_TOKEN` | Environment variable holding the single admin token. Used only when `tokens` is empty. If no token resolves, `mayflyd` exits with code 2 |
+| `tokens` | `[]` | Named API tokens with explicit scopes. A non-empty list replaces `token_env`. See [security.md](security.md#api-authentication) |
+| `tokens[].name` | — | Token name. Unique. The name appears in the audit log, never the secret |
+| `tokens[].scopes` | — | At least one of `admin`, `sessions:read`, `sessions:write`, `queue:read`, `queue:write`, `schedules:read`, `schedules:write`. `admin` grants every scope |
+| `tokens[].secret_env` | — | Environment variable that holds the token secret. Required and unique per token. A missing variable stops startup |
+| `tokens[].expires_at` | — | Optional RFC 3339 time. A token at or past this time is refused with `401` |
 | `attach_ticket_ttl` | `60s` | Lifetime of one-time WebSocket attach tickets |
 | `max_body_bytes` | `4194304` | Maximum JSON body for session creation |
 | `shutdown_budget` | `25s` | Whole stop sequence after SIGTERM: HTTP drain, queue worker drain, then session manager shutdown. The stages get 20, 40, and 40 percent of the budget in that order, each on its own deadline. Keep the budget below the pod's `terminationGracePeriodSeconds`; the chart sets both. Minimum `3s` |
@@ -358,7 +363,7 @@ Signature behavior:
 
 | Variable | Used by | Meaning |
 |---|---|---|
-| `MAYFLY_API_TOKEN` | control plane | Admin bearer token |
+| `MAYFLY_API_TOKEN` | control plane | Default `server.token_env`: one admin-scoped token named `default` |
 | `MAYFLY_CONFIG` | all binaries | Default config path |
 | `MAYFLY_LOG_LEVEL` | control plane, runtime | `debug`, `info`, `warn`, `error` |
 | `MAYFLY_SESSION_TOKEN` | runtime | Injected per session; do not set manually |

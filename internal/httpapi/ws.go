@@ -13,7 +13,7 @@ func (s *Server) attachWebSocket(w http.ResponseWriter, r *http.Request) {
 	ticket := r.URL.Query().Get("ticket")
 	actor, ok := s.tickets.consume(ticket, id)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, codeUnauthorized, "invalid or expired attach ticket")
+		writeError(w, http.StatusUnauthorized, codeUnauthenticated, "invalid or expired attach ticket")
 		return
 	}
 	if actor == "" {
