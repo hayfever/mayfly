@@ -1,26 +1,56 @@
 # HTTP API
 
-The API paths are versioned (`/api/v1`, `/internal/v1`). During 0.x, request fields, response fields, and event types may change in minor releases. Pin a release and read the changelog before upgrading. The session runtime protocol is version 1 and should be treated as experimental until 1.0.
+[`api/openapi.yaml`](../api/openapi.yaml) is the source of truth for this API: every route, request field, response field, error code, and WebSocket message type. This page explains the same surface for people, and it covers behavior that a schema cannot show, such as when a worker creates a session.
 
-All admin endpoints require `Authorization: Bearer <MAYFLY_API_TOKEN>`. Internal endpoints require the session token. JSON bodies use `Content-Type: application/json`.
+The admin API at `/api/v1` and the webhook receivers at `/hooks/{name}` are the public API. A change to either starts in the spec, and a pull request that breaks a client fails the `api-diff` CI job.
 
-Error responses:
+`/internal/v1` is the session runtime protocol. It is versioned with the runtime image and is **outside** this API promise. The sections below that describe `/internal/v1` are notes for runtime authors, not a compatibility commitment.
+
+Admin endpoints require `Authorization: Bearer <MAYFLY_API_TOKEN>`. Internal endpoints require the session token. JSON bodies use `Content-Type: application/json`.
+
+## Errors
+
+Every failed request to `/api/v1` or `/hooks/{name}` returns one envelope:
 
 ```json
-{"error": "message"}
+{"error": {"code": "invalid_request", "message": "ttl must be a duration such as 30m"}}
 ```
 
-| Status | Meaning |
-|---|---|
-| 400 | Invalid request, unknown skill/server, bad TTL, bad tool turn or step |
-| 401 | Missing or wrong token, invalid webhook signature |
-| 403 | Tool is not granted to the session |
-| 404 | Unknown session, trigger, artifact, job, or dead job; a tool route for a non-built-in harness |
-| 409 | Session is closed, or a tool call key was reused with another tool or other arguments |
-| 413 | Body or artifact too large |
-| 429 | Trigger rate limit, `queue.max_jobs` reached, `sessions.max_concurrent` reached on the admin API, or a plugin rate limit; `Retry-After` is set |
-| 500 | Startup, storage, or internal failure |
-| 503 | Control plane is not ready (`/readyz`), the tool gateway's in-flight cap is reached, or the queue rejected the write |
+`code` is stable: match on it. `message` is for people: do not match on it. `details` holds optional, code-specific context.
+
+| Code | Status | Meaning |
+|---|---|---|
+| `invalid_request` | 400 | Bad JSON, a bad `limit` or `cursor`, an unknown agent, skill, or MCP server, a bad TTL, a bad tool turn or step, or an unverifiable webhook body |
+| `unauthorized` | 401 | Missing or wrong token, invalid webhook signature, invalid attach ticket |
+| `forbidden` | 403 | The session may not use the requested tool |
+| `not_found` | 404 | Unknown route, session, trigger, artifact, job, dead job, or schedule; a tool route for a non-built-in harness |
+| `method_not_allowed` | 405 | The route exists with another method; `Allow` names the method |
+| `conflict` | 409 | The session is closed, or a tool call key was reused with another tool or other arguments |
+| `payload_too_large` | 413 | Body or artifact over the configured limit |
+| `rate_limited` | 429 | Trigger rate limit, `queue.max_jobs` reached, `sessions.max_concurrent` reached on the admin API, or a plugin rate limit; `Retry-After` is set |
+| `unavailable` | 503 | A dependency is not available: the queue rejected the write, the queue store is down, or schedules are not configured |
+| `internal` | 500 | A server fault. The message carries no internals; the details are in the control-plane log |
+
+A panic in a handler returns `500` with `code: internal`.
+
+If `POST /api/v1/sessions` fails after the session record exists, the response is `500` with `error.details.session_id`. The record stays readable and can be deleted.
+
+## Pagination
+
+`GET /api/v1/sessions`, `GET /api/v1/queue/dead`, and `GET /api/v1/schedules` return one page:
+
+```json
+{"items": [], "next_cursor": "eyJ0IjoiMjAyNi0xMS0xOFQxODowMDowMFoiLCJpZCI6ImFiYzEyMyJ9"}
+```
+
+- `limit` defaults to 50 and accepts 1 to 500. Any other value is `400 invalid_request`.
+- `cursor` is opaque. Send back the `next_cursor` of the previous page unchanged.
+- The last page omits `next_cursor`.
+- Sessions are newest first, with the session id as tie-break.
+- Dead jobs are newest failure first, with the job id as tie-break.
+- Schedules are sorted by name.
+
+A new session, or a job that changes state, can move between pages while you read them. A cursor points at one item, so a page never repeats an item and never skips one that is older than the cursor.
 
 ## Public
 
@@ -42,7 +72,7 @@ Responses:
 - Others: `202 {"accepted":true,"duplicate":false,"job_id":"...","delivery":"...","status":"queued"}`.
 - Duplicate delivery (same `X-GitHub-Delivery`, Slack `trigger_id`, or `Idempotency-Key`): `202` with `"duplicate":true`. No second job is stored.
 - Slack URL verification: `200 {"challenge":"..."}`.
-- Session options the control plane cannot run (unknown agent, skill, or MCP server; model not in `llm.allow_models`; empty prompt): `400` with the reason. Nothing is queued.
+- Session options the control plane cannot run (unknown agent, skill, or MCP server; model not in `llm.allow_models`; empty prompt): `400` with `code: invalid_request` and the reason. Nothing is queued.
 - Over the trigger rate limit, or when `queue.max_jobs` is reached: `429` with `Retry-After`. The rate limit counts only requests that pass signature verification, so unauthenticated traffic cannot exhaust a trigger.
 
 Find the session created for a delivery with `GET /api/v1/queue/jobs/{job_id}`: it reports `state` and, once the worker runs, `session_id`. The session also carries the same id in `trigger.job_id`. Jobs accepted without a delivery key can still be looked up by `job_id` from the response, for `queue.tombstone_ttl` after completion.
@@ -74,11 +104,15 @@ Response `201`:
 }
 ```
 
-If the pod fails to start, the response is `500` with both `error` and the failed `session`.
+The control plane checks the request before it stores the session, so a bad agent, skill, model, or TTL is `400 invalid_request`. If the runtime does not start, the response is `500` with `error.details.session_id` naming the failed record.
 
-### `GET /api/v1/sessions`
+### `GET /api/v1/sessions?limit=50&cursor=...`
 
-`{"sessions":[...]}` newest first.
+One page of sessions, newest first.
+
+```json
+{"items":[{"id":"abc123","status":"running","...":"..."}],"next_cursor":"..."}
+```
 
 ### `GET /api/v1/sessions/{id}`
 
@@ -144,9 +178,11 @@ Client messages:
 
 The actor name comes from the ticket. Multiple clients share the thread. The server sends ping frames every 30 seconds. Events are replayed from `after` (default 0); reconnect with `after=0` to rebuild the view.
 
+The message types are `WebSocketServerMessage` and `WebSocketClientMessage` in the spec.
+
 ### `GET /api/v1/sessions/{id}/artifact`
 
-Downloads the latest bundle as `application/gzip`. Returns `404` until finalize has stored it. Artifact metadata outlives `sessions.retention`, so the bundle stays downloadable after the session leaves the session list. The index itself is in memory and resets when the control plane restarts; read the store directly after that.
+Downloads the latest bundle as `application/gzip`. Returns `404 not_found` until finalize has stored it. Artifact metadata outlives `sessions.retention` and the control-plane process, so the bundle stays downloadable after the session leaves the session list or the control plane restarts.
 
 ### `GET /api/v1/queue`
 
@@ -166,43 +202,45 @@ One accepted job by id, including a completed job for `queue.tombstone_ttl`.
 {"job":{"id":"d-...","trigger":"github","state":"done","attempts":0,"accepted_at":"...","finished_at":"...","session_id":"abc123","prompt":"..."}}
 ```
 
-`state` is `queued`, `leased`, `dead`, or `done`. A job that created a session reports `session_id`; the session reports the same id in `trigger.job_id`. Unknown or expired ids return `404`.
+`state` is `queued`, `leased`, `dead`, or `done`. A job that created a session reports `session_id`; the session reports the same id in `trigger.job_id`. Unknown or expired ids return `404 not_found`.
 
-### `GET /api/v1/queue/dead?limit=50`
+### `GET /api/v1/queue/dead?limit=50&cursor=...`
 
-Buried jobs, newest first. `limit` defaults to 50 and is capped at 500. The prompt is omitted from the list; use the job lookup for the full record.
+Buried jobs, newest failure first. The prompt is omitted from the list; use the job lookup for the full record.
 
 ```json
-{"dead":[{"id":"d-...","trigger":"generic","state":"dead","attempts":5,"accepted_at":"...","failed_at":"...","error":"unknown agent "triage""}]}
+{"items":[{"id":"d-...","trigger":"generic","state":"dead","attempts":5,"accepted_at":"...","failed_at":"...","error":"unknown agent \"triage\""}],"next_cursor":"..."}
 ```
+
+The queue store has no cursor, so this route reads the buried set and cuts the page in the control plane. Buried jobs are operator-facing and few; a store-level cursor is a follow-up for a deployment that accumulates many.
 
 ### `POST /api/v1/queue/dead/{id}/retry`
 
-Puts a buried job back on the queue with its attempt count reset. `202 {"retried":true,"id":"..."}`. Unknown job: `404`.
+Puts a buried job back on the queue with its attempt count reset. `202 {"retried":true,"id":"..."}`. Unknown job: `404 not_found`.
 
 ### `DELETE /api/v1/queue/dead/{id}`
 
-Drops a buried job without running it. `204`. Unknown job: `404`.
+Drops a buried job without running it. `204`. Unknown job: `404 not_found`.
 
-### `GET /api/v1/schedules`
+### `GET /api/v1/schedules?limit=50&cursor=...`
 
-The schedules compiled from agent files at startup.
+The schedules compiled from agent files at startup, sorted by name.
 
 ```json
-{"schedules":[{"name":"page-watch","agent":"page-watch","cron":"0 7 * * *","source":"watch-pages"}]}
+{"items":[{"name":"page-watch","agent":"page-watch","cron":"0 7 * * *","source":"watch-pages"}],"next_cursor":"..."}
 ```
 
 ### `POST /api/v1/schedules/{name}/run`
 
-Enqueues one manual run of the named schedule and returns `202 {"job_id":"s-..."}`. The run writes its artifact and creates a session when the change totals match the schedule trigger, the same as a cron slot. Manual runs use a random delivery key, so they do not consume or block a cron slot. Unknown schedule: `404`. Scheduler not started: `503`.
+Enqueues one manual run of the named schedule and returns `202 {"job_id":"s-..."}`. The run writes its artifact and creates a session when the change totals match the schedule trigger, the same as a cron slot. Manual runs use a random delivery key, so they do not consume or block a cron slot. Unknown schedule: `404 not_found`. Scheduler not started: `503 unavailable`.
 
 ### `GET /api/v1/config`
 
-UI metadata: default and allowed models, agents with effective harness/model/image/skills/MCP/limits, skills, MCP server names, trigger names, TTL limits.
+UI metadata: default and allowed models, agents with effective harness/model/image/skills/MCP/limits, skills, MCP server names, trigger names, TTL limits. The `schedules` array here is a plain list; use `GET /api/v1/schedules` to page.
 
-## Internal (session runtime only)
+## Internal (session runtime only, outside the API promise)
 
-These endpoints accept the scoped session token, never the admin token.
+These endpoints accept the scoped session token, never the admin token. They keep the plain `{"error":"..."}` body and the shapes below for the runtime image of the same release. They are not covered by `api/openapi.yaml` and may change in any release.
 
 | Endpoint | Purpose |
 |---|---|

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -27,14 +28,14 @@ type createRequest struct {
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	var req createRequest
 	if err := decodeJSON(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "invalid JSON body")
 		return
 	}
 	var ttl time.Duration
 	if req.TTL != "" {
 		parsed, err := time.ParseDuration(req.TTL)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "ttl must be a duration such as 30m")
+			writeError(w, http.StatusBadRequest, codeInvalidRequest, "ttl must be a duration such as 30m")
 			return
 		}
 		ttl = parsed
@@ -49,13 +50,21 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		MCPServers: req.MCPServers,
 		Trigger:    model.TriggerInfo{Kind: "api", Name: "http"},
 	}
+	// Report a bad request as invalid_request before any record exists.
+	if err := s.mgr.Validate(opts); err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
+	}
 	created, err := s.mgr.Create(r.Context(), opts)
 	if err != nil {
 		if created == nil {
-			writeSessionError(w, err)
+			s.writeSessionError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "session": created})
+		s.logger.Error("session create failed after the record existed", "session", created.ID, "error", err)
+		writeErrorDetails(w, http.StatusInternalServerError, codeInternal,
+			"the session record exists but its runtime did not start",
+			map[string]any{"session_id": created.ID})
 		return
 	}
 	w.Header().Set("Location", s.sessionURL(created.ID))
@@ -63,13 +72,34 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": s.mgr.List()})
+	query, err := parsePage(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
+	}
+	sessions := s.mgr.List()
+	sort.Slice(sessions, func(i, j int) bool {
+		return newerKey(sessionKey(sessions[i]), sessionKey(sessions[j]))
+	})
+	start := 0
+	if query.hasCursor {
+		start = sort.Search(len(sessions), func(i int) bool {
+			return newerKey(query.cursor, sessionKey(sessions[i]))
+		})
+	}
+	items, next := pageOf(sessions, start, query.limit, sessionKey)
+	writePage(w, items, next)
+}
+
+// sessionKey is the page order: newest first, then id descending.
+func sessionKey(sess model.Session) cursorKey {
+	return cursorKey{Time: sess.CreatedAt, ID: sess.ID}
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.mgr.Get(r.PathValue("id"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "session not found")
+		writeError(w, http.StatusNotFound, codeNotFound, "session not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"session": sess, "url": s.sessionURL(sess.ID)})
@@ -77,7 +107,7 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	if err := s.mgr.Delete(r.PathValue("id")); err != nil {
-		writeSessionError(w, err)
+		s.writeSessionError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -88,7 +118,7 @@ func (s *Server) sessionEvents(w http.ResponseWriter, r *http.Request) {
 	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
 	events, ok := s.mgr.Events(id, after)
 	if !ok {
-		writeError(w, http.StatusNotFound, "session not found")
+		writeError(w, http.StatusNotFound, codeNotFound, "session not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": events, "session_id": id})
@@ -100,12 +130,12 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		Actor string `json:"actor"`
 	}
 	if err := decodeJSON(w, r, 64<<10, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "invalid JSON body")
 		return
 	}
 	event, err := s.mgr.PostMessage(r.PathValue("id"), req.Actor, req.Text)
 	if err != nil {
-		writeSessionError(w, err)
+		s.writeSessionError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"event": event})
@@ -120,7 +150,7 @@ func (s *Server) closeSession(w http.ResponseWriter, r *http.Request) {
 		req.Reason = "closed"
 	}
 	if err := s.mgr.Close(r.PathValue("id"), req.Reason); err != nil {
-		writeSessionError(w, err)
+		s.writeSessionError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "closing"})
@@ -133,13 +163,14 @@ func (s *Server) createTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = decodeJSON(w, r, 4<<10, &req)
 	if _, ok := s.mgr.Get(id); !ok {
-		writeError(w, http.StatusNotFound, "session not found")
+		writeError(w, http.StatusNotFound, codeNotFound, "session not found")
 		return
 	}
 	token, expires := s.tickets.issue(id, req.Actor, s.cfg.Server.AttachTicketTTL.Std())
 	wsURL, err := s.wsURL(id, token)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "cannot build websocket URL")
+		s.logger.Error("build websocket url", "session", id, "error", err)
+		writeError(w, http.StatusInternalServerError, codeInternal, "cannot build websocket URL")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -154,10 +185,10 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 	body, size, err := s.mgr.OpenArtifact(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, session.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "session not found")
+			writeError(w, http.StatusNotFound, codeNotFound, "session not found")
 			return
 		}
-		writeError(w, http.StatusNotFound, "artifact not available")
+		writeError(w, http.StatusNotFound, codeNotFound, "artifact not available")
 		return
 	}
 	defer body.Close()
@@ -190,30 +221,16 @@ func (s *Server) wsURL(id, ticket string) (string, error) {
 	return u.String(), nil
 }
 
-func writeSessionError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, session.ErrNotFound):
-		writeError(w, http.StatusNotFound, err.Error())
-	case errors.Is(err, session.ErrClosed):
-		writeError(w, http.StatusConflict, err.Error())
-	case errors.Is(err, session.ErrCapacity):
-		w.Header().Set("Retry-After", "60")
-		writeError(w, http.StatusTooManyRequests, err.Error())
-	default:
-		writeError(w, http.StatusBadRequest, err.Error())
-	}
-}
-
 // queueStats reports accepted work that has not run yet.
 func (s *Server) queueStats(w http.ResponseWriter, r *http.Request) {
 	if s.queue == nil {
-		writeError(w, http.StatusServiceUnavailable, "queue is not configured")
+		writeError(w, http.StatusServiceUnavailable, codeUnavailable, "queue is not configured")
 		return
 	}
 	stats, err := s.queue.Stats(r.Context())
 	if err != nil {
 		s.logger.Warn("queue stats", "error", err)
-		writeError(w, http.StatusServiceUnavailable, "queue is unavailable")
+		writeError(w, http.StatusServiceUnavailable, codeUnavailable, "queue is unavailable")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"queue": stats})

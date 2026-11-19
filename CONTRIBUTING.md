@@ -28,7 +28,24 @@ helm lint deploy/helm/mayfly --set existingSecret=mayfly-secrets
 goreleaser check
 ```
 
+Check the API gate when you touch the spec, a handler, or a response shape:
+
+```bash
+hack/api-diff.sh
+```
+
 `make e2e` ([docs/testing.md](docs/testing.md)) is required for changes to session lifecycle, Kubernetes objects, networking, artifacts, or the agent image.
+
+## API changes
+
+[`api/openapi.yaml`](api/openapi.yaml) is the source of truth for `/api/v1` and `/hooks/{name}`. Start a change in the spec.
+
+- Every `/api/v1` route needs an operation. The spec test fails when the router and the spec disagree in either direction.
+- Every failed request uses the error envelope with a code from the documented set.
+- Every list route returns `items` and an optional `next_cursor`.
+- `/internal/v1` is the session runtime protocol. It is not in the spec and keeps its own shapes.
+
+`hack/api-diff.sh` compares the spec with the latest `v*` tag and fails a breaking change. A deliberate break before 1.0.0 still needs a changelog entry.
 
 ## Architecture rules
 

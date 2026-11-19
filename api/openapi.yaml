@@ -1,0 +1,1188 @@
+openapi: 3.1.0
+info:
+  title: Mayfly control plane API
+  version: 0.2.0
+  summary: Sessions, queue administration, webhooks, and the attach WebSocket.
+  description: |
+    The admin API at `/api/v1` and the webhook receivers at `/hooks/{name}`
+    are the frozen public surface. `api/openapi.yaml` is the source of truth:
+    a change to a route, request field, response field, or error code starts
+    here.
+
+    The session runtime protocol at `/internal/v1` is versioned separately
+    with the runtime image. It is not part of this API promise.
+
+    Every failed request to `/api/v1` or `/hooks/{name}` returns the
+    `Error` envelope with a stable `error.code`.
+
+    List routes return one `items` array and an opaque `next_cursor`. Send the
+    cursor back as the `cursor` query parameter. The last page omits
+    `next_cursor`.
+servers:
+  - url: /
+security:
+  - bearerAuth: []
+tags:
+  - name: sessions
+  - name: queue
+  - name: schedules
+  - name: config
+  - name: webhooks
+  - name: health
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Liveness probe
+      security: []
+      tags: [health]
+      responses:
+        "200":
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    const: ok
+  /readyz:
+    get:
+      operationId: getReady
+      summary: Readiness probe
+      description: >
+        Reports local startup state only. The artifact store and other remote
+        dependencies are not checked, because removing the last replica from
+        the Service would drop every live session that reaches the control
+        plane through it.
+      security: []
+      tags: [health]
+      responses:
+        "200":
+          description: The replica can serve traffic.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    const: ready
+        "503":
+          description: The replica is starting or shutting down.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: not ready
+                  error:
+                    type: string
+  /hooks/{name}:
+    post:
+      operationId: receiveWebhook
+      summary: Receive a webhook for a configured trigger
+      description: |
+        The control plane verifies the delivery, stores it as a job, and answers
+        at once. A worker creates the session later, so a slow cluster cannot
+        make the sender retry.
+
+        A duplicate delivery returns `202` with `duplicate: true` and stores no
+        second job. A Slack URL verification request returns the challenge. A
+        Slack trigger returns Slack's acknowledgement body rather than the job
+        record.
+      security: []
+      tags: [webhooks]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Slack acknowledgement or Slack URL verification challenge.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/SlackAck"
+                  - $ref: "#/components/schemas/SlackChallenge"
+                  - type: object
+                    additionalProperties: true
+        "202":
+          description: The delivery is queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Accepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/v1/sessions:
+    post:
+      operationId: createSession
+      summary: Create a session
+      tags: [sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+      responses:
+        "201":
+          description: The session record exists and the runtime start was requested.
+          headers:
+            Location:
+              description: Web UI URL of the session.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          description: >
+            The runtime did not start. If the session record already exists,
+            `error.details.session_id` names it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    get:
+      operationId: listSessions
+      summary: List sessions
+      description: Newest first, with the session id as tie-break.
+      tags: [sessions]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of sessions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/sessions/{id}:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    get:
+      operationId: getSession
+      summary: Read one session
+      tags: [sessions]
+      responses:
+        "200":
+          description: The session and its web UI URL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteSession
+      summary: Force-delete a session
+      description: >
+        Stops the runtime, marks the session failed, and keeps the record until
+        `sessions.retention` expires.
+      tags: [sessions]
+      responses:
+        "204":
+          description: The session was removed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+  /api/v1/sessions/{id}/events:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    get:
+      operationId: listSessionEvents
+      summary: Read retained events
+      tags: [sessions]
+      parameters:
+        - name: after
+          in: query
+          description: Return events with a sequence greater than this value.
+          schema:
+            type: integer
+            format: int64
+            default: 0
+      responses:
+        "200":
+          description: Retained events.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session_id, events]
+                properties:
+                  session_id:
+                    type: string
+                  events:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Event"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/sessions/{id}/messages:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    post:
+      operationId: postSessionMessage
+      summary: Append a human message
+      description: The message is stored in the thread and delivered to the runtime.
+      tags: [sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text:
+                  type: string
+                actor:
+                  type: string
+      responses:
+        "202":
+          description: The message event was appended.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [event]
+                properties:
+                  event:
+                    $ref: "#/components/schemas/Event"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/Internal"
+  /api/v1/sessions/{id}/close:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    post:
+      operationId: closeSession
+      summary: Request a graceful close
+      tags: [sessions]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  default: closed
+      responses:
+        "202":
+          description: The close is in progress.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    const: closing
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/Internal"
+  /api/v1/sessions/{id}/attach-ticket:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    post:
+      operationId: createAttachTicket
+      summary: Issue a one-time WebSocket ticket
+      tags: [sessions]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                actor:
+                  type: string
+      responses:
+        "200":
+          description: The ticket and the WebSocket URL that consumes it.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket, expires_at, ws_url]
+                properties:
+                  ticket:
+                    type: string
+                  expires_at:
+                    type: string
+                    format: date-time
+                  ws_url:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+  /api/v1/sessions/{id}/artifact:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    get:
+      operationId: downloadSessionArtifact
+      summary: Download the session bundle
+      description: >
+        Returns the latest bundle. The route answers `404` until finalize has
+        stored it. Artifact metadata outlives `sessions.retention`.
+      tags: [sessions]
+      responses:
+        "200":
+          description: The bundle archive.
+          content:
+            application/gzip:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/sessions/{id}/ws:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    get:
+      operationId: attachSessionWebSocket
+      summary: Attach to the session thread
+      description: |
+        Upgrade with a ticket from `POST /api/v1/sessions/{id}/attach-ticket`.
+        The ticket is consumed on connect and supplies the actor name.
+
+        Server frames are `WebSocketServerMessage`. Client frames are
+        `WebSocketClientMessage`. Events are replayed after `after`. The server
+        sends a ping control frame every 30 seconds.
+      tags: [sessions]
+      parameters:
+        - name: ticket
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: after
+          in: query
+          description: Replay events with a sequence greater than this value.
+          schema:
+            type: integer
+            format: int64
+            default: 0
+      responses:
+        "101":
+          description: The connection is upgraded to WebSocket.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/config:
+    get:
+      operationId: getConfig
+      summary: Read UI metadata
+      tags: [config]
+      responses:
+        "200":
+          description: Defaults, allowed models, agents, skills, MCP servers, triggers, and schedules.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Config"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/schedules:
+    get:
+      operationId: listSchedules
+      summary: List schedules
+      description: Sorted by name.
+      tags: [schedules]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of schedules.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SchedulePage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/schedules/{name}/run:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: runSchedule
+      summary: Enqueue one manual schedule run
+      description: >
+        A manual run uses a random delivery key, so it neither consumes nor
+        blocks a cron slot.
+      tags: [schedules]
+      responses:
+        "202":
+          description: The run was queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [job_id]
+                properties:
+                  job_id:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/v1/queue:
+    get:
+      operationId: getQueueStats
+      summary: Read queue counters
+      tags: [queue]
+      responses:
+        "200":
+          description: Queue counters.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [queue]
+                properties:
+                  queue:
+                    $ref: "#/components/schemas/QueueStats"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/v1/queue/jobs/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getQueueJob
+      summary: Read one accepted job
+      description: Includes the prompt and the session the job created.
+      tags: [queue]
+      responses:
+        "200":
+          description: The job record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/v1/queue/dead:
+    get:
+      operationId: listDeadJobs
+      summary: List buried jobs
+      description: Newest failure first, with the job id as tie-break. The prompt is omitted.
+      tags: [queue]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of buried jobs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/v1/queue/dead/{id}/retry:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: retryDeadJob
+      summary: Requeue a buried job
+      description: The attempt count is reset.
+      tags: [queue]
+      responses:
+        "202":
+          description: The job is back on the queue.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [retried, id]
+                properties:
+                  retried:
+                    const: true
+                  id:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/v1/queue/dead/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      operationId: deleteDeadJob
+      summary: Drop a buried job
+      tags: [queue]
+      responses:
+        "204":
+          description: The job was removed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: The admin token from `MAYFLY_API_TOKEN`.
+  parameters:
+    SessionID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      description: Page size. Values outside 1 to 500 are rejected.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 50
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor copied from `next_cursor`.
+      schema:
+        type: string
+  responses:
+    BadRequest:
+      description: The request is not valid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: The bearer token is missing or wrong.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: The caller may not perform this action.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: The object or route does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: The request conflicts with the current state.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    PayloadTooLarge:
+      description: The body is over the configured limit.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: A rate limit or capacity limit is reached. `Retry-After` is set.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Internal:
+      description: An internal failure. The message never carries internals.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unavailable:
+      description: A dependency is not available.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorBody"
+    ErrorBody:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable machine-readable code.
+          enum:
+            - invalid_request
+            - unauthorized
+            - forbidden
+            - not_found
+            - method_not_allowed
+            - conflict
+            - payload_too_large
+            - rate_limited
+            - unavailable
+            - internal
+        message:
+          type: string
+          description: A message for people. Do not match on it.
+        details:
+          type: object
+          additionalProperties: true
+          description: Code-specific context, such as `session_id`.
+    CreateSessionRequest:
+      type: object
+      required: [prompt]
+      properties:
+        prompt:
+          type: string
+        title:
+          type: string
+        agent:
+          type: string
+          description: Empty selects the default agent.
+        model:
+          type: string
+          description: Must be the default model or an entry of `llm.allow_models`.
+        ttl:
+          type: string
+          description: A Go duration such as `30m`.
+        skills:
+          type: array
+          items:
+            type: string
+        mcp_servers:
+          type: array
+          items:
+            type: string
+    Session:
+      type: object
+      required:
+        - id
+        - title
+        - status
+        - prompt
+        - agent
+        - harness
+        - model
+        - trigger
+        - backend
+        - ttl_seconds
+        - created_at
+        - expires_at
+        - last_activity
+        - message_count
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, closing, completed, failed, expired]
+        prompt:
+          type: string
+        agent:
+          type: string
+        harness:
+          type: string
+        model:
+          type: string
+        skills:
+          type: array
+          items:
+            type: string
+        mcp_servers:
+          type: array
+          items:
+            type: string
+        plugins:
+          type: array
+          items:
+            type: string
+        trigger:
+          $ref: "#/components/schemas/Trigger"
+        backend:
+          type: string
+        pod_name:
+          type: string
+        ttl_seconds:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        closed_at:
+          type: string
+          format: date-time
+        last_activity:
+          type: string
+          format: date-time
+        message_count:
+          type: integer
+        artifact:
+          $ref: "#/components/schemas/Artifact"
+        error:
+          type: string
+    Trigger:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [api, generic, github, slack, datadog]
+        name:
+          type: string
+        event:
+          type: string
+        delivery:
+          type: string
+        job_id:
+          type: string
+        actor:
+          type: string
+    Artifact:
+      type: object
+      required: [key, uri, size, sha256, created_at, partial]
+      properties:
+        key:
+          type: string
+        uri:
+          type: string
+        size:
+          type: integer
+          format: int64
+        sha256:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        partial:
+          type: boolean
+    Event:
+      type: object
+      required: [seq, time, type]
+      properties:
+        seq:
+          type: integer
+          format: int64
+        session_id:
+          type: string
+        step_key:
+          type: string
+        time:
+          type: string
+          format: date-time
+        type:
+          type: string
+          enum:
+            - user_message
+            - assistant_message
+            - assistant_delta
+            - tool_call
+            - tool_result
+            - status
+            - error
+            - system
+            - artifact
+            - control
+        actor:
+          type: string
+        text:
+          type: string
+        data:
+          type: object
+          additionalProperties: true
+    SessionResponse:
+      type: object
+      required: [session, url]
+      properties:
+        session:
+          $ref: "#/components/schemas/Session"
+        url:
+          type: string
+    SessionPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Session"
+        next_cursor:
+          type: string
+    Job:
+      type: object
+      required: [id, trigger, state, attempts, accepted_at]
+      properties:
+        id:
+          type: string
+        trigger:
+          type: string
+        delivery:
+          type: string
+        state:
+          type: string
+          enum: [queued, leased, dead, done]
+        attempts:
+          type: integer
+        accepted_at:
+          type: string
+          format: date-time
+        failed_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        error:
+          type: string
+        session_id:
+          type: string
+        prompt:
+          type: string
+    JobResponse:
+      type: object
+      required: [job]
+      properties:
+        job:
+          $ref: "#/components/schemas/Job"
+    JobPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Job"
+        next_cursor:
+          type: string
+    QueueStats:
+      type: object
+      required: [pending, leased, dead]
+      properties:
+        pending:
+          type: integer
+          description: Jobs that are claimable now.
+        leased:
+          type: integer
+          description: Jobs a worker holds, or that wait out a retry delay.
+        dead:
+          type: integer
+          description: Jobs that exhausted `queue.max_attempts`.
+        oldest:
+          type: string
+          format: date-time
+    Schedule:
+      type: object
+      required: [name, agent, cron, source]
+      properties:
+        name:
+          type: string
+        agent:
+          type: string
+        cron:
+          type: string
+        source:
+          type: string
+    SchedulePage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Schedule"
+        next_cursor:
+          type: string
+    Accepted:
+      type: object
+      required: [accepted, duplicate, job_id, status]
+      properties:
+        accepted:
+          const: true
+        duplicate:
+          type: boolean
+        job_id:
+          type: string
+        delivery:
+          type: string
+        status:
+          const: queued
+    SlackAck:
+      type: object
+      required: [response_type, text]
+      properties:
+        response_type:
+          const: in_channel
+        text:
+          type: string
+    SlackChallenge:
+      type: object
+      required: [challenge]
+      properties:
+        challenge:
+          type: string
+    Config:
+      type: object
+      required:
+        - default_model
+        - allowed_models
+        - agents
+        - skills
+        - mcp_servers
+        - triggers
+        - schedules
+        - default_ttl_seconds
+        - max_ttl_seconds
+      properties:
+        default_model:
+          type: string
+        allowed_models:
+          type: array
+          items:
+            type: string
+        skills:
+          type: array
+          items:
+            type: string
+        mcp_servers:
+          type: array
+          items:
+            type: string
+        agents:
+          type: array
+          items:
+            $ref: "#/components/schemas/Agent"
+        default_ttl_seconds:
+          type: integer
+        max_ttl_seconds:
+          type: integer
+        triggers:
+          type: array
+          items:
+            type: string
+        schedules:
+          type: array
+          items:
+            $ref: "#/components/schemas/Schedule"
+    Agent:
+      type: object
+      required: [name, harness, source, model, default, builtin]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        harness:
+          type: string
+        source:
+          type: string
+        model:
+          type: string
+        image:
+          type: string
+        skills:
+          type: array
+          items:
+            type: string
+        mcp_servers:
+          type: array
+          items:
+            type: string
+        plugins:
+          type: array
+          items:
+            type: string
+        allow_shell:
+          type: boolean
+        max_steps:
+          type: integer
+        max_history_messages:
+          type: integer
+        protocol:
+          type: integer
+        command:
+          type: array
+          items:
+            type: string
+        args:
+          type: array
+          items:
+            type: string
+        env_keys:
+          type: array
+          items:
+            type: string
+        has_config:
+          type: boolean
+        default:
+          type: boolean
+        builtin:
+          type: boolean
+    WebSocketHello:
+      type: object
+      required: [type, session]
+      properties:
+        type:
+          const: hello
+        session:
+          $ref: "#/components/schemas/Session"
+    WebSocketEvent:
+      type: object
+      required: [type, event]
+      properties:
+        type:
+          const: event
+        event:
+          $ref: "#/components/schemas/Event"
+    WebSocketError:
+      type: object
+      required: [type, message]
+      properties:
+        type:
+          const: error
+        message:
+          type: string
+    WebSocketServerMessage:
+      oneOf:
+        - $ref: "#/components/schemas/WebSocketHello"
+        - $ref: "#/components/schemas/WebSocketEvent"
+        - $ref: "#/components/schemas/WebSocketError"
+    WebSocketUserMessage:
+      type: object
+      required: [type, text]
+      properties:
+        type:
+          const: user_message
+        text:
+          type: string
+    WebSocketPing:
+      type: object
+      required: [type]
+      properties:
+        type:
+          const: ping
+    WebSocketClientMessage:
+      oneOf:
+        - $ref: "#/components/schemas/WebSocketUserMessage"
+        - $ref: "#/components/schemas/WebSocketPing"

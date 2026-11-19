@@ -432,11 +432,11 @@ func waitForSession(t *testing.T, base string, timeout time.Duration) string {
 			t.Fatal(err)
 		}
 		var out struct {
-			Sessions []model.Session `json:"sessions"`
+			Items []model.Session `json:"items"`
 		}
 		decode(t, resp, &out)
-		if len(out.Sessions) > 0 {
-			return out.Sessions[0].ID
+		if len(out.Items) > 0 {
+			return out.Items[0].ID
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

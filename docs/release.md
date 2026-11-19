@@ -8,6 +8,19 @@
 - The chart is published to `oci://ghcr.io/<owner>/charts/mayfly`.
 - 0.x minor releases may contain breaking changes. Patch releases should not.
 
+## API compatibility
+
+`api/openapi.yaml` describes the admin API at `/api/v1` and the webhook receivers at `/hooks/{name}`. Before 1.0.0 a breaking change may ship in a minor release. From 1.0.0 it needs a major version. The session runtime protocol at `/internal/v1` is versioned with the runtime image and is not covered.
+
+The `api-diff` CI job runs `hack/api-diff.sh` on every pull request. The script uses a pinned oasdiff release and fails on a breaking change between the latest `v*` tag and the working tree.
+
+```bash
+hack/api-diff.sh            # latest v* tag
+hack/api-diff.sh v0.2.0     # a tag, branch, or commit
+```
+
+If the base ref has no `api/openapi.yaml`, the script prints a notice and exits 0. That is the case for a tag that predates the spec.
+
 ## Pre-release checklist
 
 1. Update `CHANGELOG.md` and the chart `version` and `appVersion` if they differ from the tag.
@@ -21,6 +34,7 @@ helm lint deploy/helm/mayfly --set existingSecret=mayfly-secrets
 helm template mayfly deploy/helm/mayfly -n mayfly --set existingSecret=mayfly-secrets >/dev/null
 goreleaser check
 actionlint .github/workflows/*.yml
+hack/api-diff.sh
 make e2e
 E2E_QUEUE=redis make e2e
 ```

@@ -62,8 +62,8 @@ func deadIDs(t *testing.T) []string {
 	expectStatus(t, r, http.StatusOK, "list dead jobs")
 	var ids []string
 	for _, j := range decode[struct {
-		Dead []jobRecord `json:"dead"`
-	}](t, r).Dead {
+		Items []jobRecord `json:"items"`
+	}](t, r).Items {
 		ids = append(ids, j.ID)
 	}
 	return ids

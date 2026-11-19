@@ -28,6 +28,13 @@ function toast(message) {
   toast.timer = setTimeout(() => { box.hidden = true; }, 7000);
 }
 
+function errorMessage(data, status) {
+  const err = data && data.error;
+  if (typeof err === "string" && err) return err;
+  if (err && err.message) return err.message;
+  return "HTTP " + status;
+}
+
 async function api(path, options = {}) {
   const headers = Object.assign({}, options.headers || {});
   if (state.token) headers.Authorization = "Bearer " + state.token;
@@ -44,7 +51,7 @@ async function api(path, options = {}) {
   }
   if (!res.ok) {
     if (res.status === 401) openSettings();
-    throw new Error((data && data.error) || ("HTTP " + res.status));
+    throw new Error(errorMessage(data, res.status));
   }
   return data;
 }
@@ -123,8 +130,15 @@ function checkedValues(container) {
 }
 
 async function loadSessions() {
-  const data = await api("/api/v1/sessions");
-  state.sessions = data.sessions || [];
+  const sessions = [];
+  let cursor = "";
+  do {
+    const query = cursor ? "?cursor=" + encodeURIComponent(cursor) : "";
+    const data = await api("/api/v1/sessions" + query);
+    sessions.push(...(data.items || []));
+    cursor = data.next_cursor || "";
+  } while (cursor);
+  state.sessions = sessions;
   renderSessions();
   if (state.current) {
     const found = state.sessions.find((s) => s.id === state.current);

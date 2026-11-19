@@ -1,9 +1,8 @@
 package httpapi
 
 import (
-	"errors"
 	"net/http"
-	"strconv"
+	"sort"
 	"time"
 
 	"github.com/hayfever/mayfly/internal/queue"
@@ -54,58 +53,67 @@ func queueView(record queue.Record, withPrompt bool) queueRecord {
 // queue.tombstone_ttl after completion.
 func (s *Server) queueJob(w http.ResponseWriter, r *http.Request) {
 	if s.queue == nil {
-		writeError(w, http.StatusServiceUnavailable, "queue is not configured")
+		writeError(w, http.StatusServiceUnavailable, codeUnavailable, "queue is not configured")
 		return
 	}
 	record, ok, err := s.queue.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
 		s.logger.Warn("queue job lookup", "error", err)
-		writeError(w, http.StatusServiceUnavailable, "queue is unavailable")
+		writeError(w, http.StatusServiceUnavailable, codeUnavailable, "queue is unavailable")
 		return
 	}
 	if !ok {
-		writeError(w, http.StatusNotFound, "job not found")
+		writeError(w, http.StatusNotFound, codeNotFound, "job not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"job": queueView(record, true)})
 }
 
-// queueDead lists buried jobs, newest first.
+// queueDead lists buried jobs, newest first. The store has no cursor, so it
+// returns the whole buried set and this handler cuts the page.
 func (s *Server) queueDead(w http.ResponseWriter, r *http.Request) {
 	if s.queue == nil {
-		writeError(w, http.StatusServiceUnavailable, "queue is not configured")
+		writeError(w, http.StatusServiceUnavailable, codeUnavailable, "queue is not configured")
 		return
 	}
-	limit := 50
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed <= 0 {
-			writeError(w, http.StatusBadRequest, "limit must be a positive integer")
-			return
-		}
-		limit = parsed
+	query, err := parsePage(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
 	}
-	if limit > 500 {
-		limit = 500
-	}
-	records, err := s.queue.Dead(r.Context(), limit)
+	records, err := s.queue.Dead(r.Context(), 0)
 	if err != nil {
 		s.logger.Warn("queue dead list", "error", err)
-		writeError(w, http.StatusServiceUnavailable, "queue is unavailable")
+		writeError(w, http.StatusServiceUnavailable, codeUnavailable, "queue is unavailable")
 		return
 	}
-	out := make([]queueRecord, 0, len(records))
-	for _, record := range records {
+	sort.Slice(records, func(i, j int) bool {
+		return newerKey(deadKey(records[i]), deadKey(records[j]))
+	})
+	start := 0
+	if query.hasCursor {
+		start = sort.Search(len(records), func(i int) bool {
+			return newerKey(query.cursor, deadKey(records[i]))
+		})
+	}
+	window, next := pageOf(records, start, query.limit, deadKey)
+	out := make([]queueRecord, 0, len(window))
+	for _, record := range window {
 		out = append(out, queueView(record, false))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"dead": out})
+	writePage(w, out, next)
+}
+
+// deadKey is the page order: newest failure first, then id descending.
+func deadKey(record queue.Record) cursorKey {
+	return cursorKey{Time: record.FailedAt, ID: record.Job.ID}
 }
 
 // queueRetryDead puts a buried job back on the queue with a fresh attempt
 // count.
 func (s *Server) queueRetryDead(w http.ResponseWriter, r *http.Request) {
 	if s.queue == nil {
-		writeError(w, http.StatusServiceUnavailable, "queue is not configured")
+		writeError(w, http.StatusServiceUnavailable, codeUnavailable, "queue is not configured")
 		return
 	}
 	id := r.PathValue("id")
@@ -120,7 +128,7 @@ func (s *Server) queueRetryDead(w http.ResponseWriter, r *http.Request) {
 // queueDeleteDead drops a buried job without running it.
 func (s *Server) queueDeleteDead(w http.ResponseWriter, r *http.Request) {
 	if s.queue == nil {
-		writeError(w, http.StatusServiceUnavailable, "queue is not configured")
+		writeError(w, http.StatusServiceUnavailable, codeUnavailable, "queue is not configured")
 		return
 	}
 	id := r.PathValue("id")
@@ -130,13 +138,4 @@ func (s *Server) queueDeleteDead(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.Info("dead job deleted", "job", id)
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) writeQueueAdminError(w http.ResponseWriter, action, id string, err error) {
-	if errors.Is(err, queue.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "job not found")
-		return
-	}
-	s.logger.Warn("queue admin action failed", "action", action, "job", id, "error", err)
-	writeError(w, http.StatusServiceUnavailable, "queue is unavailable")
 }
