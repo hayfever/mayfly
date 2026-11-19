@@ -43,6 +43,28 @@ kubectl -n mayfly port-forward svc/mayfly 8080:8080
 
 Set `config.server.public_url=http://localhost:8080` when using port-forward. Ingress and TLS must use the external URL.
 
+## Named API tokens
+
+Set `config.server.tokens` to replace the single token from `MAYFLY_API_TOKEN` with scoped tokens. Put each `secret_env` variable in one Secret, and name that Secret in `controlPlane.tokensSecret`:
+
+```bash
+kubectl -n mayfly create secret generic mayfly-tokens \
+  --from-literal=MAYFLY_CI_TOKEN="$(openssl rand -hex 24)"
+```
+
+```yaml
+config:
+  server:
+    tokens:
+      - name: ci
+        scopes: [sessions:read, sessions:write]
+        secret_env: MAYFLY_CI_TOKEN
+controlPlane:
+  tokensSecret: mayfly-tokens
+```
+
+The chart passes that Secret to the control plane as environment variables. A missing variable stops startup. The token name appears in the audit log. See [security.md](../../docs/security.md#api-authentication) for the scope of each route.
+
 ## Agents and skills
 
 Inline files:
