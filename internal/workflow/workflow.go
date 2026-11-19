@@ -261,7 +261,7 @@ func (r *Runner) Handle(ctx context.Context, job queue.Job) (queue.Result, error
 			Kind:     "schedule",
 			Name:     schedule.Name,
 			Event:    "schedule",
-			Delivery: job.Delivery,
+			Delivery: job.IdempotencyKey,
 			JobID:    job.ID,
 		},
 		Artifacts: []session.ArtifactRef{{

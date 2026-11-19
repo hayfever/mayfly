@@ -68,19 +68,25 @@ type Config struct {
 	Plugins   PluginsConfig   `yaml:"plugins"`
 	Triggers  []TriggerConfig `yaml:"triggers"`
 
-	// AdminToken is resolved from the environment at load time and never
-	// serialized.
+	// AdminToken is the token from server.token_env, resolved at load time
+	// and never serialized. APITokens exposes it as the token named "default"
+	// with the admin scope when server.tokens is empty.
 	AdminToken string `yaml:"-"`
 }
 
 // ServerConfig covers the public HTTP listener.
 type ServerConfig struct {
-	Addr            string   `yaml:"addr"`
-	PublicURL       string   `yaml:"public_url"`
-	InternalURL     string   `yaml:"internal_url"`
-	TokenEnv        string   `yaml:"token_env"`
-	AttachTicketTTL Duration `yaml:"attach_ticket_ttl"`
-	MaxBodyBytes    int64    `yaml:"max_body_bytes"`
+	Addr        string `yaml:"addr"`
+	PublicURL   string `yaml:"public_url"`
+	InternalURL string `yaml:"internal_url"`
+	// TokenEnv names the environment variable that holds the single admin
+	// token. It is used only when Tokens is empty.
+	TokenEnv string `yaml:"token_env"`
+	// Tokens declares named bearer tokens with explicit scopes. A non-empty
+	// list replaces TokenEnv.
+	Tokens          []APITokenConfig `yaml:"tokens"`
+	AttachTicketTTL Duration         `yaml:"attach_ticket_ttl"`
+	MaxBodyBytes    int64            `yaml:"max_body_bytes"`
 	// ShutdownBudget bounds the whole stop sequence: HTTP drain, queue worker
 	// drain, and session manager shutdown. It must fit inside the pod's
 	// terminationGracePeriodSeconds with margin.
@@ -675,7 +681,20 @@ const (
 )
 
 func (c *Config) resolveSecrets() error {
-	c.AdminToken = os.Getenv(c.Server.TokenEnv)
+	if err := c.Server.validateTokens(); err != nil {
+		return err
+	}
+	if len(c.Server.Tokens) == 0 {
+		c.AdminToken = os.Getenv(c.Server.TokenEnv)
+	} else {
+		for i := range c.Server.Tokens {
+			token := &c.Server.Tokens[i]
+			token.Secret = os.Getenv(token.SecretEnv)
+			if token.Secret == "" {
+				return fmt.Errorf("server.tokens[%d] (%s): environment variable %s is not set", i, token.Name, token.SecretEnv)
+			}
+		}
+	}
 	if c.LLM.APIKeyEnv != "" {
 		c.LLM.APIKey = os.Getenv(c.LLM.APIKeyEnv)
 	}
@@ -749,6 +768,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.ShutdownBudget.Std() < 3*time.Second {
 		return fmt.Errorf("server.shutdown_budget must be at least 3s")
+	}
+	if err := c.Server.validateTokens(); err != nil {
+		return err
 	}
 	if c.Sessions.DefaultTTL.Std() <= 0 {
 		return fmt.Errorf("sessions.default_ttl must be positive")
@@ -1082,6 +1104,9 @@ func (c *Config) SecretEnvNames() []string {
 		}
 	}
 	add(c.Server.TokenEnv)
+	for _, token := range c.Server.Tokens {
+		add(token.SecretEnv)
+	}
 	add(c.LLM.APIKeyEnv)
 	addHeaders(c.LLM.Headers)
 	add(c.Artifacts.S3.AccessKeyEnv)

@@ -36,7 +36,7 @@ func (r *Runtime) doFinalize(ctx context.Context, reason string, runErr error) e
 		defer cancel()
 	}
 	r.logger.Info("finalizing session", "reason", reason)
-	r.events.Emit(ctx, model.EventStatus, "mayfly", "Session closing.", map[string]any{"reason": reason})
+	r.events.Emit(ctx, model.EventStatus, "mayfly", "Session closing.", model.StatusData{Status: model.StatusClosing, Reason: reason})
 
 	if err := r.conv.Close(); err != nil {
 		r.logger.Warn("close conversation log", "error", err)
@@ -160,11 +160,11 @@ func (r *Runtime) doFinalize(ctx context.Context, reason string, runErr error) e
 		_ = r.platform.Finalize(ctx, model.StatusFailed, reason, err.Error())
 		return err
 	}
-	r.events.Emit(ctx, model.EventArtifact, "mayfly", "Artifact exported.", map[string]any{
-		"key":    artifact.Key,
-		"uri":    artifact.URI,
-		"size":   artifact.Size,
-		"sha256": artifact.SHA256,
+	r.events.Emit(ctx, model.EventArtifact, "mayfly", "Artifact exported.", model.ArtifactData{
+		Key:    artifact.Key,
+		URI:    artifact.URI,
+		Size:   artifact.Size,
+		SHA256: artifact.SHA256,
 	})
 
 	finalStatus := model.StatusCompleted

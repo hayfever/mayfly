@@ -8,7 +8,6 @@ mkdir -p .mayfly
 
 export MAYFLY_API_TOKEN="${MAYFLY_API_TOKEN:-dev-token}"
 export MAYFLY_URL="${MAYFLY_URL:-http://localhost:8080}"
-export MAYFLY_TOKEN="$MAYFLY_API_TOKEN"
 export MAYFLY_LOG_LEVEL="${MAYFLY_LOG_LEVEL:-info}"
 
 ./bin/llmstub --addr :9099 >.mayfly/llmstub.log 2>&1 &

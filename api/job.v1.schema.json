@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mayfly queue job envelope",
+  "description": "The JSON body of one queue job. A producer writes this body to a queue backend, and a worker decodes it before running the job. The version is a major version: a change that removes, renames, or retypes a field, or changes what an existing field means, increments it. Optional fields may be added without a new version, so a reader ignores fields it does not know. A reader that does not know a major version, or a kind, buries the job with a reason instead of running it.",
+  "type": "object",
+  "required": ["version", "kind", "created_at", "trigger"],
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "Major version of this envelope."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["session.create", "source.run"],
+      "description": "The work a worker does. session.create creates one session from the prompt and options. source.run runs one scheduled data source and creates a session only when the run has changes the schedule triggers on."
+    },
+    "id": {
+      "type": "string",
+      "description": "Job id. Mayfly assigns it when the job is admitted. A producer may omit it; the queue derives one from the idempotency key, or generates one when there is no key. The id names the job in GET /api/v1/queue/jobs/{id} and in the session trigger."
+    },
+    "idempotency_key": {
+      "type": "string",
+      "description": "The producer's deduplication key. The same key with the same kind and trigger name is accepted once and answers as a duplicate until queue.dedupe_ttl expires. Without a key every message is a new job."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the producer created or the queue accepted the job, in UTC."
+    },
+    "attempts": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many times a worker has failed to finish the job. Mayfly maintains this field; a producer omits it."
+    },
+    "agent": {
+      "type": "string",
+      "description": "Agent name for the session. Empty selects the default agent."
+    },
+    "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The first user message of the session. Required for session.create."
+    },
+    "session": {
+      "$ref": "#/$defs/session",
+      "description": "Session options other than the prompt and agent."
+    },
+    "trigger": {
+      "$ref": "#/$defs/trigger"
+    },
+    "source": {
+      "$ref": "#/$defs/source",
+      "description": "The scheduled run to execute. Required for source.run."
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": {"type": "string"},
+      "description": "Producer labels carried with the job. Mayfly does not interpret them. A reader keeps fields it does not know."
+    }
+  },
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {"kind": {"const": "session.create"}},
+        "required": ["kind"]
+      },
+      "then": {
+        "required": ["prompt"]
+      }
+    },
+    {
+      "if": {
+        "properties": {"kind": {"const": "source.run"}},
+        "required": ["kind"]
+      },
+      "then": {
+        "required": ["source"]
+      }
+    }
+  ],
+  "$defs": {
+    "trigger": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "What caused the job, such as github, slack, datadog, generic, schedule, or api."
+        },
+        "name": {
+          "type": "string",
+          "description": "Configured trigger or schedule name."
+        },
+        "event": {
+          "type": "string",
+          "description": "Event within the trigger, such as pull_request or webhook."
+        },
+        "actor": {
+          "type": "string",
+          "description": "Person or account that caused the event, when the producer knows it."
+        }
+      },
+      "additionalProperties": true
+    },
+    "session": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Session title. Empty uses the first line of the prompt."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model name. It must be the default model or an entry of llm.allow_models."
+        },
+        "ttl": {
+          "type": "string",
+          "description": "Session lifetime as a Go duration such as 30m or 1h30m. Empty uses the configured default."
+        },
+        "skills": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Skills the session may use."
+        },
+        "mcp_servers": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "MCP servers the session may call."
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/artifact"},
+          "description": "Inputs the producer already stored. The session may read them; the control plane only checks the reference."
+        }
+      },
+      "additionalProperties": true
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["key", "sha256", "bytes"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "Object-store key, relative to the artifact store."
+        },
+        "sha256": {
+          "type": "string",
+          "description": "Lowercase SHA-256 of the stored bytes."
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Size of the stored bytes."
+        },
+        "content_type": {
+          "type": "string",
+          "description": "Media type of the stored bytes."
+        }
+      },
+      "additionalProperties": true
+    },
+    "source": {
+      "type": "object",
+      "required": ["schedule", "source", "slot"],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "description": "Run id written into the run artifact. Defaults to the job id."
+        },
+        "schedule": {
+          "type": "string",
+          "description": "Schedule name from the compiled bundle."
+        },
+        "source": {
+          "type": "string",
+          "description": "Data source name the schedule reads."
+        },
+        "slot": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Cron slot this run covers, in UTC."
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

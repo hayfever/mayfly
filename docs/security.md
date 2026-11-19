@@ -2,8 +2,8 @@
 
 ## Trust boundaries
 
-1. **Trigger/API caller** — authenticated by an admin token or a per-trigger secret.
-2. **Control plane** — holds the admin token, LLM key, MCP credentials, and object-store credentials.
+1. **Trigger/API caller** — authenticated by a scoped API token or a per-trigger secret.
+2. **Control plane** — holds the API token secrets, LLM key, MCP credentials, and object-store credentials.
 3. **Session container** — untrusted by default. It holds one scoped session token and no long-lived credentials.
 4. **Plugin workload** — trusted operator code, but not trusted with the agent's data: an inline plugin shares the agent container, a sidecar shares the session pod, and a service is its own Deployment.
 5. **Artifact store** — receives bundles from the control plane only.
@@ -90,6 +90,52 @@ Audit: the gateway writes one `call.begin` and one `call.done` record per call. 
 
 What this does not do: sandbox plugin code, verify plugin image signatures, allow hostname egress, rotate the service gateway key, or apply the gateway to alternate harnesses. See [plugins.md](plugins.md) for the placement model.
 
+## API authentication
+
+The `/api/v1` surface uses named bearer tokens. Declare them under `server.tokens`:
+
+```yaml
+server:
+  tokens:
+    - name: ci
+      scopes: [sessions:read, sessions:write]
+      secret_env: MAYFLY_CI_TOKEN
+      expires_at: "2027-01-01T00:00:00Z"
+```
+
+The control plane reads each secret from `secret_env` at startup. A missing variable stops startup. `expires_at` is optional, and an expired token is refused.
+
+When `server.tokens` is empty, the control plane uses `server.token_env` (`MAYFLY_API_TOKEN` by default) as one token named `default` with the `admin` scope. A non-empty `server.tokens` replaces that token. Do not configure both and expect two credentials.
+
+Each route requires one scope. The `admin` scope grants every scope.
+
+| Scope | Routes |
+|---|---|
+| `sessions:read` | `GET /api/v1/sessions`, `GET /api/v1/sessions/{id}`, `GET /api/v1/sessions/{id}/events`, `GET /api/v1/sessions/{id}/artifact`, `GET /api/v1/config` |
+| `sessions:write` | `POST /api/v1/sessions`, `DELETE /api/v1/sessions/{id}`, `POST /api/v1/sessions/{id}/messages`, `POST /api/v1/sessions/{id}/close`, `POST /api/v1/sessions/{id}/attach-ticket` |
+| `queue:read` | `GET /api/v1/queue`, `GET /api/v1/queue/jobs/{id}`, `GET /api/v1/queue/dead` |
+| `queue:write` | `POST /api/v1/queue/dead/{id}/retry`, `DELETE /api/v1/queue/dead/{id}` |
+| `schedules:read` | `GET /api/v1/schedules` |
+| `schedules:write` | `POST /api/v1/schedules/{name}/run` |
+
+The control plane compares every configured token with the presented bearer value in constant time. It never logs a token secret. The token name appears in the audit log.
+
+A request without a token, or with an unknown or expired token, gets `401` with code `unauthenticated`. A valid token without the scope of the route gets `403` with code `forbidden`. The attach WebSocket uses a one-time ticket instead of a bearer token.
+
+## Audit log
+
+The control plane writes one audit line for every authenticated, mutating `/api/v1` request: `POST`, `PUT`, `PATCH`, and `DELETE`. This includes a request that a valid token is not allowed to make, which is logged with status `403`. The operator actions in this API are all mutating requests.
+
+The line uses the message `audit` at info level. Its fields are:
+
+- `token_name`: the configured token name. The secret never appears.
+- `method` and `route`: the HTTP method and the route pattern, for example `/api/v1/sessions/{id}`.
+- `target`: the session id, schedule name, or job id. A failed request can have an empty target.
+- `status`: the response status.
+- `request_id`: the caller `X-Request-Id`, or a generated id. The response echoes it in `X-Request-Id`.
+
+Read requests are not audited. A request with an unknown token is not audited, because it has no token name.
+
 ## Trigger authentication
 
 - `generic` and `datadog` triggers accept an HMAC signature or the shared `X-Mayfly-Token` header.
@@ -107,14 +153,14 @@ A verified webhook becomes one queued job and is answered immediately. Replay pr
 
 - The shell tool (`run_command`) is off by default. Set `sessions.allow_shell: true`, or `allowShell` in an agent manifest, when an agent needs it. The container, not the tool, is the security boundary.
 - stdio MCP servers run as child processes in the container. Their environment cannot reference control-plane secrets; use an HTTP MCP server behind the proxy when credentials are needed.
-- The workspace is shared by all attach clients and the agent. Anyone with an attach ticket or the admin token can influence the session.
-- The web UI stores the admin token in browser localStorage.
+- The workspace is shared by all attach clients and the agent. Anyone with an attach ticket or a token with `sessions:write` can influence the session.
+- The web UI stores the API token in browser localStorage.
 
 ## Known gaps before production
 
-- Single tenant. There is no user identity or per-user authorization. The tool gateway logs one record per non-built-in tool call, without arguments or results. Built-in tools, API requests, and operator actions are not audited.
+- Single tenant. There is no user identity or per-user authorization. Tokens carry scopes, not users. The tool gateway logs one record per non-built-in tool call, without arguments or results. Built-in tool calls are not audited.
 - No TLS termination or authentication proxy. Put Mayfly behind an ingress with OIDC/SSO and TLS.
-- Admin token is a shared bearer token. Rotate it and mount it from a Secret.
+- The token from `server.token_env` has the admin scope. Prefer named tokens with narrow scopes, rotate each secret, and mount the secrets from a Secret.
 - Session history is in memory and is dropped after `sessions.retention` (`30m` by default). The journal keeps the completed steps of every turn of an active session in the control-plane database for resume, and is deleted when the session finalizes; the artifact bundle is the durable history. Artifact metadata stays available until the control plane restarts; the live thread does not.
 - No image signature verification, admission policy, or runtime sandbox beyond the Kubernetes security context.
 - No per-session egress allowlist beyond the configured static CIDRs and the control plane. Service plugins get their own NetworkPolicy, which also matches CIDRs only.

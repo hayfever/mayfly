@@ -502,7 +502,7 @@ func waitForAssistant(t *testing.T, base, id string, want int, timeout time.Dura
 func hasMCPResult(events []model.Event) bool {
 	for _, ev := range events {
 		if ev.Type == model.EventToolResult {
-			if tool, _ := ev.Data["tool"].(string); strings.HasPrefix(tool, "mcp_") && strings.Contains(ev.Text, "echo: hello from mayfly") {
+			if data, _ := model.DataAs[model.ToolResultData](ev.Data); strings.HasPrefix(data.Tool, "mcp_") && strings.Contains(ev.Text, "echo: hello from mayfly") {
 				return true
 			}
 		}

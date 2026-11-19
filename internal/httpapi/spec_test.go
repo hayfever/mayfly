@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -59,7 +60,11 @@ func TestOpenAPISpecReferencesResolve(t *testing.T) {
 	loadSpec(t, &doc)
 	for _, ref := range specRefs(doc) {
 		if !strings.HasPrefix(ref, "#/") {
-			t.Errorf("unsupported external reference %q", ref)
+			// An external reference is a file beside the spec, such as the
+			// job envelope schema under api/.
+			if _, err := os.Stat(filepath.Join("..", "..", "api", filepath.FromSlash(ref))); err != nil {
+				t.Errorf("external reference %q does not resolve: %v", ref, err)
+			}
 			continue
 		}
 		if specPointer(doc, ref) == nil {

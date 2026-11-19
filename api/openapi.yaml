@@ -150,6 +150,8 @@ paths:
       operationId: createSession
       summary: Create a session
       tags: [sessions]
+      security:
+        - bearerAuth: [sessions:write]
       requestBody:
         required: true
         content:
@@ -172,6 +174,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -187,6 +191,8 @@ paths:
       summary: List sessions
       description: Newest first, with the session id as tie-break.
       tags: [sessions]
+      security:
+        - bearerAuth: [sessions:read]
       parameters:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Cursor"
@@ -201,6 +207,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
   /api/v1/sessions/{id}:
     parameters:
       - $ref: "#/components/parameters/SessionID"
@@ -208,6 +216,8 @@ paths:
       operationId: getSession
       summary: Read one session
       tags: [sessions]
+      security:
+        - bearerAuth: [sessions:read]
       responses:
         "200":
           description: The session and its web UI URL.
@@ -217,6 +227,8 @@ paths:
                 $ref: "#/components/schemas/SessionResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
     delete:
@@ -226,11 +238,15 @@ paths:
         Stops the runtime, marks the session failed, and keeps the record until
         `sessions.retention` expires.
       tags: [sessions]
+      security:
+        - bearerAuth: [sessions:write]
       responses:
         "204":
           description: The session was removed.
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -241,7 +257,13 @@ paths:
     get:
       operationId: listSessionEvents
       summary: Read retained events
+      description: |
+        Return events with a sequence greater than `after`. The event object
+        and the payload schema for each event type are documented in
+        docs/events.md.
       tags: [sessions]
+      security:
+        - bearerAuth: [sessions:read]
       parameters:
         - name: after
           in: query
@@ -267,6 +289,8 @@ paths:
                       $ref: "#/components/schemas/Event"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
   /api/v1/sessions/{id}/messages:
@@ -277,6 +301,8 @@ paths:
       summary: Append a human message
       description: The message is stored in the thread and delivered to the runtime.
       tags: [sessions]
+      security:
+        - bearerAuth: [sessions:write]
       requestBody:
         required: true
         content:
@@ -304,6 +330,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -317,6 +345,8 @@ paths:
       operationId: closeSession
       summary: Request a graceful close
       tags: [sessions]
+      security:
+        - bearerAuth: [sessions:write]
       requestBody:
         required: false
         content:
@@ -340,6 +370,8 @@ paths:
                     const: closing
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -353,6 +385,8 @@ paths:
       operationId: createAttachTicket
       summary: Issue a one-time WebSocket ticket
       tags: [sessions]
+      security:
+        - bearerAuth: [sessions:write]
       requestBody:
         required: false
         content:
@@ -380,6 +414,8 @@ paths:
                     type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -394,6 +430,8 @@ paths:
         Returns the latest bundle. The route answers `404` until finalize has
         stored it. Artifact metadata outlives `sessions.retention`.
       tags: [sessions]
+      security:
+        - bearerAuth: [sessions:read]
       responses:
         "200":
           description: The bundle archive.
@@ -404,6 +442,8 @@ paths:
                 format: binary
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
   /api/v1/sessions/{id}/ws:
@@ -418,8 +458,10 @@ paths:
 
         Server frames are `WebSocketServerMessage`. Client frames are
         `WebSocketClientMessage`. Events are replayed after `after`. The server
-        sends a ping control frame every 30 seconds.
+        sends a ping control frame every 30 seconds. The event object and the
+        compatibility rules are documented in docs/events.md.
       tags: [sessions]
+      security: []
       parameters:
         - name: ticket
           in: query
@@ -445,6 +487,8 @@ paths:
       operationId: getConfig
       summary: Read UI metadata
       tags: [config]
+      security:
+        - bearerAuth: [sessions:read]
       responses:
         "200":
           description: Defaults, allowed models, agents, skills, MCP servers, triggers, and schedules.
@@ -454,12 +498,16 @@ paths:
                 $ref: "#/components/schemas/Config"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
   /api/v1/schedules:
     get:
       operationId: listSchedules
       summary: List schedules
       description: Sorted by name.
       tags: [schedules]
+      security:
+        - bearerAuth: [schedules:read]
       parameters:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Cursor"
@@ -474,6 +522,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
   /api/v1/schedules/{name}/run:
     parameters:
       - name: name
@@ -488,6 +538,8 @@ paths:
         A manual run uses a random delivery key, so it neither consumes nor
         blocks a cron slot.
       tags: [schedules]
+      security:
+        - bearerAuth: [schedules:write]
       responses:
         "202":
           description: The run was queued.
@@ -501,6 +553,8 @@ paths:
                     type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -512,6 +566,8 @@ paths:
       operationId: getQueueStats
       summary: Read queue counters
       tags: [queue]
+      security:
+        - bearerAuth: [queue:read]
       responses:
         "200":
           description: Queue counters.
@@ -525,6 +581,8 @@ paths:
                     $ref: "#/components/schemas/QueueStats"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "503":
           $ref: "#/components/responses/Unavailable"
   /api/v1/queue/jobs/{id}:
@@ -539,6 +597,8 @@ paths:
       summary: Read one accepted job
       description: Includes the prompt and the session the job created.
       tags: [queue]
+      security:
+        - bearerAuth: [queue:read]
       responses:
         "200":
           description: The job record.
@@ -548,6 +608,8 @@ paths:
                 $ref: "#/components/schemas/JobResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "503":
@@ -558,6 +620,8 @@ paths:
       summary: List buried jobs
       description: Newest failure first, with the job id as tie-break. The prompt is omitted.
       tags: [queue]
+      security:
+        - bearerAuth: [queue:read]
       parameters:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Cursor"
@@ -572,6 +636,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "503":
           $ref: "#/components/responses/Unavailable"
   /api/v1/queue/dead/{id}/retry:
@@ -586,6 +652,8 @@ paths:
       summary: Requeue a buried job
       description: The attempt count is reset.
       tags: [queue]
+      security:
+        - bearerAuth: [queue:write]
       responses:
         "202":
           description: The job is back on the queue.
@@ -601,6 +669,8 @@ paths:
                     type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "503":
@@ -616,11 +686,15 @@ paths:
       operationId: deleteDeadJob
       summary: Drop a buried job
       tags: [queue]
+      security:
+        - bearerAuth: [queue:write]
       responses:
         "204":
           description: The job was removed.
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "503":
@@ -630,7 +704,15 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      description: The admin token from `MAYFLY_API_TOKEN`.
+      description: |
+        A named API token. Each operation lists the scope the token needs.
+        `admin` grants every scope. A missing, unknown, or expired token
+        returns `401` with code `unauthenticated`; a token without the
+        operation's scope returns `403` with code `forbidden`.
+
+        Tokens come from `server.tokens` in the control-plane configuration,
+        or from `server.token_env` as one token named `default` with the
+        admin scope. That variable is `MAYFLY_API_TOKEN` by default.
   parameters:
     SessionID:
       name: id
@@ -661,13 +743,15 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     Unauthorized:
-      description: The bearer token is missing or wrong.
+      description: >
+        The caller is not authenticated: a missing, unknown, or expired token,
+        an invalid webhook signature, or an invalid attach ticket.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     Forbidden:
-      description: The caller may not perform this action.
+      description: The token does not carry the scope the operation requires.
       content:
         application/json:
           schema:
@@ -728,7 +812,7 @@ components:
           description: Stable machine-readable code.
           enum:
             - invalid_request
-            - unauthorized
+            - unauthenticated
             - forbidden
             - not_found
             - method_not_allowed
@@ -912,6 +996,117 @@ components:
         data:
           type: object
           additionalProperties: true
+          description: |
+            Payload of the event. The shape depends on `type`. Each event type
+            that carries a payload has a schema in this document, and
+            docs/events.md maps every type to its schema. The field is absent
+            for a type without a payload. A client must ignore an unknown
+            event type and unknown fields.
+    UserMessageEventData:
+      type: object
+      description: Payload of a `user_message` event that a trigger started.
+      required: [kind, name, event]
+      properties:
+        kind:
+          type: string
+          description: "Trigger kind: api, generic, github, slack, or datadog."
+        name:
+          type: string
+        event:
+          type: string
+    AssistantMessageEventData:
+      type: object
+      description: Payload of an `assistant_message` event.
+      properties:
+        finish_reason:
+          type: string
+        tool_calls:
+          type: integer
+    ToolCallEventData:
+      type: object
+      description: Payload of a `tool_call` event.
+      required: [tool, call_id, arguments]
+      properties:
+        tool:
+          type: string
+        call_id:
+          type: string
+        arguments:
+          type: string
+          description: Tool arguments as a JSON-encoded string.
+    ToolResultEventData:
+      type: object
+      description: Payload of a `tool_result` event.
+      required: [tool, call_id, error]
+      properties:
+        tool:
+          type: string
+        call_id:
+          type: string
+        error:
+          type: boolean
+        interrupted:
+          type: boolean
+    StatusEventData:
+      type: object
+      description: Payload of a `status` event.
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [pending, running, closing, completed, failed, expired]
+        reason:
+          type: string
+        error:
+          type: string
+        restart:
+          type: integer
+    SystemEventData:
+      type: object
+      description: Payload of the first `system` event, which reports the runtime setup.
+      required: [model, skills, mcp_servers, plugins, tool_count]
+      properties:
+        model:
+          type: string
+        skills:
+          type: array
+          items:
+            type: string
+        mcp_servers:
+          type: array
+          items:
+            type: string
+        plugins:
+          type: array
+          items:
+            type: string
+        tool_count:
+          type: integer
+    ArtifactEventData:
+      type: object
+      description: Payload of an `artifact` event.
+      required: [key, uri, size, sha256]
+      properties:
+        key:
+          type: string
+        uri:
+          type: string
+        size:
+          type: integer
+          format: int64
+        sha256:
+          type: string
+        partial:
+          type: boolean
+    ControlEventData:
+      type: object
+      description: Payload of a `control` event.
+      required: [action]
+      properties:
+        action:
+          type: string
+        reason:
+          type: string
     SessionResponse:
       type: object
       required: [session, url]
@@ -930,6 +1125,12 @@ components:
             $ref: "#/components/schemas/Session"
         next_cursor:
           type: string
+    JobEnvelope:
+      $ref: "job.v1.schema.json"
+      description: >
+        The versioned queue job body. It is not an HTTP request or response
+        body; it is the JSON a producer writes to a queue backend and a worker
+        decodes. The schema file is the source of truth for the queue contract.
     Job:
       type: object
       required: [id, trigger, state, attempts, accepted_at]
