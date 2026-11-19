@@ -182,7 +182,7 @@ The message types are `WebSocketServerMessage` and `WebSocketClientMessage` in t
 
 ### `GET /api/v1/sessions/{id}/artifact`
 
-Downloads the latest bundle as `application/gzip`. Returns `404 not_found` until finalize has stored it. Artifact metadata outlives `sessions.retention`, so the bundle stays downloadable after the session leaves the session list. The index itself is in memory and resets when the control plane restarts; read the store directly after that.
+Downloads the latest bundle as `application/gzip`. Returns `404 not_found` until finalize has stored it. Artifact metadata outlives `sessions.retention` and the control-plane process, so the bundle stays downloadable after the session leaves the session list or the control plane restarts.
 
 ### `GET /api/v1/queue`
 
