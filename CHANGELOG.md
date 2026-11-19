@@ -2,6 +2,40 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
+## [0.2.0] - Unreleased
+
+Operators moving from 0.1.x or a release candidate should read
+[docs/migrating-to-0.2.md](docs/migrating-to-0.2.md).
+
+### Added
+
+- Durable session records and artifact index in `sessions.db`, with a stored `format_version`. A restarted control plane lists finished sessions that retention still covers, and artifact downloads keep working across a restart.
+- Bounded adopt retries. A failed adopt backs off from 15s to 2m and stops after 10 attempts instead of retrying every session.
+- Shutdown budget (`shutdown.budgetSeconds`, `server.shutdown_budget`) for the HTTP drain, queue worker drain, and session manager shutdown.
+- API error envelope `{"error":{"code","message","details?"}}`, cursor pagination with `items` and `next_cursor`, and an OpenAPI 3.1 spec at `api/openapi.yaml`.
+- `hack/api-diff.sh`, which fails CI on a breaking API change. It accepts additive optional fields in `api/job.v1.schema.json` and rejects removals, renames, retypes, and required-field changes.
+- Versioned queue job envelope `api/job.v1.schema.json`, documented in [docs/queue-jobs.md](docs/queue-jobs.md). Producers and stores encode and decode it through one codec, and the job id is derived from the idempotency key.
+- Typed event payloads in `internal/model`, with a schema per type in the OpenAPI document and the contract in [docs/events.md](docs/events.md).
+- Named API tokens with scopes under `server.tokens`, plus one audit line per authenticated, mutating `/api/v1` request.
+- Prometheus metrics and one structured request log line per request with a request id. `GET /metrics` is on the main port with an `admin` token or on a separate address.
+- Release supply chain: Trivy scans both image architectures before a tag exists, and cosign signs the image digests and the chart with the workflow identity. The Helm chart validates its values with `values.schema.json`.
+- Operator runbook with upgrade, state-volume backup and restore, dead-letter triage, stuck-session recovery, and restart steps. Deprecation policy in [docs/deprecation.md](docs/deprecation.md).
+- An end-to-end upgrade test that runs one release against the previous release and checks that in-flight sessions resume.
+
+### Breaking changes
+
+- Every API error now uses the JSON error envelope. A missing or unknown token returns 401 with code `unauthenticated`. An unknown error returns 500 `internal` instead of a 400 body, and an unmatched `/api` path returns the envelope. A create that fails after the session exists returns 500 with `details.session_id`.
+- List responses from `GET /api/v1/sessions`, `GET /api/v1/queue/dead`, and `GET /api/v1/schedules` return `items` and an optional `next_cursor` instead of the former `sessions`, `dead`, or `schedules` array. `limit` accepts 1 to 500, and any other value is `400 invalid_request`. Schedules are sorted by name.
+- CLI errors print `code: message` instead of a bare message. `MAYFLY_TOKEN` is a deprecated alias for `MAYFLY_API_TOKEN` and prints one warning.
+- `mayflyd` exits with code 2 when no API token is configured. It no longer generates a token and writes the secret to the log.
+- A non-empty `server.tokens` list replaces `server.token_env`. Every `/api/v1` route requires a scope. The legacy `default` token keeps the `admin` scope, and `POST /api/v1/sessions/{id}/attach-ticket` requires `sessions:write`.
+- Third-party producers and consumers of the raw queue payload must use the version 1 envelope. Mayfly still decodes the v0.1.0 and release-candidate shape, and rewrites it on the next record write.
+- The Go API changed for importers of the internal packages: `queue.Job.Delivery` is now `queue.Job.IdempotencyKey`, `queue.KindSession` is `"session.create"`, `queue.KindSource` is `"source.run"`, and `model.Event.Data` and `journal.StepEvent.Data` are `model.EventData` instead of `map[string]any`. The HTTP and WebSocket wire format is unchanged.
+- A restarted control plane now lists restored finished sessions and returns 204 for `DELETE` on them. A stored state file with a `format_version` newer than the build stops startup. The new `sessions.db` must be on the control-plane PersistentVolume.
+- Helm value `replicaCount` is removed, and `values.schema.json` rejects unknown top-level values. The chart pins one replica. `shutdown.budgetSeconds` must be less than `shutdown.gracePeriodSeconds`, or `helm template` fails.
+- The default LiteLLM image tag changes from `main-stable` to `v1.110.0`.
+- Published images and the chart are signed from 0.2.0. Releases before 0.2.0 have no signature.
+
 ## [0.1.0] - Unreleased
 
 ### Added
