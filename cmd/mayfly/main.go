@@ -94,7 +94,7 @@ Commands:
       print the events of a session
   attach ID [--name NAME] [--after N] [--once] [--exit-on-eof]
       join the session thread until Ctrl-C
-  send ID TEXT [--json]
+  send [--json] ID TEXT
       send a message to a session
   close ID [--reason R]
       close a session gracefully
@@ -526,15 +526,26 @@ func cmdEvents(args []string) error {
 func cmdSend(args []string) error {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "print the event as JSON")
-	positional, err := parseArgs(fs, args)
-	if err != nil {
+	// Flags go before TEXT, either before or after ID. Everything from the
+	// first TEXT word on is the message, sent as typed, so a message such as
+	// "rerun with --force" keeps its dashes.
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if len(positional) < 2 {
-		return fmt.Errorf("usage: mayfly send ID TEXT")
+	rest := fs.Args()
+	if len(rest) < 1 {
+		return fmt.Errorf("usage: mayfly send [--json] ID TEXT")
 	}
-	body, _ := json.Marshal(map[string]string{"text": strings.Join(positional[1:], " ")})
-	resp, err := request(http.MethodPost, "/api/v1/sessions/"+url.PathEscape(positional[0])+"/messages", body)
+	id := rest[0]
+	if err := fs.Parse(rest[1:]); err != nil {
+		return err
+	}
+	text := fs.Args()
+	if len(text) < 1 {
+		return fmt.Errorf("usage: mayfly send [--json] ID TEXT")
+	}
+	body, _ := json.Marshal(map[string]string{"text": strings.Join(text, " ")})
+	resp, err := request(http.MethodPost, "/api/v1/sessions/"+url.PathEscape(id)+"/messages", body)
 	if err != nil {
 		return err
 	}

@@ -14,7 +14,6 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 - `mayfly get` printed JSON with no flag. It now prints a readable summary by default; add `--json` to get the API object.
 - `--json` output for a session no longer includes a `backend` field. The CLI decoded the API response into a local struct and wrote it back; it now writes the API object unchanged.
-- `mayfly send` parses flags before and after the positional arguments. A message text that starts with `-` must follow `--`.
 
 ### Changed
 

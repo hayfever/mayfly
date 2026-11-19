@@ -185,9 +185,29 @@ func TestSendJSON(t *testing.T) {
 		}
 		io.WriteString(w, `{"event":{"seq":9,"time":"2026-11-19T10:00:00Z","type":"user_message","text":"hello"},"added_later":1}`)
 	}))
-	doc := object(t, command(t, func() error { return cmdSend([]string{"s1", "hello", "--json"}) }))
+	doc := object(t, command(t, func() error { return cmdSend([]string{"s1", "--json", "hello"}) }))
 	if object(t, doc["event"])["seq"] != float64(9) || doc["added_later"] != float64(1) {
 		t.Fatalf("document = %+v, want the API response", doc)
+	}
+}
+
+func TestSendKeepsDashesInText(t *testing.T) {
+	var got string
+	apiServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		got = body.Text
+		io.WriteString(w, `{"event":{"seq":1,"type":"user_message"}}`)
+	}))
+	if _, err := captureStdout(t, func() error { return cmdSend([]string{"s1", "rerun", "with", "--force", "-v"}) }); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if got != "rerun with --force -v" {
+		t.Fatalf("text = %q, want the message as typed", got)
 	}
 }
 
