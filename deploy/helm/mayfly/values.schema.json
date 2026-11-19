@@ -172,6 +172,28 @@
             "public_url": { "type": "string" },
             "internal_url": { "type": "string" },
             "token_env": { "type": "string" },
+            "tokens": {
+              "type": "array",
+              "description": "Named API tokens with explicit scopes. A non-empty list replaces token_env.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "scopes", "secret_env"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "scopes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "enum": ["admin", "sessions:read", "sessions:write", "queue:read", "queue:write", "schedules:read", "schedules:write"]
+                    }
+                  },
+                  "secret_env": { "type": "string", "minLength": 1 },
+                  "expires_at": { "type": "string" }
+                }
+              }
+            },
             "attach_ticket_ttl": { "type": "string" },
             "max_body_bytes": { "type": "integer", "minimum": 0 },
             "shutdown_budget": { "type": "string" }
@@ -662,6 +684,10 @@
         "sourcesSecret": {
           "type": "string",
           "description": "Secret whose keys become control-plane environment variables."
+        },
+        "tokensSecret": {
+          "type": "string",
+          "description": "Optional Secret whose keys are the secret_env variables of config.server.tokens."
         },
         "securityContext": { "type": "object" }
       }
