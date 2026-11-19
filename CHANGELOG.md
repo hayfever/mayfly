@@ -24,7 +24,7 @@ Operators moving from 0.1.x or a release candidate should read
 - A reproducible load and soak harness at `hack/loadtest`, with `make loadtest` and [docs/loadtest.md](docs/loadtest.md). It drives N concurrent sessions and webhook triggers against Mayfly with the `llmstub` backend and reports p50, p95, and p99 latency, error rate, session throughput, and goroutine and memory growth. It runs against local k3d or any kubeconfig and does not create cloud resources or use real model keys.
 - `/metrics` also exposes the standard Prometheus Go and process collectors, so a soak can watch runtime growth.
 - `POST /api/v1/schedules/{name}/run` returns the full accepted-job object. The webhook, manual schedule run, and dead-job retry use one accepted-job shape.
-- Documented the complete set of unauthenticated routes in [docs/security.md](docs/security.md).
+- Documented the complete set of unauthenticated routes in [docs/api.md](docs/api.md#public).
 
 ### Breaking changes
 
