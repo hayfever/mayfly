@@ -40,7 +40,7 @@ func readCachedArchive(dir, digest string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	archive, err := io.ReadAll(io.LimitReader(file, maxArchiveBytes+1))
 	if err != nil {
 		return nil, err

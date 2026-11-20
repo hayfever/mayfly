@@ -203,7 +203,7 @@ func writeLLMStream(w http.ResponseWriter, model string, calls []llmToolCall, co
 	flusher, _ := w.(http.Flusher)
 	send := func(payload any) {
 		data, _ := json.Marshal(payload)
-		fmt.Fprintf(w, "data: %s\n\n", data)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -234,7 +234,7 @@ func writeLLMStream(w http.ResponseWriter, model string, calls []llmToolCall, co
 	final := cloneMap(base)
 	final["choices"] = []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": finish}}
 	send(final)
-	fmt.Fprint(w, "data: [DONE]\n\n")
+	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	if flusher != nil {
 		flusher.Flush()
 	}

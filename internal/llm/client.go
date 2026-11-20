@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -138,7 +139,7 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool,
 	if err != nil {
 		return Message{}, "", fmt.Errorf("llm request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		return Message{}, "", &StatusError{Code: resp.StatusCode, Body: strings.TrimSpace(string(msg))}
@@ -240,7 +241,7 @@ func (c *Client) readStream(r io.Reader, onDelta func(string)) (Message, string,
 			}
 			err := handle(strings.TrimSpace(data.String()))
 			data.Reset()
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			if err != nil {

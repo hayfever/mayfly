@@ -161,7 +161,6 @@ func TestUpgradeFromLastRelease(t *testing.T) {
 	if s.Trigger.JobID != jobID {
 		t.Errorf("session %s trigger job id = %q, want %q", s.ID, s.Trigger.JobID, jobID)
 	}
-	sessions = append(sessions, s)
 }
 
 // installRelease runs helm upgrade --install for the upgrade release with the

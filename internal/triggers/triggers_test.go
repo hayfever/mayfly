@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -53,7 +54,7 @@ func TestGitHubSignatureAndPrompt(t *testing.T) {
 	}
 
 	header.Set("X-Hub-Signature-256", "sha256="+hmacHex("wrong", body))
-	if _, err := Parse(cfg, header, body); err != ErrUnauthorized {
+	if _, err := Parse(cfg, header, body); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("expected unauthorized, got %v", err)
 	}
 }
@@ -98,7 +99,7 @@ func TestGenericTokenAuthAndTemplate(t *testing.T) {
 		t.Fatalf("prompt = %q", res.Options.Prompt)
 	}
 	header.Set("X-Mayfly-Token", "bad")
-	if _, err := Parse(cfg, header, body); err != ErrUnauthorized {
+	if _, err := Parse(cfg, header, body); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("expected unauthorized, got %v", err)
 	}
 }
@@ -137,7 +138,7 @@ func TestSlackChallengeAndSlashCommand(t *testing.T) {
 	}
 
 	header.Set("X-Slack-Signature", "v0=deadbeef")
-	if _, err := Parse(cfg, header, form); err != ErrUnauthorized {
+	if _, err := Parse(cfg, header, form); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("expected unauthorized, got %v", err)
 	}
 }
@@ -148,7 +149,7 @@ func TestGitHubRejectsStaticToken(t *testing.T) {
 	header := http.Header{}
 	header.Set("X-GitHub-Event", "pull_request")
 	header.Set("X-Mayfly-Token", "gh-secret")
-	if _, err := Parse(cfg, header, body); err != ErrUnauthorized {
+	if _, err := Parse(cfg, header, body); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("replayed token was accepted: %v", err)
 	}
 

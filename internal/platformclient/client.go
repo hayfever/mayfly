@@ -70,7 +70,7 @@ func (c *Client) Emit(ctx context.Context, events ...model.Event) error {
 	if err != nil {
 		return fmt.Errorf("emit events: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("emit events: status %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
@@ -134,7 +134,7 @@ func (c *Client) inboxOnce(ctx context.Context, after int64, fn func(model.Event
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("inbox: status %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
@@ -204,7 +204,7 @@ func (c *Client) uploadOnce(ctx context.Context, path, sha256Hex string, size in
 	if err != nil {
 		return model.ArtifactInfo{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.path("/artifacts"), f)
 	if err != nil {
 		return model.ArtifactInfo{}, err
@@ -220,7 +220,7 @@ func (c *Client) uploadOnce(ctx context.Context, path, sha256Hex string, size in
 	if err != nil {
 		return model.ArtifactInfo{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return model.ArtifactInfo{}, fmt.Errorf("upload artifact: status %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
@@ -252,7 +252,7 @@ func (c *Client) Finalize(ctx context.Context, status model.SessionStatus, reaso
 	if err != nil {
 		return fmt.Errorf("finalize: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("finalize: status %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
@@ -357,7 +357,7 @@ func (c *Client) toolRequest(ctx context.Context, op, method, suffix string, bod
 	if err != nil {
 		return fmt.Errorf("%s: %w", op, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return &ToolError{
@@ -473,7 +473,7 @@ func (c *Client) AppendJournal(ctx context.Context, e journal.Entry) error {
 		if err != nil {
 			return fmt.Errorf("append journal: %w", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode >= 300 {
 			msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			return &httpStatusError{op: "append journal", status: resp.StatusCode, body: strings.TrimSpace(string(msg))}
@@ -497,7 +497,7 @@ func (c *Client) TurnJournal(ctx context.Context, session string, turn int64) ([
 		if err != nil {
 			return fmt.Errorf("read journal: %w", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode >= 300 {
 			msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			return &httpStatusError{op: "read journal", status: resp.StatusCode, body: strings.TrimSpace(string(msg))}
@@ -533,7 +533,7 @@ func (c *Client) LastJournalTurn(ctx context.Context) (int64, error) {
 		if err != nil {
 			return fmt.Errorf("read last journal turn: %w", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode >= 300 {
 			msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			return &httpStatusError{op: "read last journal turn", status: resp.StatusCode, body: strings.TrimSpace(string(msg))}
@@ -590,7 +590,7 @@ func (c *Client) ReadArtifact(ctx context.Context, key string, offset, limit int
 	if err != nil {
 		return ArtifactWindow{}, fmt.Errorf("read artifact: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return ArtifactWindow{}, fmt.Errorf("read artifact: status %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))

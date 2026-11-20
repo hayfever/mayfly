@@ -22,7 +22,7 @@ func SessionHandler(create func(context.Context, session.CreateOptions) (*model.
 		sess, err := create(ctx, options)
 		if err != nil {
 			if errors.Is(err, session.ErrCapacity) {
-				return Result{}, fmt.Errorf("%w: %v", ErrRetryLater, err)
+				return Result{}, fmt.Errorf("%w: %w", ErrRetryLater, err)
 			}
 			return Result{}, err
 		}

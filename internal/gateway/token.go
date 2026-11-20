@@ -53,7 +53,7 @@ func SignToken(key []byte, c Claims) (string, error) {
 	}
 	payload, err := json.Marshal(c)
 	if err != nil {
-		return "", fmt.Errorf("%w: encode claims: %v", ErrToken, err)
+		return "", fmt.Errorf("%w: encode claims: %w", ErrToken, err)
 	}
 	encoded := base64.RawURLEncoding.EncodeToString(payload)
 	return TokenVersion + "." + encoded + "." + sign(key, TokenVersion+"."+encoded), nil

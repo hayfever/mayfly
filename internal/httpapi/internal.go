@@ -234,11 +234,10 @@ func (s *Server) internalInbox(w http.ResponseWriter, r *http.Request) {
 	} else if after > last {
 		// The control plane restarted and sequence numbering restarted. Tell
 		// the runtime to reconnect from zero instead of silently missing events.
-		after = 0
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "event: reset\ndata: {}\n\n")
+		_, _ = fmt.Fprint(w, "event: reset\ndata: {}\n\n")
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
@@ -257,7 +256,7 @@ func (s *Server) internalInbox(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
-	fmt.Fprint(w, "retry: 1000\n: connected\n\n")
+	_, _ = fmt.Fprint(w, "retry: 1000\n: connected\n\n")
 	if flusher != nil {
 		flusher.Flush()
 	}
@@ -276,12 +275,12 @@ func (s *Server) internalInbox(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "event: message\ndata: %s\n\n", data)
+			_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", data)
 			if flusher != nil {
 				flusher.Flush()
 			}
 		case <-ping.C:
-			fmt.Fprint(w, ": ping\n\n")
+			_, _ = fmt.Fprint(w, ": ping\n\n")
 			if flusher != nil {
 				flusher.Flush()
 			}

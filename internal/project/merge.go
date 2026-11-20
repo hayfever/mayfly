@@ -66,15 +66,6 @@ func rawString(raw map[string]any, key string) string {
 	return text
 }
 
-func rawBool(raw map[string]any, key string) (bool, bool) {
-	value, ok := raw[key]
-	if !ok {
-		return false, false
-	}
-	flag, ok := value.(bool)
-	return flag, ok
-}
-
 func sortedKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for key := range m {

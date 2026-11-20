@@ -607,7 +607,7 @@ func (c *Client) Logs(ctx context.Context, podName string, maxBytes int64) (stri
 	if err != nil {
 		return "", err
 	}
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 	data, err := io.ReadAll(io.LimitReader(stream, maxBytes))
 	if err != nil {
 		return "", err

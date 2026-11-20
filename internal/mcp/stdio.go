@@ -182,7 +182,7 @@ func waitDone(done <-chan struct{}, d time.Duration) bool {
 func (t *stdioTransport) exitError(cause error) error {
 	stderr := strings.TrimSpace(t.stderr.String())
 	if stderr != "" {
-		return fmt.Errorf("mcp server exited (%v): %s", cause, stderr)
+		return fmt.Errorf("mcp server exited (%w): %s", cause, stderr)
 	}
 	return fmt.Errorf("mcp server exited: %w", cause)
 }

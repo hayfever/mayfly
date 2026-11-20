@@ -308,7 +308,6 @@ func (r *Runtime) Run(ctx context.Context) error {
 			resetIdle()
 		case msg := <-controlCh:
 			if msg.action == "close" {
-				closed = true
 				if msg.reason != "" {
 					reason = msg.reason
 				}

@@ -258,7 +258,7 @@ func (s *redisStore) Ack(ctx context.Context, lease Lease, result Result) error 
 func (s *redisStore) Nack(ctx context.Context, lease Lease, cause error) error {
 	payload, err := s.client.HGet(ctx, s.jobs, lease.ID).Bytes()
 	if err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			return nil
 		}
 		return err
@@ -327,17 +327,17 @@ func (s *redisStore) Get(ctx context.Context, id string) (Record, bool, error) {
 		}
 		return record, true, nil
 	}
-	if err != redis.Nil {
+	if !errors.Is(err, redis.Nil) {
 		return Record{}, false, err
 	}
 	if payload, err := s.client.HGet(ctx, s.dead, id).Bytes(); err == nil {
 		dead := decodeDead(payload)
 		return Record{Job: dead.Job, State: StateDead, Error: dead.Error, FailedAt: dead.FailedAt}, true, nil
-	} else if err != redis.Nil {
+	} else if !errors.Is(err, redis.Nil) {
 		return Record{}, false, err
 	}
 	payload, err = s.client.Get(ctx, s.done+id).Bytes()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return Record{}, false, nil
 	}
 	if err != nil {
@@ -369,7 +369,7 @@ func (s *redisStore) Dead(ctx context.Context, limit int) ([]Record, error) {
 
 func (s *redisStore) Retry(ctx context.Context, id string) error {
 	payload, err := s.client.HGet(ctx, s.dead, id).Bytes()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return ErrNotFound
 	}
 	if err != nil {
@@ -411,7 +411,7 @@ func (s *redisStore) Stats(ctx context.Context) (Stats, error) {
 	leased := pipe.ZCount(ctx, s.queue, "("+fmt.Sprint(now), "+inf")
 	dead := pipe.HLen(ctx, s.dead)
 	first := pipe.ZRangeWithScores(ctx, s.queue, 0, 0)
-	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
 		return Stats{}, err
 	}
 	stats := Stats{Pending: int(pending.Val()), Leased: int(leased.Val()), Dead: int(dead.Val())}

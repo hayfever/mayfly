@@ -53,11 +53,7 @@ func parsePath(raw string) ([]pathSegment, error) {
 	return segments, nil
 }
 
-// lookupPath resolves one path against decoded JSON.
-func lookupPath(value any, segments []pathSegment) (any, bool) {
-	return lookupSegments(value, segments)
-}
-
+// lookupSegments resolves one path against decoded JSON.
 func lookupSegments(value any, segments []pathSegment) (any, bool) {
 	if len(segments) == 0 {
 		return value, true
