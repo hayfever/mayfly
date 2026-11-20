@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
+## [1.0.0-rc.1] - Unreleased
+
+### Added
+
+- `docs/api-reference.md`, generated from `api/openapi.yaml` by `go run ./hack/apidoc`. The `-check` flag exits 1 with a diff when the committed file is stale.
+
 ## [0.3.0] - 2026-11-19
 
 ### Added
