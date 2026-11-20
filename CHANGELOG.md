@@ -9,6 +9,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 - `--json` on `mayfly get`, `mayfly send`, and `mayfly version`. Every command that prints data now accepts it.
 - `mayfly artifact --output FILE` as the long form of `-o`.
 - `mayfly help` lists every command and every flag.
+- `hack/surface-diff.sh` fails CI when the `mayfly` CLI surface changes without a recorded break. The surface is generated into `cmd/mayfly/testdata/cli-surface.txt` from the flag sets the commands parse, and `go test ./cmd/mayfly -run TestCLISurface -update` records a change.
 
 ### Breaking changes
 

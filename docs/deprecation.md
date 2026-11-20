@@ -35,6 +35,8 @@ A command with `--json` writes one JSON document to stdout and nothing else. The
 
 The promise does not cover the text output. Wording, columns, alignment, ordering, and progress lines change without notice. Parse `--json`, not the text. The promise also does not cover error `message` text; match on the error `code`, as the HTTP API section says.
 
+`cmd/mayfly` generates the surface into `cmd/mayfly/testdata/cli-surface.txt`, and `hack/surface-diff.sh` compares that file against the pull request base. A line that disappears or changes fails the gate unless `CHANGELOG.md` records the break under "Breaking changes".
+
 ## What the promise does not cover
 
 - `/internal/v1`, the session runtime protocol. It is versioned with the runtime image, and both ends ship together.
