@@ -40,6 +40,7 @@ func login(t *testing.T, handler http.Handler, token string) (*httptest.Response
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPost, webSessionRoute, strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	var cookies loginCookies
@@ -127,6 +128,7 @@ func TestWebLoginSecureCookies(t *testing.T) {
 	cfg.Server.Tokens = []config.APITokenConfig{{Name: "web", Scopes: []string{config.ScopeAdmin}, Secret: "web-secret"}}
 	s := New(cfg, nil, nil, testLogger())
 	req := httptest.NewRequest(http.MethodPost, webSessionRoute, strings.NewReader(`{"token":"web-secret"}`))
+	req.Header.Set("Content-Type", "application/json")
 	req.TLS = &tls.ConnectionState{}
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
@@ -161,6 +163,7 @@ func TestWebLoginRejectsBadTokens(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPost, webSessionRoute, strings.NewReader(`{"token":`))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
@@ -520,6 +523,7 @@ func TestWebLoginAudit(t *testing.T) {
 
 	post := func(body string) {
 		req := httptest.NewRequest(http.MethodPost, webSessionRoute, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 	}
@@ -610,6 +614,44 @@ func TestWebBundleHasNoTokenStorage(t *testing.T) {
 	for _, required := range []string{`localStorage.removeItem("mayfly.token")`, `/api/v1/auth/session`, `X-Mayfly-CSRF`} {
 		if !strings.Contains(script, required) {
 			t.Errorf("app.js does not contain %q", required)
+		}
+	}
+}
+
+// TestWebLoginRefusesCrossSite covers login CSRF: another site must not be able
+// to sign a browser in with a token of its choosing.
+func TestWebLoginRefusesCrossSite(t *testing.T) {
+	_, handler := webTestServer(t, "https://mayfly.example.com")
+	post := func(contentType, origin string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, webSessionRoute, strings.NewReader(`{"token":"web-secret"}`))
+		req.Host = "mayfly.example.com"
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	for _, tc := range []struct {
+		name, contentType, origin string
+		status                    int
+	}{
+		{"form post", "text/plain", "", http.StatusBadRequest},
+		{"urlencoded", "application/x-www-form-urlencoded", "", http.StatusBadRequest},
+		{"no content type", "", "", http.StatusBadRequest},
+		{"cross-site origin", "application/json", "https://evil.example", http.StatusForbidden},
+		{"same origin", "application/json; charset=utf-8", "https://mayfly.example.com", http.StatusCreated},
+		{"no origin", "application/json", "", http.StatusCreated},
+	} {
+		rec := post(tc.contentType, tc.origin)
+		if rec.Code != tc.status {
+			t.Errorf("%s: status = %d, want %d; body=%s", tc.name, rec.Code, tc.status, rec.Body.String())
+		}
+		if tc.status != http.StatusCreated && len(rec.Result().Cookies()) != 0 {
+			t.Errorf("%s: set a cookie", tc.name)
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -274,7 +275,21 @@ func newWebSessionResponse(token config.APITokenConfig, expires time.Time) webSe
 // createWebSession exchanges an API token for the two cookies. The body is
 // strict JSON, and the token is checked with the same constant-time comparison
 // as a bearer header.
+//
+// Sign-in is itself protected against cross-site requests: the body must be
+// application/json, which a cross-site HTML form cannot send without a CORS
+// preflight, and an Origin header must name this deployment. Without these
+// checks another site could sign a browser in with the attacker's token.
 func (s *Server) createWebSession(w http.ResponseWriter, r *http.Request) {
+	if origin := r.Header.Get("Origin"); origin != "" && !s.originAllowed(r, origin) {
+		s.writeAudit(r, "unknown", authViaWeb, webSessionRoute, "", http.StatusForbidden)
+		writeError(w, http.StatusForbidden, codeForbidden, "cross-site sign-in refused")
+		return
+	}
+	if mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mediaType != "application/json" {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "Content-Type must be application/json")
+		return
+	}
 	var req webLoginRequest
 	if err := decodeJSONStrict(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
 		writeError(w, http.StatusBadRequest, codeInvalidRequest, "invalid JSON body")

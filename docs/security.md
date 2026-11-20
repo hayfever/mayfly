@@ -305,6 +305,8 @@ The cookie is accepted in place of `Authorization: Bearer` on every `/api/v1` op
 
 A cookie-authenticated mutating request (`POST`, `PUT`, `PATCH`, `DELETE`) must send `X-Mayfly-CSRF` with the `mayfly_csrf` value. When the request carries an `Origin` header, its host must match the configured `server.public_url` or the request host, and an https `server.public_url` requires an https origin. A failure returns `403` with code `forbidden` and message `csrf check failed`. Bearer requests are exempt, because a browser cannot attach the header on its own.
 
+Sign-in is protected the same way. `POST /api/v1/auth/session` accepts only an `application/json` body, which a cross-site form cannot send without a CORS preflight, and refuses an `Origin` that fails the check above with `403 forbidden`. Another site therefore cannot sign a browser in with a token of its choosing.
+
 ## Audit log
 
 The control plane writes one audit line for every authenticated, mutating `/api/v1` request: `POST`, `PUT`, `PATCH`, and `DELETE`. This includes a request that a valid token is not allowed to make, which is logged with status `403`. The operator actions in this API are all mutating requests.
