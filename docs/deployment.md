@@ -47,7 +47,51 @@ To check a cluster before relying on it, run the end-to-end suite against it. It
 
 ## Helm
 
-A tagged release publishes the chart to `oci://ghcr.io/hayfever/charts/mayfly`. The current release candidate is `v0.1.0-rc.2`, and its images and chart are private, so pulling them needs a GitHub token with `read:packages`. To install from a checkout, build the images, import them into the cluster, and set the image names and tags:
+`0.2.0` is the current release. A tagged release publishes `ghcr.io/hayfever/mayflyd`, `ghcr.io/hayfever/mayfly-agent`, and the chart at `oci://ghcr.io/hayfever/charts/mayfly`. The packages are public, so Helm and Docker pull them anonymously. Install the published chart:
+
+```bash
+kubectl create namespace mayfly
+kubectl -n mayfly create secret generic mayfly-secrets \
+  --from-literal=MAYFLY_API_TOKEN="$(openssl rand -hex 24)" \
+  --from-literal=MAYFLY_WEBHOOK_SECRET="$(openssl rand -hex 24)" \
+  --from-literal=OPENAI_API_KEY="sk-..."
+
+helm install mayfly oci://ghcr.io/hayfever/charts/mayfly \
+  --version 0.2.0 \
+  --namespace mayfly \
+  --set existingSecret=mayfly-secrets \
+  --set config.server.public_url=https://mayfly.example.com
+```
+
+### Verify a release
+
+All three artifacts are signed by digest with the release workflow identity. Resolve the tag first, then verify; a tag can move and a digest cannot:
+
+```bash
+digest="$(crane digest ghcr.io/hayfever/mayflyd:0.2.0)"
+cosign verify \
+  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "ghcr.io/hayfever/mayflyd@${digest}"
+
+digest="$(crane digest ghcr.io/hayfever/mayfly-agent:0.2.0)"
+cosign verify \
+  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "ghcr.io/hayfever/mayfly-agent@${digest}"
+
+digest="$(crane digest ghcr.io/hayfever/charts/mayfly:0.2.0)"
+cosign verify \
+  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "ghcr.io/hayfever/charts/mayfly@${digest}"
+```
+
+Each command must print the workflow identity and the tag. The OIDC issuer is the only trust anchor; there is no public key to fetch. Both images also carry BuildKit SBOM and provenance attestations. Verify those with the same identity flags and `cosign verify-attestation --type slsaprovenance`. See [release.md](release.md#verify-a-published-release).
+
+### Install from a checkout
+
+To install from a checkout, build the images, import them into the cluster, and set the image names and tags:
 
 ```bash
 make image
@@ -69,16 +113,6 @@ helm install mayfly deploy/helm/mayfly \
   --set config.server.public_url=https://mayfly.example.com
 ```
 
-To install the published chart instead:
-
-```bash
-helm install mayfly oci://ghcr.io/hayfever/charts/mayfly \
-  --version 0.1.0-rc.2 \
-  --namespace mayfly \
-  --set existingSecret=mayfly-secrets \
-  --set config.server.public_url=https://mayfly.example.com
-```
-
 The chart creates the control-plane and agent ServiceAccounts, RBAC, ConfigMaps for skills and agent manifests, Service, optional Ingress, and optional LiteLLM deployment. Set `image.digest` and `agentImage.digest` for immutable images and `imagePullSecrets` for private registries. See [../deploy/helm/mayfly/README.md](../deploy/helm/mayfly/README.md).
 
 Service plugins need `config.plugins.namespace`. When it is empty it follows `config.sessions.namespace`. The chart renders the plugin Role and RoleBinding in that namespace when it differs from the release namespace: create, get, list, update, and delete on Secrets, Services, Deployments, and NetworkPolicies. Set `config.agents.allowed_images` to allow the plugin images, and `config.plugins.audit_path` when you want the call audit on the control-plane volume. Inline and sidecar plugins need no extra RBAC: their objects are part of the session pod.
@@ -88,10 +122,10 @@ Service plugins need `config.plugins.namespace`. When it is empty it follows `co
 1. Build and push images:
 
 ```bash
-docker build --target mayflyd -t registry.example.com/mayflyd:v0.1.0 .
-docker build --target mayfly-agent -t registry.example.com/mayfly-agent:v0.1.0 .
-docker push registry.example.com/mayflyd:v0.1.0
-docker push registry.example.com/mayfly-agent:v0.1.0
+docker build --target mayflyd -t registry.example.com/mayflyd:v0.2.0 .
+docker build --target mayfly-agent -t registry.example.com/mayfly-agent:v0.2.0 .
+docker push registry.example.com/mayflyd:v0.2.0
+docker push registry.example.com/mayfly-agent:v0.2.0
 ```
 
 2. Edit the base manifests or overlay:

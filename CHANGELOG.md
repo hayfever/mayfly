@@ -25,6 +25,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 - `--json` output for `run`, `ls`, `agents`, and `events` is the API object unchanged. Fields the CLI does not model pass through, and the CLI no longer adds or drops fields.
 - `Trigger.kind` and the `kind` field of a `user_message` event are documented as open strings. Clients must ignore a value this build does not know.
+- Install and release docs describe the public 0.2.0 images and chart, verify releases by digest with cosign, and [docs/security.md](docs/security.md) adds an attacker-by-asset threat model.
 
 ## [0.2.0] - 2026-11-19
 

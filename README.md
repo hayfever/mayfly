@@ -62,7 +62,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the code map and invariants, and [doc
 
 ## Install with Helm
 
-The current release candidate is `v0.1.0-rc.2`. Each tagged release publishes `ghcr.io/hayfever/mayflyd`, `ghcr.io/hayfever/mayfly-agent`, and the chart at `oci://ghcr.io/hayfever/charts/mayfly`. The packages are private during the release candidate, so pulling them needs a GitHub token with `read:packages`. The k3d quickstart below builds the images locally instead. Install the release candidate with:
+`0.2.0` is the current release. Each tagged release publishes `ghcr.io/hayfever/mayflyd`, `ghcr.io/hayfever/mayfly-agent`, and the chart at `oci://ghcr.io/hayfever/charts/mayfly`. The packages are public, so Helm and Docker pull them anonymously. The k3d quickstart below builds the images locally instead. Install `0.2.0` with:
 
 ```bash
 kubectl create namespace mayfly
@@ -73,13 +73,39 @@ kubectl -n mayfly create secret generic mayfly-secrets \
   --from-literal=OPENAI_API_KEY="sk-..."
 
 helm install mayfly oci://ghcr.io/hayfever/charts/mayfly \
-  --version 0.1.0-rc.2 \
+  --version 0.2.0 \
   --namespace mayfly \
   --set existingSecret=mayfly-secrets \
   --set config.server.public_url=https://mayfly.example.com
 ```
 
 For LiteLLM, set `litellm.enabled=true` and provide the provider keys in `litellm-secrets`. See [docs/providers.md](docs/providers.md) and [deploy/helm/mayfly/README.md](deploy/helm/mayfly/README.md).
+
+### Verify a release
+
+All three artifacts are signed by digest with the release workflow identity. Resolve the tag first, then verify; a tag can move and a digest cannot:
+
+```bash
+digest="$(crane digest ghcr.io/hayfever/mayflyd:0.2.0)"
+cosign verify \
+  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "ghcr.io/hayfever/mayflyd@${digest}"
+
+digest="$(crane digest ghcr.io/hayfever/mayfly-agent:0.2.0)"
+cosign verify \
+  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "ghcr.io/hayfever/mayfly-agent@${digest}"
+
+digest="$(crane digest ghcr.io/hayfever/charts/mayfly:0.2.0)"
+cosign verify \
+  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "ghcr.io/hayfever/charts/mayfly@${digest}"
+```
+
+Each command must print the workflow identity and the tag. The OIDC issuer is the only trust anchor; there is no public key to fetch. Both images also carry BuildKit SBOM and provenance attestations. Verify those with the same identity flags and `cosign verify-attestation --type slsaprovenance`. See [docs/release.md](docs/release.md#verify-a-published-release) for the full procedure.
 
 The chart ships `config.triggers: []`. Add a trigger in your values file. This one exposes `/hooks/generic` and checks the request signature or the `X-Mayfly-Token` header against `MAYFLY_WEBHOOK_SECRET`:
 
@@ -128,7 +154,7 @@ curl -sS http://localhost:8080/hooks/generic \
 ```
 
 ```json
-{"accepted":true,"duplicate":false,"job_id":"9c1e4a7b2d5f...","delivery":""}
+{"accepted":true,"duplicate":false,"job_id":"9c1e4a7b2d5f...","delivery":"","status":"queued"}
 ```
 
 The queue worker starts the session within a few seconds. `./bin/mayfly ls`
@@ -225,7 +251,7 @@ skills:
 
 ## Status
 
-Mayfly is experimental and single-tenant. The current release candidate is `0.1.0-rc.2`. The API and harness protocol may change during 0.x. Read [docs/deployment.md](docs/deployment.md) and the known limitations in [CHANGELOG.md](CHANGELOG.md) before exposing it.
+Mayfly is `0.2.0`, pre-1.0, and single-tenant. The public surface may change in a 0.x minor release; from 1.0.0 the policy in [docs/deprecation.md](docs/deprecation.md) applies. Read [docs/deployment.md](docs/deployment.md) and the known limitations in [CHANGELOG.md](CHANGELOG.md) before exposing it. Upgrade from 0.1.x with [docs/migrating-to-0.2.md](docs/migrating-to-0.2.md).
 
 ## Security model
 
