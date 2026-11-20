@@ -259,7 +259,7 @@ func New(cfg *config.Config, bundle *project.Bundle, store artifact.Store, h *hu
 			Timeout:         source.Timeout.Std(),
 		})
 	}
-	loaded, err := skills.Load(cfg.Skills.Dirs, sources)
+	loaded, err := skills.Load(cfg.Skills.Dirs, sources, skills.Options{CacheDir: cfg.Skills.CacheDir, Logger: logger})
 	if err != nil {
 		return nil, err
 	}

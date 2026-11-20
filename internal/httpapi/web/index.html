@@ -12,6 +12,7 @@
     <div class="spacer"></div>
     <span id="conn" class="conn">disconnected</span>
     <button id="settings" class="ghost" type="button">Settings</button>
+    <button id="signout" class="ghost" type="button" hidden>Sign out</button>
   </header>
 
   <main>
@@ -53,12 +54,12 @@
     <form method="dialog" id="auth-form">
       <h2>Connection</h2>
       <label>Admin token
-        <input id="token-input" type="password" autocomplete="off" required>
+        <input id="token-input" type="password" autocomplete="off" placeholder="paste to sign in">
       </label>
       <label>Display name
         <input id="name-input" type="text" autocomplete="off" placeholder="web">
       </label>
-      <p class="hint">Stored in this browser only. The token is required for the admin API.</p>
+      <p class="hint">The token is exchanged for a session cookie. It is not stored in this browser, and the session ends when you sign out or the control plane restarts.</p>
       <menu>
         <button id="auth-cancel" class="ghost" value="cancel">Cancel</button>
         <button class="primary" value="save">Save</button>

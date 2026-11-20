@@ -24,6 +24,7 @@ func TestUnauthenticatedRouteAudit(t *testing.T) {
 
 	do := func(method, target, token, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}

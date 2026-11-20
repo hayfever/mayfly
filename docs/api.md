@@ -2,11 +2,13 @@
 
 [`api/openapi.yaml`](../api/openapi.yaml) is the source of truth for this API: every route, request field, response field, error code, and WebSocket message type. This page explains the same surface for people, and it covers behavior that a schema cannot show, such as when a worker creates a session.
 
+[api-reference.md](api-reference.md) is the generated reference: one table for every tag, then each operation with its parameters, request body, responses, and error codes. `go run ./hack/apidoc` writes that file from the spec, and a stale copy fails `go test ./...`.
+
 The admin API at `/api/v1` and the webhook receivers at `/hooks/{name}` are the public API. A change to either starts in the spec, and a pull request that breaks a client fails the `api-diff` CI job.
 
 `/internal/v1` is the session runtime protocol. It is versioned with the runtime image and is **outside** this API promise. The sections below that describe `/internal/v1` are notes for runtime authors, not a compatibility commitment.
 
-Admin endpoints require a named API token: `Authorization: Bearer <token>`. Each operation in the spec lists the scope the token needs, and [security.md](security.md#api-authentication) maps every route to its scope. A missing, unknown, or expired token gets `401`; a token without the scope of the route gets `403`. Internal endpoints require the session token. JSON bodies use `Content-Type: application/json`.
+Admin endpoints accept a named API token as `Authorization: Bearer <token>` or the web UI session cookie from `POST /api/v1/auth/session`. Each operation in the spec lists the scope the credential needs, and [security.md](security.md#api-authentication) maps every route to its scope. A missing, unknown, or expired credential gets `401`; a credential without the scope of the route gets `403`. When a request carries a bearer token, the server checks only that token and ignores any cookie. A cookie-authenticated mutating request must also send `X-Mayfly-CSRF`. Internal endpoints require the session token. JSON bodies use `Content-Type: application/json`.
 
 ## Errors
 
@@ -22,7 +24,7 @@ Every failed request to `/api/v1` or `/hooks/{name}` returns one envelope:
 |---|---|---|
 | `invalid_request` | 400 | Bad JSON, an unknown request field, a bad `limit` or `cursor`, an unknown agent, skill, or MCP server, a bad TTL, a bad tool turn or step, or an unverifiable webhook body |
 | `unauthenticated` | 401 | Missing, unknown, or expired API token, invalid webhook signature, or invalid attach ticket |
-| `forbidden` | 403 | The token does not carry the scope of the route, or the session may not use the requested tool |
+| `forbidden` | 403 | The credential does not carry the scope of the route, a cookie-authenticated mutation failed the CSRF check, a web sign-in came from another origin, or the session may not use the requested tool |
 | `not_found` | 404 | Unknown route, session, trigger, artifact, job, dead job, or schedule; a tool route for a non-built-in harness |
 | `method_not_allowed` | 405 | The route exists with another method; `Allow` names the method |
 | `conflict` | 409 | The session is closed, or a tool call key was reused with another tool or other arguments |
@@ -260,6 +262,18 @@ The schedules compiled from agent files at startup, sorted by name.
 ### `POST /api/v1/schedules/{name}/run`
 
 Enqueues one manual run of the named schedule and returns `202` with the accepted-job object: `{"accepted":true,"duplicate":false,"job_id":"s-...","delivery":"manual:...","status":"queued"}`. The run writes its artifact and creates a session when the change totals match the schedule trigger, the same as a cron slot. Manual runs use a random delivery key, so they do not consume or block a cron slot. Unknown schedule: `404 not_found`. Scheduler not started: `503 unavailable`.
+
+### `POST /api/v1/auth/session`
+
+Exchanges an API token for a browser session. Body: `{"token":"<secret>"}` with `Content-Type: application/json`; any other content type returns `400 bad_request`. A request whose `Origin` header names another site returns `403 forbidden` with message `cross-site sign-in refused`. `201` with `{"name":"ci","scopes":["sessions:read"],"expires_at":"2026-11-20T00:00:00Z"}`. Sets `mayfly_session` (HttpOnly, SameSite=Strict, Secure over https) and `mayfly_csrf` (readable by the page). The session lasts 12 hours, or less when the token's `expires_at` is earlier. An unknown or expired token returns `401 unauthenticated` and sets no cookie. Sessions are in memory: a restart signs every browser out.
+
+### `GET /api/v1/auth/session`
+
+Returns the current session as `{"name","scopes","expires_at"}` from the `mayfly_session` cookie, or `401 unauthenticated`. A bearer token does not authenticate this route.
+
+### `DELETE /api/v1/auth/session`
+
+Ends the session and expires both cookies. `204`. Requires the session cookie and `X-Mayfly-CSRF` with the `mayfly_csrf` value; a mismatch returns `403 forbidden` with message `csrf check failed`. Without a valid session, `401 unauthenticated`.
 
 ### `GET /api/v1/config`
 

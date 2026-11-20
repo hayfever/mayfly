@@ -268,6 +268,7 @@ Set `state_path` on the control plane's PersistentVolume. Without it a restart l
 | `dirs` | Directories of Markdown skill files. The control plane reads them at startup |
 | `sources` | Pinned tar.gz archives fetched and verified by the control plane at startup |
 | `default` | Skill names injected when a request selects none. Empty means every discovered skill |
+| `cache_dir` | Directory that holds verified source archives. Empty derives `<journal directory>/skill-cache` when the journal backend keeps a file |
 
 Remote skill source, using a repository link:
 
@@ -299,7 +300,9 @@ Or set the archive URL directly:
 
 Sources and local directories are combined. Duplicate skill names across either are a startup error. Fetching happens at control-plane startup; sessions never contact the code host. Pin the URL to a commit SHA and the archive SHA-256, not a branch.
 
-There is no archive cache yet: every control-plane start fetches and verifies the source. The control plane needs outbound access to the archive host. GitHub archive URLs redirect to `codeload.github.com`, and authorization headers are not guaranteed across that host change; use GitOps or a mirror for private repositories if token forwarding matters.
+Each verified archive is stored in `cache_dir` under its SHA-256, so a restart reads the file and makes no network request. A restart needs the archive host only when no cache entry exists, or when a cache entry fails its digest check. A failed cache write logs a warning and does not stop startup. Only files named `<sha256>.tar.gz` are read or deleted, and no request headers are written to the directory. The cache is safe because every entry carries the digest the configuration pins. Entries for digests that no configured source names are deleted at startup.
+
+GitHub archive URLs redirect to `codeload.github.com`. Authorization headers are not guaranteed across that host change. Use GitOps or a mirror for private repositories if token forwarding matters.
 
 ## mcp
 

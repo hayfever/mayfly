@@ -6,7 +6,16 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ### Added
 
+- `skills.cache_dir` stores verified skill source archives by SHA-256, so a control-plane restart does not need the archive host. An empty value derives `<journal directory>/skill-cache`. Unreferenced entries are pruned at startup.
+- `docs/api-reference.md`, generated from `api/openapi.yaml` by `go run ./hack/apidoc`. The `-check` flag exits 1 with a diff when the committed file is stale.
+- Drift tests that compare the `bearerAuth` scope of every route with the spec, the scope table in [docs/security.md](docs/security.md) with the route table, and the error codes in `internal/httpapi/errors.go` with the spec and [docs/api.md](docs/api.md).
+- `POST /api/v1/auth/session` exchanges an API token for an `HttpOnly`, `SameSite=Strict` session cookie plus a CSRF cookie. `GET` reads the session and `DELETE` signs out. A mutating cookie request must send `X-Mayfly-CSRF`, and an `Origin` header must match the deployment.
+- The web UI restores its session from the cookie on load and has a Sign out control.
 - Stability gate for 1.0. `.github/workflows/e2e-stability.yml` runs the e2e suite 20 times, splitting the runs across the bbolt and redis queues, plus `hack/stress.sh 20`; the `gate` job fails unless every run passes and writes one pass or fail row per run to the run summary. Trigger it with `gh workflow run e2e-stability.yml -f runs=20 -f ref=main` before a release tag. Run the repeated unit tests locally with `hack/stress.sh` or `make stress`.
+
+### Security
+
+- The web UI no longer stores the API token in browser localStorage. It keeps the token in the form field only long enough to exchange it, then clears the field. An old `mayfly.token` value is removed from storage on load.
 
 ### Fixed
 

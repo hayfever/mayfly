@@ -83,22 +83,23 @@ func (t *ticketStore) consume(token, sessionID string) (string, bool) {
 
 // Server is the HTTP layer.
 type Server struct {
-	cfg        *config.Config
-	mgr        *session.Manager
-	queue      queue.Store
-	broker     *broker.Broker
-	gateway    *gateway.Gateway
-	logger     *slog.Logger
-	tokens     []config.APITokenConfig
-	triggers   map[string]config.TriggerConfig
-	limiters   map[string]*ratelimit.Limiter
-	mcpServers map[string]config.MCPServerConfig
-	tickets    *ticketStore
-	web        fs.FS
-	upgrader   websocket.Upgrader
-	schedules  *ScheduleService
-	readyCheck func() error
-	metrics    *metrics.Metrics
+	cfg         *config.Config
+	mgr         *session.Manager
+	queue       queue.Store
+	broker      *broker.Broker
+	gateway     *gateway.Gateway
+	logger      *slog.Logger
+	tokens      []config.APITokenConfig
+	triggers    map[string]config.TriggerConfig
+	limiters    map[string]*ratelimit.Limiter
+	mcpServers  map[string]config.MCPServerConfig
+	tickets     *ticketStore
+	webSessions *webSessionStore
+	web         fs.FS
+	upgrader    websocket.Upgrader
+	schedules   *ScheduleService
+	readyCheck  func() error
+	metrics     *metrics.Metrics
 }
 
 // New builds the HTTP server. queue may be nil in tests that do not exercise
@@ -118,16 +119,17 @@ func New(cfg *config.Config, mgr *session.Manager, q queue.Store, logger *slog.L
 		mcpServers[m.Name] = m
 	}
 	server := &Server{
-		cfg:        cfg,
-		mgr:        mgr,
-		queue:      q,
-		logger:     logger,
-		tokens:     cfg.APITokens(),
-		triggers:   triggersByName,
-		limiters:   limiters,
-		mcpServers: mcpServers,
-		tickets:    newTicketStore(),
-		web:        sub,
+		cfg:         cfg,
+		mgr:         mgr,
+		queue:       q,
+		logger:      logger,
+		tokens:      cfg.APITokens(),
+		triggers:    triggersByName,
+		limiters:    limiters,
+		mcpServers:  mcpServers,
+		tickets:     newTicketStore(),
+		webSessions: newWebSessionStore(),
+		web:         sub,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
@@ -189,8 +191,8 @@ func WithReadyCheck(check func() error) Option {
 type apiRoute struct {
 	pattern string
 	// scope is the API token scope the route requires. An empty scope means
-	// the handler authenticates the request itself; only the attach WebSocket
-	// does that, with a one-time ticket.
+	// the handler authenticates the request itself: the attach WebSocket uses
+	// a one-time ticket, and the auth session routes use the session cookie.
 	scope   string
 	handler http.HandlerFunc
 }
@@ -210,6 +212,9 @@ func (s *Server) apiRoutes() []apiRoute {
 		{"GET /api/v1/sessions/{id}/artifact", config.ScopeSessionsRead, s.downloadArtifact},
 		{"GET /api/v1/sessions/{id}/ws", "", s.attachWebSocket},
 		{"GET /api/v1/config", config.ScopeSessionsRead, s.publicConfig},
+		{"POST /api/v1/auth/session", "", s.createWebSession},
+		{"GET /api/v1/auth/session", "", s.getWebSession},
+		{"DELETE /api/v1/auth/session", "", s.deleteWebSession},
 		{"GET /api/v1/schedules", config.ScopeSchedulesRead, s.listSchedules},
 		{"POST /api/v1/schedules/{name}/run", config.ScopeSchedulesWrite, s.runSchedule},
 		{"GET /api/v1/queue", config.ScopeQueueRead, s.queueStats},

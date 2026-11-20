@@ -32,6 +32,7 @@ tags:
   - name: queue
   - name: schedules
   - name: config
+  - name: auth
   - name: webhooks
   - name: health
 paths:
@@ -710,6 +711,91 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /api/v1/auth/session:
+    post:
+      operationId: createWebSession
+      summary: Exchange an API token for a browser session
+      description: |
+        The web UI sends its API token once and receives two cookies. The
+        session cookie is HttpOnly and SameSite=Strict; the CSRF cookie is
+        readable by the page, and its value must be echoed in `X-Mayfly-CSRF`
+        on every mutating request.
+
+        The session lasts 12 hours, or less when the token's `expires_at` is
+        earlier. Sessions live in memory, so a control-plane restart signs
+        every browser out. A second login replaces the previous session.
+
+        The token secret is not stored in the browser.
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebSessionRequest"
+      responses:
+        "201":
+          description: The session exists and both cookies are set.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebSession"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    get:
+      operationId: getWebSession
+      summary: Read the current browser session
+      description: >
+        Resolves the `mayfly_session` cookie. A bearer token does not
+        authenticate this operation.
+      tags: [auth]
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: The current session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebSession"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    delete:
+      operationId: deleteWebSession
+      summary: End the current browser session
+      description: |
+        Requires the session cookie and `X-Mayfly-CSRF` set to the value of the
+        `mayfly_csrf` cookie. When the request carries an `Origin` header, it
+        must match the deployment. Both cookies are expired.
+      tags: [auth]
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: X-Mayfly-CSRF
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: The session ended and both cookies are expired.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 components:
   securitySchemes:
     bearerAuth:
@@ -724,6 +810,30 @@ components:
         Tokens come from `server.tokens` in the control-plane configuration,
         or from `server.token_env` as one token named `default` with the
         admin scope. That variable is `MAYFLY_API_TOKEN` by default.
+
+        The web UI session cookie (`cookieAuth`) is accepted in place of this
+        header on every `/api/v1` operation. When both are present, the Bearer
+        header alone decides.
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: mayfly_session
+      description: |
+        A browser session created by `POST /api/v1/auth/session`. On every
+        `/api/v1` operation the cookie is accepted in place of
+        `Authorization: Bearer`. A request that carries a Bearer header is
+        authenticated by that header alone.
+
+        A mutating request (POST, PUT, PATCH, DELETE) that uses the cookie must
+        also send `X-Mayfly-CSRF` with the value of the `mayfly_csrf` cookie.
+        When an Origin header is present, it must match the deployment's public
+        URL or the request host. A missing or wrong value returns `403` with
+        code `forbidden`.
+
+        The session cookie is HttpOnly, SameSite=Strict, and Secure when the
+        deployment publishes an https URL. It lasts at most 12 hours and is
+        capped by the token's `expires_at`. Sessions are in memory and do not
+        survive a control-plane restart.
   parameters:
     SessionID:
       name: id
@@ -762,7 +872,9 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     Forbidden:
-      description: The token does not carry the scope the operation requires.
+      description: >
+        The token does not carry the scope the operation requires, or a
+        mutating request that used the session cookie failed the CSRF check.
       content:
         application/json:
           schema:
@@ -842,6 +954,34 @@ components:
           type: object
           additionalProperties: true
           description: Code-specific context, such as `session_id`. Every error carries `request_id`, which matches the `X-Request-Id` response header.
+    WebSessionRequest:
+      type: object
+      required: [token]
+      additionalProperties: false
+      description: The API token to exchange. The browser does not store it.
+      properties:
+        token:
+          type: string
+          description: >
+            The secret of a token from `server.tokens` or `server.token_env`.
+            An unknown or expired token returns `401 unauthenticated` and sets
+            no cookie.
+    WebSession:
+      type: object
+      required: [name, scopes, expires_at]
+      description: The public view of one browser session. It carries no secret.
+      properties:
+        name:
+          type: string
+          description: The configured token name.
+        scopes:
+          type: array
+          items:
+            type: string
+        expires_at:
+          type: string
+          format: date-time
+          description: The earlier of 12 hours from login and the token expiry.
     CreateSessionRequest:
       type: object
       required: [prompt]
