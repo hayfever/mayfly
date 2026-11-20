@@ -2,6 +2,8 @@
 
 [`api/openapi.yaml`](../api/openapi.yaml) is the source of truth for this API: every route, request field, response field, error code, and WebSocket message type. This page explains the same surface for people, and it covers behavior that a schema cannot show, such as when a worker creates a session.
 
+[api-reference.md](api-reference.md) is the generated reference: one table for every tag, then each operation with its parameters, request body, responses, and error codes. `go run ./hack/apidoc` writes that file from the spec, and a stale copy fails `go test ./...`.
+
 The admin API at `/api/v1` and the webhook receivers at `/hooks/{name}` are the public API. A change to either starts in the spec, and a pull request that breaks a client fails the `api-diff` CI job.
 
 `/internal/v1` is the session runtime protocol. It is versioned with the runtime image and is **outside** this API promise. The sections below that describe `/internal/v1` are notes for runtime authors, not a compatibility commitment.
