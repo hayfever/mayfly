@@ -303,7 +303,7 @@ The web UI sends its API token once to `POST /api/v1/auth/session` and receives 
 
 The cookie is accepted in place of `Authorization: Bearer` on every `/api/v1` operation; the scopes of the token that created the session still apply. A request that carries a Bearer header is authenticated by that header alone, so a wrong header is not rescued by a valid cookie.
 
-A cookie-authenticated mutating request (`POST`, `PUT`, `PATCH`, `DELETE`) must send `X-Mayfly-CSRF` with the `mayfly_csrf` value. When the request carries an `Origin` header, its scheme and host must match the configured `server.public_url` or the request host. A failure returns `403` with code `forbidden` and message `csrf check failed`. Bearer requests are exempt, because a browser cannot attach the header on its own.
+A cookie-authenticated mutating request (`POST`, `PUT`, `PATCH`, `DELETE`) must send `X-Mayfly-CSRF` with the `mayfly_csrf` value. When the request carries an `Origin` header, its host must match the configured `server.public_url` or the request host, and an https `server.public_url` requires an https origin. A failure returns `403` with code `forbidden` and message `csrf check failed`. Bearer requests are exempt, because a browser cannot attach the header on its own.
 
 ## Audit log
 

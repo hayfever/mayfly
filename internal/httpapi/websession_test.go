@@ -267,6 +267,19 @@ func TestCookieMutationRequiresCSRF(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("downgraded origin status = %d", rec.Code)
 	}
+
+	// With no published https URL, a TLS-terminating proxy leaves the internal
+	// request plain, so the matching host is enough.
+	s.cfg.Server.PublicURL = "http://localhost:8080"
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/sessions", nil)
+	cookies.attach(req)
+	req.Header.Set(webCSRFHeader, cookies.csrf.Value)
+	req.Header.Set("Origin", "https://example.com")
+	rec = httptest.NewRecorder()
+	route.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("proxy https origin status = %d body=%s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestCookieAuthThroughHandler(t *testing.T) {

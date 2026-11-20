@@ -190,19 +190,19 @@ func (s *Server) csrfValid(r *http.Request, sessionCSRF string) bool {
 	return true
 }
 
-// originAllowed reports whether origin names this deployment. The public URL
-// is authoritative when it names the origin, because a TLS-terminating proxy
-// makes the internal request plain. Otherwise the request host and its scheme
-// decide.
+// originAllowed reports whether origin names this deployment. The configured
+// public URL is authoritative when it names the origin, because a
+// TLS-terminating proxy makes the internal request plain. Otherwise the
+// request host decides; an https public URL still requires an https origin,
+// while an unknown or plain public URL accepts either scheme for that host.
 func (s *Server) originAllowed(r *http.Request, origin string) bool {
 	u, err := url.Parse(origin)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return false
 	}
-	if public, err := url.Parse(strings.TrimSpace(s.cfg.Server.PublicURL)); err == nil && public.Host != "" {
-		if u.Host == public.Host {
-			return u.Scheme == public.Scheme
-		}
+	public, publicErr := url.Parse(strings.TrimSpace(s.cfg.Server.PublicURL))
+	if publicErr == nil && public.Host != "" && u.Host == public.Host {
+		return u.Scheme == public.Scheme
 	}
 	if u.Host != r.Host {
 		return false
@@ -210,7 +210,10 @@ func (s *Server) originAllowed(r *http.Request, origin string) bool {
 	if r.TLS != nil {
 		return u.Scheme == "https"
 	}
-	return u.Scheme == "http"
+	if publicErr == nil && public.Scheme == "https" {
+		return u.Scheme == "https"
+	}
+	return true
 }
 
 // webCookiesSecure marks the cookies Secure when the request arrived over TLS
