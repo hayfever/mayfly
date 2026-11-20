@@ -6,9 +6,11 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ### Added
 
-- `--json` on `mayfly get`, `mayfly send`, and `mayfly version`. Every command that prints data now accepts it.
-- `mayfly artifact --output FILE` as the long form of `-o`.
 - `mayfly help` lists every command and every flag.
+- `mayfly artifact --output FILE` as the long form of `-o`.
+- `--json` on `mayfly get`, `mayfly send`, and `mayfly version`. Every command that prints data now accepts it.
+- Configurable webhook body limit. `server.webhook_max_body_bytes` sets the default at 1 MiB, and `triggers[].max_body_bytes` overrides it for one trigger. A body over the limit returns `413 payload_too_large` before signature verification, so it spends no rate-limit token. The chart exposes both keys under `config`.
+- Persisted-format compatibility fixtures under `test/compat`. One set holds the 0.2.0 layout of the queue (bbolt and redis), journal, schedule watermark, and session records, and tests open every set with the current build. `go run ./test/compat/gen` writes the set for a release, and [docs/development.md](docs/development.md#persisted-formats-and-migrations) describes how a layout change adds a migration case.
 - `hack/surface-diff.sh` fails CI when the `mayfly` CLI surface changes without a recorded break. The surface is generated into `cmd/mayfly/testdata/cli-surface.txt` from the flag sets the commands parse, and `go test ./cmd/mayfly -run TestCLISurface -update` records a change.
 
 ### Breaking changes
@@ -16,9 +18,14 @@ All notable changes are recorded here. The project follows semantic versioning o
 - `mayfly get` printed JSON with no flag. It now prints a readable summary by default; add `--json` to get the API object.
 - `--json` output for a session no longer includes a `backend` field. The CLI decoded the API response into a local struct and wrote it back; it now writes the API object unchanged.
 
+### Fixed
+
+- The load harness deletes a webhook job's session when the job creates it after the harness stops waiting for that job. The final report counts the sessions it cleans up and the ones it leaves behind.
+
 ### Changed
 
 - `--json` output for `run`, `ls`, `agents`, and `events` is the API object unchanged. Fields the CLI does not model pass through, and the CLI no longer adds or drops fields.
+- `Trigger.kind` and the `kind` field of a `user_message` event are documented as open strings. Clients must ignore a value this build does not know.
 
 ## [0.2.0] - 2026-11-19
 

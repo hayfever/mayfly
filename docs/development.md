@@ -48,6 +48,45 @@ go test ./test/integration -v
 
 The integration test builds `cmd/mayfly-agent` into a temporary directory. It needs a working Go toolchain and takes a few seconds.
 
+## Persisted formats and migrations
+
+Every store carries a format version. A store reads version 1 and rejects a newer version with an error that names the store and both versions.
+
+| Store | File or key | Stamp | Migration case |
+|---|---|---|---|
+| Queue, bbolt | `queue.db` | `meta` / `format_version` | `internal/queue/format.go`, `migrateFormat` |
+| Queue, redis | `{<key_prefix>}:format_version` | the key value | `internal/queue/format.go`, `migrateFormat` |
+| Journal | `journal.db` | `\x00meta` / `format_version` | `internal/journal/bbolt.go`, `migrateFormat` |
+| Schedule watermark | `state_path` | `meta` / `format_version` | `internal/state/state.go`, `migrateFormat` |
+| Session records | `sessions.db` | `meta` / `format_version` | `internal/session/records_bolt.go`, `migrateRecordsFormat` |
+| Queue job payload | `jobs` bucket or hash | JSON `version` | `internal/queue/envelope.go`, `fromEnvelope` |
+| Session record JSON | `sessions` bucket | JSON `version` | `internal/session/records.go`, `checkRecordVersion` |
+
+A store with no stamp holds the version 1 layout and loads unchanged. The store writes the stamp on the next open. A missing stamp is not an error.
+
+To change a persisted layout:
+
+1. Raise the version constant in the file that owns the layout.
+2. Add a case for the old version to that store's migration function. The case moves stored records to the new layout in the open transaction and runs once for each old file.
+3. Add a fixture set for the release that writes the new layout. Keep every earlier set.
+4. Update the table above, [configuration.md](configuration.md#persisted-formats), and the changelog.
+
+`internal/queue/format_test.go` covers an unstamped store and a newer stamp for both queue backends. A migration is one way: a later build reads the new layout and an older build refuses it.
+
+### Compatibility fixtures
+
+`test/compat/testdata/vX.Y.Z` holds one fixture set for each release that wrote a persisted format. The tests in `test/compat` copy each file, open it with the current stores, and check jobs, states, attempts, payloads, journal steps, the watermark, session records, the artifact index, and the stored version. A build must read every set.
+
+A set holds `queue.db`, `queue-redis.json`, `journal.db`, `state.db`, and `sessions.db`. The generator writes the current layout:
+
+```bash
+go run ./test/compat/gen -out test/compat/testdata/v0.3.0
+```
+
+Run this command from the release build before the release ships, and commit the output. Do not regenerate a set whose release has shipped: the committed bytes are the contract. The command refuses to replace an existing set unless you add `-force`. A bbolt file holds page layout and transaction identifiers, so a regenerated database is byte-different but carries the same data. The redis dump is byte-identical.
+
+The tests also write a newer version into a copy of each store and check the open error. Run them with `go test ./test/compat`, or through `make test`.
+
 ## Local stubs
 
 `cmd/llmstub` is an OpenAI-compatible server with a deterministic policy:

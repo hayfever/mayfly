@@ -34,6 +34,9 @@ An event type without a payload has no `data` field.
 
 ## Event types
 
+The table lists the types this build writes. The set is open: a client must
+ignore a type this build does not know.
+
 | `type` | Payload schema | Payload fields |
 | --- | --- | --- |
 | `user_message` | `UserMessageEventData` | `kind`, `name`, `event` |
@@ -56,7 +59,7 @@ A human message or the trigger message that created the session.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `kind` | string | Trigger kind: `api`, `generic`, `github`, `slack`, or `datadog`. |
+| `kind` | string | Trigger kind. Known values are `api`, `generic`, `github`, `slack`, and `datadog`. The field is open: a client must ignore a value this build does not know. |
 | `name` | string | Trigger name. |
 | `event` | string | Trigger event name. |
 

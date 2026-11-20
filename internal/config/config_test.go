@@ -291,6 +291,69 @@ triggers:
 	}
 }
 
+func TestWebhookBodyLimitConfig(t *testing.T) {
+	if got := Default().Server.WebhookMaxBodyBytes; got != DefaultWebhookMaxBodyBytes {
+		t.Fatalf("default webhook limit = %d", got)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := []byte(`runtime:
+  backend: local
+  agent_binary: ./agent
+llm:
+  base_url: http://localhost:9099/v1
+  model: stub
+server:
+  webhook_max_body_bytes: 2048
+triggers:
+  - name: server-default
+    type: generic
+    allow_unsigned: true
+  - name: custom
+    type: generic
+    allow_unsigned: true
+    max_body_bytes: 512
+`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.WebhookBodyLimit(cfg.Triggers[0]); got != 2048 {
+		t.Fatalf("server default limit = %d", got)
+	}
+	if got := cfg.WebhookBodyLimit(cfg.Triggers[1]); got != 512 {
+		t.Fatalf("trigger limit = %d", got)
+	}
+
+	zero := validBase()
+	zero.Server.WebhookMaxBodyBytes = 0
+	if err := zero.Validate(); err == nil {
+		t.Fatal("expected a positive server.webhook_max_body_bytes error")
+	}
+
+	tooLarge := validBase()
+	tooLarge.Server.WebhookMaxBodyBytes = MaxWebhookBodyBytes + 1
+	if err := tooLarge.Validate(); err == nil {
+		t.Fatal("expected a server.webhook_max_body_bytes upper bound error")
+	}
+
+	negative := validBase()
+	negative.Triggers = []TriggerConfig{{Name: "generic", Type: "generic", AllowUnsigned: true, MaxBodyBytes: -1}}
+	if err := negative.Validate(); err == nil {
+		t.Fatal("expected a negative trigger max_body_bytes error")
+	}
+
+	triggerTooLarge := validBase()
+	triggerTooLarge.Triggers = []TriggerConfig{{Name: "generic", Type: "generic", AllowUnsigned: true, MaxBodyBytes: MaxWebhookBodyBytes + 1}}
+	if err := triggerTooLarge.Validate(); err == nil {
+		t.Fatal("expected a trigger max_body_bytes upper bound error")
+	}
+}
+
 func TestLoadRejectsUnknownField(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
