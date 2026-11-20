@@ -5,7 +5,7 @@ Routine operations for one Mayfly control plane. The examples use release `mayfl
 ## Before you start
 
 - One control plane replica owns every session. Do not run two.
-- The state volume at `/var/lib/mayfly` holds the queue database, the session record database, the turn journal, the schedule watermark, and local artifact bundles. It is the only durable state on the control-plane side.
+- The state volume at `/var/lib/mayfly` holds the queue database, the session record database, the turn journal, the schedule watermark, local artifact bundles, and the verified skill archive cache. It is the only durable state on the control-plane side.
 - Session pods keep their own workspace claims. They survive a control-plane restart and a control-plane upgrade.
 - The control plane reads its configuration and the token secrets at startup. A change to either needs a pod restart.
 - Export a named API token for the commands below as `MAYFLY_API_TOKEN`. The commands need `sessions:read`, `sessions:write`, `queue:read`, and `queue:write`. The `admin` scope covers all four. The legacy token from `server.token_env` is named `default` and has the `admin` scope.
@@ -17,7 +17,7 @@ Routine operations for one Mayfly control plane. The examples use release `mayfl
 3. Run the upgrade:
 
 ```bash
-helm upgrade mayfly oci://ghcr.io/<owner>/charts/mayfly --version 0.3.0 \
+helm upgrade mayfly oci://ghcr.io/<owner>/charts/mayfly --version 1.0.0-rc.1 \
   -n mayfly -f values.yaml
 kubectl -n mayfly rollout status deployment/mayfly --timeout=3m
 ```
@@ -79,7 +79,7 @@ EOF
 kubectl -n mayfly wait --for=condition=Ready pod/state-copy --timeout=120s
 ```
 
-3. Copy the whole directory to your workstation. The archive holds `queue.db`, `sessions.db`, `journal.db`, `schedule.db`, and, when the artifact store is `local`, `artifacts/`:
+3. Copy the whole directory to your workstation. The archive holds `queue.db`, `sessions.db`, `journal.db`, `schedule.db`, `skill-cache/`, and, when the artifact store is `local`, `artifacts/`:
 
 ```bash
 kubectl -n mayfly exec state-copy -- tar -C /state -czf - . \
@@ -154,6 +154,16 @@ The new value returns `200`. The old value returns `401` after the restart. Give
 3. Rotate a webhook secret the same way. The key is the one that `triggers[].secret_env` names. Restart, then update the sender, or its deliveries fail verification.
 
 Session pods keep their own session tokens in their own Secret. Rotating an API token does not touch them.
+
+## Sign in and sign out of the web UI
+
+The web UI exchanges the API token for a browser session once. The token is not stored in the browser.
+
+1. Open the control-plane URL, paste the token in Settings, and submit. The control plane sets the `mayfly_session` cookie (HttpOnly, SameSite=Strict, Secure over https) and the `mayfly_csrf` cookie. The session lasts 12 hours, or less when the token's `expires_at` is earlier.
+2. Use the Sign out control to end the session. `DELETE /api/v1/auth/session` expires both cookies. A mutation from the browser must send `X-Mayfly-CSRF` with the `mayfly_csrf` value; the UI adds the header.
+3. Sign in again after a control-plane restart. Sessions live in the process and not on the state volume, so a restart ends every one. The chart runs one replica.
+
+A shell or CI client that sends `Authorization: Bearer` needs no cookie and no CSRF header.
 
 ## Triage dead letters
 
@@ -253,4 +263,4 @@ SIGTERM is not a close. Each runtime stops its turn, exits non-zero, and the new
 
 3. Check `/readyz` and the session list. `/readyz` returns `503` while the process drains, so a failing probe during a restart is expected.
 
-A control-plane restart loses thread history in memory and the token index. The journal keeps the last turn, and the runtime keeps `conversation.jsonl`. The artifact bundle is the durable history.
+A control-plane restart loses thread history in memory, the token index, and every web UI session. The journal keeps the last turn, and the runtime keeps `conversation.jsonl`. The artifact bundle is the durable history. Browsers sign in again after the restart; see [Sign in and sign out of the web UI](#sign-in-and-sign-out-of-the-web-ui).

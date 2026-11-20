@@ -13,6 +13,7 @@
 make build     # bin/mayflyd, mayfly-agent, mayfly, llmstub, mcpstub
 make test      # unit and integration tests
 make vet
+golangci-lint run ./...  # lint; CI pins v2.15.0
 go run ./hack/apidoc     # regenerate docs/api-reference.md from api/openapi.yaml
 ./hack/surface-diff.sh  # CLI surface gate (docs/deprecation.md)
 make image     # four Docker targets

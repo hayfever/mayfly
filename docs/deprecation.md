@@ -1,6 +1,6 @@
 # Deprecation policy
 
-From 1.0.0, a published interface stays until a major release removes it. This page names what the promise covers, how a deprecation runs, and what it does not cover.
+From 1.0.0, a published interface stays until a major release removes it. This page names what the promise covers, how a deprecation runs, and what it does not cover. The migration guides for a major upgrade are [migrating-to-1.0.md](migrating-to-1.0.md) and [migrating-to-0.2.md](migrating-to-0.2.md).
 
 ## The promise
 

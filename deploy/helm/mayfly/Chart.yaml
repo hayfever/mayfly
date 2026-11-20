@@ -2,8 +2,8 @@ apiVersion: v2
 name: mayfly
 description: Ephemeral, interactive agent sessions with MCP, skills, and artifact export.
 type: application
-version: 0.3.0
-appVersion: "0.3.0"
+version: 1.0.0-rc.1
+appVersion: "1.0.0-rc.1"
 kubeVersion: ">=1.27.0-0"
 home: https://github.com/hayfever/mayfly
 sources:
