@@ -47,7 +47,7 @@ To check a cluster before relying on it, run the end-to-end suite against it. It
 
 ## Helm
 
-`0.2.0` is the current release. A tagged release publishes `ghcr.io/hayfever/mayflyd`, `ghcr.io/hayfever/mayfly-agent`, and the chart at `oci://ghcr.io/hayfever/charts/mayfly`. The packages are public, so Helm and Docker pull them anonymously. Install the published chart:
+`0.3.0` is the current release. A tagged release publishes `ghcr.io/hayfever/mayflyd`, `ghcr.io/hayfever/mayfly-agent`, and the chart at `oci://ghcr.io/hayfever/charts/mayfly`. The packages are public, so Helm and Docker pull them anonymously. Install the published chart:
 
 ```bash
 kubectl create namespace mayfly
@@ -57,7 +57,7 @@ kubectl -n mayfly create secret generic mayfly-secrets \
   --from-literal=OPENAI_API_KEY="sk-..."
 
 helm install mayfly oci://ghcr.io/hayfever/charts/mayfly \
-  --version 0.2.0 \
+  --version 0.3.0 \
   --namespace mayfly \
   --set existingSecret=mayfly-secrets \
   --set config.server.public_url=https://mayfly.example.com
@@ -68,21 +68,21 @@ helm install mayfly oci://ghcr.io/hayfever/charts/mayfly \
 All three artifacts are signed by digest with the release workflow identity. Resolve the tag first, then verify; a tag can move and a digest cannot:
 
 ```bash
-digest="$(crane digest ghcr.io/hayfever/mayflyd:0.2.0)"
+digest="$(crane digest ghcr.io/hayfever/mayflyd:0.3.0)"
 cosign verify \
-  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v0.3.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   "ghcr.io/hayfever/mayflyd@${digest}"
 
-digest="$(crane digest ghcr.io/hayfever/mayfly-agent:0.2.0)"
+digest="$(crane digest ghcr.io/hayfever/mayfly-agent:0.3.0)"
 cosign verify \
-  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v0.3.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   "ghcr.io/hayfever/mayfly-agent@${digest}"
 
-digest="$(crane digest ghcr.io/hayfever/charts/mayfly:0.2.0)"
+digest="$(crane digest ghcr.io/hayfever/charts/mayfly:0.3.0)"
 cosign verify \
-  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v0.3.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   "ghcr.io/hayfever/charts/mayfly@${digest}"
 ```
@@ -122,10 +122,10 @@ Service plugins need `config.plugins.namespace`. When it is empty it follows `co
 1. Build and push images:
 
 ```bash
-docker build --target mayflyd -t registry.example.com/mayflyd:v0.2.0 .
-docker build --target mayfly-agent -t registry.example.com/mayfly-agent:v0.2.0 .
-docker push registry.example.com/mayflyd:v0.2.0
-docker push registry.example.com/mayfly-agent:v0.2.0
+docker build --target mayflyd -t registry.example.com/mayflyd:v0.3.0 .
+docker build --target mayfly-agent -t registry.example.com/mayfly-agent:v0.3.0 .
+docker push registry.example.com/mayflyd:v0.3.0
+docker push registry.example.com/mayfly-agent:v0.3.0
 ```
 
 2. Edit the base manifests or overlay:

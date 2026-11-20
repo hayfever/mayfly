@@ -2,7 +2,7 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
-## [0.3.0] - Unreleased
+## [0.3.0] - 2026-11-19
 
 ### Added
 
