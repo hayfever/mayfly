@@ -6,6 +6,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ### Added
 
+- `skills.cache_dir` stores verified skill source archives by SHA-256, so a control-plane restart does not need the archive host. An empty value derives `<journal directory>/skill-cache`. Unreferenced entries are pruned at startup.
 - `docs/api-reference.md`, generated from `api/openapi.yaml` by `go run ./hack/apidoc`. The `-check` flag exits 1 with a diff when the committed file is stale.
 - Drift tests that compare the `bearerAuth` scope of every route with the spec, the scope table in [docs/security.md](docs/security.md) with the route table, and the error codes in `internal/httpapi/errors.go` with the spec and [docs/api.md](docs/api.md).
 

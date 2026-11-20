@@ -395,6 +395,10 @@
               "type": "array",
               "items": { "type": "string" }
             },
+            "cache_dir": {
+              "type": "string",
+              "description": "Directory of verified source archives named by SHA-256. Empty derives <journal directory>/skill-cache."
+            },
             "sources": {
               "type": "array",
               "items": {

@@ -29,6 +29,12 @@ Selection:
 
 The agent is told that deliverables belong in the workspace. Workspace files are exported in the bundle.
 
+### Offline restarts
+
+Each verified source archive is copied to `skills.cache_dir` under its SHA-256 at startup. A later start reads the cached archive and makes no request to the code host. The control plane can start while the archive host is unreachable, as long as the cache holds the pinned digest.
+
+A cache entry that fails its digest check is deleted and fetched again. A fetch failure is fatal only when no valid entry exists, and the error says that no cached copy exists. A cache write failure logs a warning and does not stop startup. Request headers are never written to disk. Set `cache_dir` to a directory on the state volume; see [configuration.md](configuration.md#skills).
+
 ## MCP servers
 
 ### HTTP servers (recommended)

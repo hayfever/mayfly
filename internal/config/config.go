@@ -337,6 +337,10 @@ type SkillsConfig struct {
 	Dirs    []string      `yaml:"dirs"`
 	Sources []SkillSource `yaml:"sources"`
 	Default []string      `yaml:"default"`
+	// CacheDir stores verified source archives by SHA-256 so a restart does
+	// not need the archive host. An empty value derives
+	// "<journal directory>/skill-cache" when the journal backend keeps a file.
+	CacheDir string `yaml:"cache_dir"`
 }
 
 // SkillSource is a pinned tar.gz archive of Markdown skills, usually a code
@@ -687,6 +691,9 @@ func (c *Config) applyDefaults() {
 	if c.Sessions.Records.Backend == "bbolt" && c.Sessions.Records.Path == "" {
 		c.Sessions.Records.Path = filepath.Join(filepath.Dir(c.Journal.Bolt.Path), "sessions.db")
 	}
+	if c.Skills.CacheDir == "" && c.Journal.Backend == "bbolt" && c.Journal.Bolt.Path != "" {
+		c.Skills.CacheDir = filepath.Join(filepath.Dir(c.Journal.Bolt.Path), "skill-cache")
+	}
 	if c.Runtime.WorkspaceLimit == "" {
 		c.Runtime.WorkspaceLimit = "1Gi"
 	}
@@ -1019,6 +1026,15 @@ func (c *Config) Validate() error {
 		}
 		if err := validateMCPToolLists(s); err != nil {
 			return err
+		}
+	}
+
+	if c.Skills.CacheDir != "" {
+		if filepath.Clean(c.Skills.CacheDir) != c.Skills.CacheDir {
+			return fmt.Errorf("skills.cache_dir %q must be a clean path", c.Skills.CacheDir)
+		}
+		if strings.HasSuffix(strings.ToLower(c.Skills.CacheDir), ".db") {
+			return fmt.Errorf("skills.cache_dir %q must be a directory, not a database file", c.Skills.CacheDir)
 		}
 	}
 
