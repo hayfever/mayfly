@@ -90,23 +90,26 @@ func runLoad(parent context.Context, cfg loadConfig, client *apiClient, lost <-c
 
 	result := runWorkers(ctx, cfg, client)
 	cancel()
+	lateCleaned, lateLeft := cleanLateJobs(client, result.lateJobs, cfg.pollInterval, cleanupGrace)
 	runtimeSamples := <-samples
 
 	summary := &Summary{
-		Mode:              cfg.mode,
-		Workers:           cfg.concurrency,
-		Window:            time.Since(start),
-		Ops:               map[string]*opStats{},
-		SessionsCreated:   result.sessionsCreated,
-		SessionsFinalized: result.completed + result.failed + result.expired,
-		SessionCompleted:  result.completed,
-		SessionFailed:     result.failed,
-		SessionExpired:    result.expired,
-		Lifecycle:         result.lifecycle,
-		WaitFailures:      result.waitFailures,
-		JobFailures:       result.jobFailures,
-		CleanupFailures:   result.cleanupFailures,
-		Runtime:           runtimeSamples,
+		Mode:                cfg.mode,
+		Workers:             cfg.concurrency,
+		Window:              time.Since(start),
+		Ops:                 map[string]*opStats{},
+		SessionsCreated:     result.sessionsCreated,
+		SessionsFinalized:   result.completed + result.failed + result.expired,
+		SessionCompleted:    result.completed,
+		SessionFailed:       result.failed,
+		SessionExpired:      result.expired,
+		Lifecycle:           result.lifecycle,
+		WaitFailures:        result.waitFailures,
+		JobFailures:         result.jobFailures,
+		CleanupFailures:     result.cleanupFailures,
+		LateSessionsCleaned: lateCleaned,
+		LateSessionsLeft:    lateLeft,
+		Runtime:             runtimeSamples,
 	}
 	for op, latencies := range result.ops {
 		summary.Ops[op] = &opStats{Latencies: latencies}
@@ -139,6 +142,7 @@ type workerResult struct {
 	waitFailures    []string
 	jobFailures     []string
 	cleanupFailures []string
+	lateJobs        []string
 }
 
 type opFailure struct {
@@ -188,6 +192,7 @@ func mergeWorker(dst *workerResult, src workerResult) {
 	dst.waitFailures = append(dst.waitFailures, src.waitFailures...)
 	dst.jobFailures = append(dst.jobFailures, src.jobFailures...)
 	dst.cleanupFailures = append(dst.cleanupFailures, src.cleanupFailures...)
+	dst.lateJobs = append(dst.lateJobs, src.lateJobs...)
 }
 
 type worker struct {
@@ -269,6 +274,9 @@ func (w *worker) webhook(ctx context.Context, n int) {
 
 	id, err := w.client.waitJob(ctx, jobID, w.cfg.pollInterval, w.cfg.sessionTimeout)
 	if err != nil {
+		// The job can still create its session after this wait ends. The
+		// final pass checks the job again and deletes that session.
+		w.result.lateJobs = append(w.result.lateJobs, jobID)
 		if ctx.Err() == nil {
 			w.result.jobFailures = append(w.result.jobFailures, err.Error())
 		}
@@ -294,14 +302,70 @@ func (w *worker) webhook(ctx context.Context, n int) {
 	}
 }
 
+// cleanupGrace bounds a delete after a wait, and the final pass over webhook
+// jobs whose wait ended without a session id.
+const cleanupGrace = 10 * time.Second
+
 // cleanup deletes a session after a terminal state or a failed wait. It uses
 // its own context so the end of the load window does not skip the delete.
 func cleanup(w *worker, id string) {
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := w.client.deleteSession(cleanupCtx, id); err != nil {
+	if err := deleteSessionBounded(w.client, id); err != nil {
 		w.result.cleanupFailures = append(w.result.cleanupFailures, err.Error())
 	}
+}
+
+// deleteSessionBounded deletes one session with its own bounded context.
+func deleteSessionBounded(client *apiClient, id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupGrace)
+	defer cancel()
+	return client.deleteSession(ctx, id)
+}
+
+// cleanLateJobs gives webhook jobs whose wait ended without a session id a
+// bounded second look, and deletes any session a job created after the wait.
+// It runs after the window with its own context. Each round reads every
+// pending job once, so one job that stays queued cannot use up the grace
+// period for the others. A dead job is dropped. The pass as a whole is
+// bounded by grace, so a large worker count cannot stretch it.
+func cleanLateJobs(client *apiClient, jobs []string, poll, grace time.Duration) (cleaned, left int) {
+	if len(jobs) == 0 {
+		return 0, 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	pending := append([]string(nil), jobs...)
+	for len(pending) > 0 {
+		next := pending[:0]
+		for _, jobID := range pending {
+			job, err := client.readJob(ctx, jobID)
+			switch {
+			case err != nil:
+				if ctx.Err() != nil {
+					return cleaned, left
+				}
+				next = append(next, jobID)
+			case job.SessionID != "":
+				if err := deleteSessionBounded(client, job.SessionID); err != nil {
+					left++
+				} else {
+					cleaned++
+				}
+			case job.State == "dead":
+			default:
+				next = append(next, jobID)
+			}
+		}
+		pending = next
+		if len(pending) == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return cleaned, left
+		case <-time.After(poll):
+		}
+	}
+	return cleaned, left
 }
 
 func (c *apiClient) request(ctx context.Context, method, path string, body []byte, header http.Header) (int, []byte, error) {
@@ -432,38 +496,50 @@ func (c *apiClient) waitSession(ctx context.Context, id string, poll, timeout ti
 	}
 }
 
+// jobStatus is the part of a queue job the harness reads.
+type jobStatus struct {
+	State     string `json:"state"`
+	SessionID string `json:"session_id"`
+	Error     string `json:"error"`
+}
+
+// readJob reads one queue job once.
+func (c *apiClient) readJob(ctx context.Context, id string) (jobStatus, error) {
+	code, data, err := c.request(ctx, http.MethodGet, "/api/v1/queue/jobs/"+url.PathEscape(id), nil, nil)
+	if err != nil {
+		return jobStatus{}, err
+	}
+	if code != http.StatusOK {
+		return jobStatus{}, fmt.Errorf("read job %s: %s", id, errorText(code, data))
+	}
+	var resp struct {
+		Job jobStatus `json:"job"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return jobStatus{}, fmt.Errorf("decode job %s: %w", id, err)
+	}
+	return resp.Job, nil
+}
+
 func (c *apiClient) waitJob(ctx context.Context, id string, poll, timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	for {
-		code, data, err := c.request(ctx, http.MethodGet, "/api/v1/queue/jobs/"+url.PathEscape(id), nil, nil)
+		job, err := c.readJob(ctx, id)
 		if err != nil {
 			return "", err
 		}
-		if code != http.StatusOK {
-			return "", fmt.Errorf("read job %s: %s", id, errorText(code, data))
+		if job.SessionID != "" {
+			return job.SessionID, nil
 		}
-		var resp struct {
-			Job struct {
-				State     string `json:"state"`
-				SessionID string `json:"session_id"`
-				Error     string `json:"error"`
-			} `json:"job"`
-		}
-		if err := json.Unmarshal(data, &resp); err != nil {
-			return "", fmt.Errorf("decode job %s: %w", id, err)
-		}
-		if resp.Job.SessionID != "" {
-			return resp.Job.SessionID, nil
-		}
-		if resp.Job.State == "dead" {
-			reason := resp.Job.Error
+		if job.State == "dead" {
+			reason := job.Error
 			if reason == "" {
 				reason = "job is dead"
 			}
 			return "", fmt.Errorf("job %s did not create a session: %s", id, reason)
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("job %s created no session within %s (last state %q)", id, timeout, resp.Job.State)
+			return "", fmt.Errorf("job %s created no session within %s (last state %q)", id, timeout, job.State)
 		}
 		select {
 		case <-ctx.Done():

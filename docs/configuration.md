@@ -27,6 +27,7 @@ Set `version: 1` in every file. A file without the key is read as version 1, and
 | `tokens[].expires_at` | — | Optional RFC 3339 time. A token at or past this time is refused with `401` |
 | `attach_ticket_ttl` | `60s` | Lifetime of one-time WebSocket attach tickets |
 | `max_body_bytes` | `4194304` | Maximum JSON body for session creation |
+| `webhook_max_body_bytes` | `1048576` | Maximum webhook body when the trigger sets no `max_body_bytes`. Must be positive and at most `16777216` |
 | `shutdown_budget` | `25s` | Whole stop sequence after SIGTERM: HTTP drain, queue worker drain, then session manager shutdown. The stages get 20, 40, and 40 percent of the budget in that order, each on its own deadline. Keep the budget below the pod's `terminationGracePeriodSeconds`; the chart sets both. Minimum `3s` |
 | `metrics.enabled` | `true` | Serve the Prometheus endpoint. See [observability.md](observability.md) for every metric |
 | `metrics.address` | empty | Serve `/metrics` on a listener of its own, such as `:9090`. Empty serves it on `addr`. Must differ from `addr` |
@@ -343,6 +344,7 @@ triggers:
     ttl: 30m
     skills: [incident-triage]
     mcp_servers: [github]
+    max_body_bytes: 262144
     rate_limit:
       requests: 30
       interval: 1m
@@ -357,9 +359,12 @@ triggers:
 | `allow_unsigned` | Skip verification. Use only for local development |
 | `template` | Optional Go `text/template` applied to a `Data` value |
 | `ttl`, `model`, `agent`, `skills`, `mcp_servers` | Session defaults for this trigger |
+| `max_body_bytes` | Webhook body limit for this trigger. `0` or an omitted key uses `server.webhook_max_body_bytes`. Must be at most `16777216` |
 | `rate_limit.requests` | Sessions admitted per `interval`. Default `30`. `0` disables the limit |
 | `rate_limit.interval` | Refill period. Default `1m` |
 | `rate_limit.burst` | Requests admitted at once before the rate applies. Default `10` |
+
+A body over the limit returns `413` with `code: payload_too_large`. The control plane checks the limit before signature verification, so an oversize delivery does not spend a rate-limit token.
 
 A trigger over its limit gets `429` with `Retry-After`. Only requests that pass signature verification spend a token, so unsigned traffic cannot shut a trigger. The limit is per trigger and per control-plane process; `queue.max_jobs` and `sessions.max_concurrent` remain the last lines of defense across all creation paths.
 
