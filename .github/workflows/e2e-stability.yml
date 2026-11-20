@@ -1,0 +1,178 @@
+name: e2e-stability
+
+# The 1.0 stability gate: 20 end-to-end runs, alternating the bbolt and redis
+# queues, plus the repeated unit-test stress. See docs/testing.md.
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Number of e2e runs; they alternate bbolt and redis
+        required: false
+        default: "20"
+        type: string
+      ref:
+        description: Git ref to test
+        required: false
+        default: main
+        type: string
+  schedule:
+    # Sunday 06:00 UTC.
+    - cron: "0 6 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-stability-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      runs: ${{ steps.plan.outputs.runs }}
+    steps:
+      - name: build the run matrix
+        id: plan
+        env:
+          RUNS: ${{ inputs.runs || '20' }}
+        run: |
+          if ! [[ "$RUNS" =~ ^[1-9][0-9]*$ ]] || (( RUNS > 100 )); then
+            echo "runs must be an integer from 1 to 100, got '$RUNS'" >&2
+            exit 1
+          fi
+          queues=(bbolt redis)
+          entries=()
+          for ((run = 1; run <= RUNS; run++)); do
+            queue="${queues[$(( (run - 1) % 2 ))]}"
+            entries+=("{\"run\":${run},\"queue\":\"${queue}\"}")
+          done
+          matrix=$(printf '%s\n' "${entries[@]}" | paste -sd, -)
+          echo "runs=$RUNS" >> "$GITHUB_OUTPUT"
+          echo "matrix={\"include\":[$matrix]}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### e2e stability plan"
+            echo
+            echo "${RUNS} runs, alternating bbolt and redis. Unit stress runs 20 times."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  e2e:
+    name: e2e (${{ matrix.run }}/${{ matrix.queue }})
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.22.1
+      - name: install k3d
+        run: |
+          curl -fsSL https://github.com/k3d-io/k3d/releases/download/v5.9.0/k3d-linux-amd64 -o /tmp/k3d
+          # sha256 of k3d-linux-amd64 from the release's checksums.txt.
+          echo "06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0  /tmp/k3d" | sha256sum -c -
+          sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
+      - name: e2e
+        env:
+          E2E_QUEUE: ${{ matrix.queue }}
+          E2E_ARTIFACTS: ${{ runner.temp }}/e2e
+        run: make e2e
+      - name: record the result
+        if: always()
+        env:
+          RUN: ${{ matrix.run }}
+          QUEUE: ${{ matrix.queue }}
+          RESULT: ${{ job.status }}
+        run: |
+          mkdir -p "${{ runner.temp }}/result"
+          printf '{"run":%s,"queue":"%s","result":"%s"}\n' "$RUN" "$QUEUE" "$RESULT" \
+            >"${{ runner.temp }}/result/run-${RUN}-${QUEUE}.json"
+      - name: upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-stability-${{ matrix.run }}-${{ matrix.queue }}
+          path: ${{ runner.temp }}/e2e
+          if-no-files-found: ignore
+      - name: upload the run result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-stability-result-${{ matrix.run }}-${{ matrix.queue }}
+          path: ${{ runner.temp }}/result
+          if-no-files-found: ignore
+
+  unit-stress:
+    name: unit stress
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+      - name: stress
+        run: ./hack/stress.sh 20
+
+  gate:
+    name: gate
+    needs: [plan, e2e, unit-stress]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: e2e-stability-result-*
+          path: result
+          merge-multiple: true
+      - name: decide
+        env:
+          E2E_RESULT: ${{ needs.e2e.result }}
+          STRESS_RESULT: ${{ needs.unit-stress.result }}
+          RUNS: ${{ needs.plan.outputs.runs }}
+        run: |
+          {
+            echo "### e2e stability gate"
+            echo
+            echo "| run | queue | result |"
+            echo "| ---: | --- | --- |"
+            for file in $(ls result/run-*.json 2>/dev/null | sort -V); do
+              jq -r '. as $r | "| \($r.run) | \($r.queue) | " +
+                (if $r.result == "success" then "pass" else "fail" end) + " |"' "$file"
+            done
+            echo
+            echo "E2E runs: \`${E2E_RESULT}\`. Unit stress: \`${STRESS_RESULT}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$E2E_RESULT" != "success" || "$STRESS_RESULT" != "success" ]]; then
+            echo "the stability gate is red: e2e=${E2E_RESULT} unit-stress=${STRESS_RESULT}" >&2
+            exit 1
+          fi
+
+          if grep -l '"result":"failure"' result/run-*.json >/dev/null 2>&1; then
+            echo "an e2e run recorded a failure" >&2
+            exit 1
+          fi
+          # A run that did not upload its own result is a run the gate cannot
+          # vouch for, even when the e2e job reports success.
+          recorded=$(ls result/run-*.json 2>/dev/null | wc -l)
+          if [[ "$recorded" -ne "${RUNS}" ]]; then
+            echo "recorded ${recorded} of ${RUNS} e2e runs" >&2
+            exit 1
+          fi
+          echo "all ${RUNS} e2e runs passed and the unit stress passed"

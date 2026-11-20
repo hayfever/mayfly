@@ -134,3 +134,55 @@ E2E_KUBECONTEXT=mayfly E2E_REGISTRY=ttl.sh/mayfly-e2e-$(openssl rand -hex 8) E2E
 [.github/workflows/e2e.yml](../.github/workflows/e2e.yml) runs `make e2e` on k3d for pushes to `main`, pull requests, and manual dispatch, once per queue backend (bbolt and Redis).
 
 The `upgrade` job resolves the last `v*` tag, logs in to `ghcr.io` with the workflow token, creates a pull secret for the released images, and runs only `TestUpgradeFromLastRelease` from that release to HEAD. Diagnostics are uploaded when either job fails.
+
+## Stability gate
+
+[.github/workflows/e2e-stability.yml](../.github/workflows/e2e-stability.yml) proves one commit is stable, not only correct. It runs the e2e suite 20 times and the unit stress once, all against the same commit.
+
+| Job | What it runs |
+|---|---|
+| `plan` | Builds the run matrix: entry `1` to `runs`, alternating `bbolt` and `redis` |
+| `e2e` | One `make e2e` per matrix entry, 10 runs at a time, 45 minute limit per run |
+| `unit-stress` | `./hack/stress.sh 20` |
+| `gate` | Fails unless every e2e run and the unit stress pass, and writes a pass or fail row per run to the run summary |
+
+An odd `runs` value gives the bbolt queue one more run. A Redis-only and a bbolt-only failure both appear in the gate table.
+
+### Trigger it
+
+The gate runs weekly on Sunday at 06:00 UTC. Start it by hand before a release:
+
+```bash
+gh workflow run e2e-stability.yml -f runs=20 -f ref=main
+```
+
+`make e2e-stability` prints that command and does not run it. `runs` accepts 1 to 100. `ref` accepts any branch, tag, or commit.
+
+### Unit stress
+
+[hack/stress.sh](../hack/stress.sh) runs `go test -race -count=<count>` over the packages whose tests use real processes, sockets, and stores:
+
+```bash
+./hack/stress.sh                  # count 20, default packages
+./hack/stress.sh 50               # 50 iterations
+make stress                       # same as ./hack/stress.sh
+./hack/stress.sh 20 ./internal/pluginhost   # one package
+```
+
+The default packages are `internal/pluginhost`, `internal/queue`, `internal/session`, `internal/httpapi`, `internal/gateway`, `internal/pluginsvc`, `hack/loadtest`, and `test/integration`. The script stops at the first failing package and prints the shuffle seed. Rerun the printed command to reproduce the test order.
+
+### Read a failure
+
+1. Open the run summary. The `gate` job lists one row per e2e run with `pass` or `fail`.
+2. Open the failed `e2e (<run>/<queue>)` job. Its log shows the failing test and the last cluster state it polled.
+3. Download the `e2e-stability-<run>-<queue>` artifact. It holds the Go test log, the control plane log, pod descriptions, and events.
+4. For a `unit-stress` failure, use the rerun command in the log. The seed reproduces the test order that failed.
+
+A failure that does not reproduce is still a release blocker: it shows a timing dependency.
+
+### What passing means for a release
+
+The gate must pass on the release commit before you tag a release candidate or a final release. A red gate blocks the tag. A run of the gate on a later commit does not cover an earlier one, so tag the commit the gate tested.
+
+A green unit stress shows that the packages that fork processes and open sockets pass 20 times each under `-race`; a green e2e run shows that one queue backend survives the full suite. The gate needs 20 of 20 e2e runs green, because a flake in any run is a defect that a user can meet in one run.
+
