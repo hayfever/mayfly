@@ -20,47 +20,46 @@ import (
 	"github.com/hayfever/mayfly/internal/version"
 )
 
+// commands maps every command word to its handler. surface.go lists the same
+// words, and the surface test fails when the two disagree.
+var commands = map[string]func([]string) error{
+	"run":        cmdRun,
+	"ls":         cmdList,
+	"get":        cmdGet,
+	"events":     cmdEvents,
+	"attach":     cmdAttach,
+	"send":       cmdSend,
+	"close":      cmdClose,
+	"delete":     cmdDelete,
+	"artifact":   cmdArtifact,
+	"transcript": cmdTranscript,
+	"version":    cmdVersion,
+	"--version":  cmdVersion,
+	"-v":         cmdVersion,
+	"agents":     cmdAgents,
+	"plugin":     cmdPlugin,
+	"help":       helpCommand,
+	"-h":         helpCommand,
+	"--help":     helpCommand,
+}
+
+// helpCommand prints the usage text.
+func helpCommand([]string) error {
+	usage()
+	return nil
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
 	}
-	command := os.Args[1]
-	args := os.Args[2:]
-	var err error
-	switch command {
-	case "run":
-		err = cmdRun(args)
-	case "ls":
-		err = cmdList(args)
-	case "get":
-		err = cmdGet(args)
-	case "events":
-		err = cmdEvents(args)
-	case "attach":
-		err = cmdAttach(args)
-	case "send":
-		err = cmdSend(args)
-	case "close":
-		err = cmdClose(args)
-	case "delete":
-		err = cmdDelete(args)
-	case "artifact":
-		err = cmdArtifact(args)
-	case "transcript":
-		err = cmdTranscript(args)
-	case "version", "--version", "-v":
-		err = cmdVersion(args)
-	case "agents":
-		err = cmdAgents(args)
-	case "plugin":
-		err = cmdPlugin(args)
-	case "help", "-h", "--help":
-		usage()
-	default:
-		err = fmt.Errorf("unknown command %q", command)
+	run, ok := commands[os.Args[1]]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "mayfly: unknown command %q\n", os.Args[1])
+		os.Exit(1)
 	}
-	if err != nil {
+	if err := run(os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "mayfly:", err)
 		os.Exit(1)
 	}
@@ -118,10 +117,21 @@ JSON document to stdout and nothing else. Errors go to stderr.
 `)
 }
 
+const (
+	// envURL names the control plane URL.
+	envURL = "MAYFLY_URL"
+	// defaultURL is the control plane URL that envURL overrides.
+	defaultURL = "http://localhost:8080"
+	// envToken names the API token.
+	envToken = "MAYFLY_API_TOKEN"
+	// envTokenAlias is the deprecated alias of envToken.
+	envTokenAlias = "MAYFLY_TOKEN"
+)
+
 func baseURL() string {
-	u := os.Getenv("MAYFLY_URL")
+	u := os.Getenv(envURL)
 	if u == "" {
-		u = "http://localhost:8080"
+		u = defaultURL
 	}
 	return strings.TrimRight(u, "/")
 }
@@ -129,11 +139,11 @@ func baseURL() string {
 // resolveToken reads the control-plane token. MAYFLY_TOKEN is a deprecated
 // alias for MAYFLY_API_TOKEN; the alias prints one warning per process.
 func resolveToken(getenv func(string) string, warn io.Writer) string {
-	if value := strings.TrimSpace(getenv("MAYFLY_API_TOKEN")); value != "" {
+	if value := strings.TrimSpace(getenv(envToken)); value != "" {
 		return value
 	}
-	if value := strings.TrimSpace(getenv("MAYFLY_TOKEN")); value != "" {
-		fmt.Fprintln(warn, "mayfly: MAYFLY_TOKEN is deprecated; set MAYFLY_API_TOKEN instead")
+	if value := strings.TrimSpace(getenv(envTokenAlias)); value != "" {
+		fmt.Fprintf(warn, "mayfly: %s is deprecated; set %s instead\n", envTokenAlias, envToken)
 		return value
 	}
 	return ""
@@ -251,13 +261,24 @@ type sessionResponse struct {
 	URL     string        `json:"url"`
 }
 
-func cmdVersion(args []string) error {
+// versionFlags holds the flags of mayfly version.
+type versionFlags struct {
+	*flag.FlagSet
+	asJSON *bool
+}
+
+// newVersionFlags builds the flag set that mayfly version parses.
+func newVersionFlags() *versionFlags {
 	fs := flag.NewFlagSet("version", flag.ContinueOnError)
-	asJSON := fs.Bool("json", false, "print the version as JSON")
-	if _, err := parseArgs(fs, args); err != nil {
+	return &versionFlags{FlagSet: fs, asJSON: fs.Bool("json", false, "print the version as JSON")}
+}
+
+func cmdVersion(args []string) error {
+	f := newVersionFlags()
+	if _, err := parseArgs(f.FlagSet, args); err != nil {
 		return err
 	}
-	if *asJSON {
+	if *f.asJSON {
 		return printJSON(struct {
 			Version string `json:"version"`
 			Commit  string `json:"commit"`
@@ -306,37 +327,51 @@ func (s *stringList) Set(v string) error {
 	return nil
 }
 
-func cmdRun(args []string) error {
+// runFlags holds the flags of mayfly run.
+type runFlags struct {
+	*flag.FlagSet
+	prompt, agent, title, ttl, model *string
+	asJSON                           *bool
+	skills, mcps                     stringList
+}
+
+// newRunFlags builds the flag set that mayfly run parses.
+func newRunFlags() *runFlags {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	prompt := fs.String("prompt", "", "initial prompt")
-	agent := fs.String("agent", "", "agent name")
-	title := fs.String("title", "", "session title")
-	ttl := fs.String("ttl", "", "session TTL, e.g. 30m")
-	modelName := fs.String("model", "", "model name")
-	asJSON := fs.Bool("json", false, "print the session as JSON")
-	var skillList, mcpList stringList
-	fs.Var(&skillList, "skill", "skill name (repeatable)")
-	fs.Var(&mcpList, "mcp", "MCP server name (repeatable)")
-	if _, err := parseArgs(fs, args, "prompt", "agent", "title", "ttl", "model", "skill", "mcp"); err != nil {
+	f := &runFlags{FlagSet: fs}
+	f.prompt = fs.String("prompt", "", "initial prompt")
+	f.agent = fs.String("agent", "", "agent name")
+	f.title = fs.String("title", "", "session title")
+	f.ttl = fs.String("ttl", "", "session TTL, e.g. 30m")
+	f.model = fs.String("model", "", "model name")
+	f.asJSON = fs.Bool("json", false, "print the session as JSON")
+	fs.Var(&f.skills, "skill", "skill name (repeatable)")
+	fs.Var(&f.mcps, "mcp", "MCP server name (repeatable)")
+	return f
+}
+
+func cmdRun(args []string) error {
+	f := newRunFlags()
+	if _, err := parseArgs(f.FlagSet, args, "prompt", "agent", "title", "ttl", "model", "skill", "mcp"); err != nil {
 		return err
 	}
-	if *prompt == "" {
+	if *f.prompt == "" {
 		return fmt.Errorf("--prompt is required")
 	}
 	body, _ := json.Marshal(map[string]any{
-		"prompt":      *prompt,
-		"agent":       *agent,
-		"title":       *title,
-		"ttl":         *ttl,
-		"model":       *modelName,
-		"skills":      skillList,
-		"mcp_servers": mcpList,
+		"prompt":      *f.prompt,
+		"agent":       *f.agent,
+		"title":       *f.title,
+		"ttl":         *f.ttl,
+		"model":       *f.model,
+		"skills":      f.skills,
+		"mcp_servers": f.mcps,
 	})
 	resp, err := request(http.MethodPost, "/api/v1/sessions", body)
 	if err != nil {
 		return err
 	}
-	if *asJSON {
+	if *f.asJSON {
 		return printJSONResponse(resp)
 	}
 	var out sessionResponse
@@ -347,10 +382,21 @@ func cmdRun(args []string) error {
 	return nil
 }
 
-func cmdAgents(args []string) error {
+// agentsFlags holds the flags of mayfly agents.
+type agentsFlags struct {
+	*flag.FlagSet
+	asJSON *bool
+}
+
+// newAgentsFlags builds the flag set that mayfly agents parses.
+func newAgentsFlags() *agentsFlags {
 	fs := flag.NewFlagSet("agents", flag.ContinueOnError)
-	asJSON := fs.Bool("json", false, "print the agents as JSON")
-	if _, err := parseArgs(fs, args); err != nil {
+	return &agentsFlags{FlagSet: fs, asJSON: fs.Bool("json", false, "print the agents as JSON")}
+}
+
+func cmdAgents(args []string) error {
+	f := newAgentsFlags()
+	if _, err := parseArgs(f.FlagSet, args); err != nil {
 		return err
 	}
 	resp, err := request(http.MethodGet, "/api/v1/config", nil)
@@ -363,7 +409,7 @@ func cmdAgents(args []string) error {
 	if err := decodeResponse(resp, &out); err != nil {
 		return err
 	}
-	if *asJSON {
+	if *f.asJSON {
 		return printJSON(out.Agents)
 	}
 	fmt.Printf("%-16s  %-8s  %-10s  %-24s  %s\n", "NAME", "DEFAULT", "HARNESS", "MODEL", "DESCRIPTION")
@@ -387,17 +433,28 @@ func cmdAgents(args []string) error {
 	return nil
 }
 
-func cmdList(args []string) error {
+// listFlags holds the flags of mayfly ls.
+type listFlags struct {
+	*flag.FlagSet
+	asJSON *bool
+}
+
+// newListFlags builds the flag set that mayfly ls parses.
+func newListFlags() *listFlags {
 	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
-	asJSON := fs.Bool("json", false, "print the sessions as JSON")
-	if _, err := parseArgs(fs, args); err != nil {
+	return &listFlags{FlagSet: fs, asJSON: fs.Bool("json", false, "print the sessions as JSON")}
+}
+
+func cmdList(args []string) error {
+	f := newListFlags()
+	if _, err := parseArgs(f.FlagSet, args); err != nil {
 		return err
 	}
 	sessions, err := allSessions()
 	if err != nil {
 		return err
 	}
-	if *asJSON {
+	if *f.asJSON {
 		return printJSON(sessions)
 	}
 	fmt.Printf("%-12s  %-10s  %-20s  %s\n", "ID", "STATUS", "CREATED", "TITLE")
@@ -463,10 +520,21 @@ func printSession(out sessionResponse) {
 	}
 }
 
-func cmdGet(args []string) error {
+// getFlags holds the flags of mayfly get.
+type getFlags struct {
+	*flag.FlagSet
+	asJSON *bool
+}
+
+// newGetFlags builds the flag set that mayfly get parses.
+func newGetFlags() *getFlags {
 	fs := flag.NewFlagSet("get", flag.ContinueOnError)
-	asJSON := fs.Bool("json", false, "print the session as JSON")
-	positional, err := parseArgs(fs, args)
+	return &getFlags{FlagSet: fs, asJSON: fs.Bool("json", false, "print the session as JSON")}
+}
+
+func cmdGet(args []string) error {
+	f := newGetFlags()
+	positional, err := parseArgs(f.FlagSet, args)
 	if err != nil {
 		return err
 	}
@@ -477,7 +545,7 @@ func cmdGet(args []string) error {
 	if err != nil {
 		return err
 	}
-	if *asJSON {
+	if *f.asJSON {
 		return printJSONResponse(resp)
 	}
 	var out sessionResponse
@@ -488,18 +556,32 @@ func cmdGet(args []string) error {
 	return nil
 }
 
-func cmdEvents(args []string) error {
+// eventsFlags holds the flags of mayfly events.
+type eventsFlags struct {
+	*flag.FlagSet
+	after  *int64
+	asJSON *bool
+}
+
+// newEventsFlags builds the flag set that mayfly events parses.
+func newEventsFlags() *eventsFlags {
 	fs := flag.NewFlagSet("events", flag.ContinueOnError)
-	after := fs.Int64("after", 0, "start after sequence")
-	asJSON := fs.Bool("json", false, "print the events as JSON")
-	positional, err := parseArgs(fs, args, "after")
+	f := &eventsFlags{FlagSet: fs}
+	f.after = fs.Int64("after", 0, "start after sequence")
+	f.asJSON = fs.Bool("json", false, "print the events as JSON")
+	return f
+}
+
+func cmdEvents(args []string) error {
+	f := newEventsFlags()
+	positional, err := parseArgs(f.FlagSet, args, "after")
 	if err != nil {
 		return err
 	}
 	if len(positional) < 1 {
 		return fmt.Errorf("usage: mayfly events ID")
 	}
-	path := fmt.Sprintf("/api/v1/sessions/%s/events?after=%d", url.PathEscape(positional[0]), *after)
+	path := fmt.Sprintf("/api/v1/sessions/%s/events?after=%d", url.PathEscape(positional[0]), *f.after)
 	resp, err := request(http.MethodGet, path, nil)
 	if err != nil {
 		return err
@@ -510,7 +592,7 @@ func cmdEvents(args []string) error {
 	if err := decodeResponse(resp, &out); err != nil {
 		return err
 	}
-	if *asJSON {
+	if *f.asJSON {
 		return printJSON(out.Events)
 	}
 	for _, raw := range out.Events {
@@ -523,24 +605,35 @@ func cmdEvents(args []string) error {
 	return nil
 }
 
-func cmdSend(args []string) error {
+// sendFlags holds the flags of mayfly send.
+type sendFlags struct {
+	*flag.FlagSet
+	asJSON *bool
+}
+
+// newSendFlags builds the flag set that mayfly send parses.
+func newSendFlags() *sendFlags {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
-	asJSON := fs.Bool("json", false, "print the event as JSON")
+	return &sendFlags{FlagSet: fs, asJSON: fs.Bool("json", false, "print the event as JSON")}
+}
+
+func cmdSend(args []string) error {
+	f := newSendFlags()
 	// Flags go before TEXT, either before or after ID. Everything from the
 	// first TEXT word on is the message, sent as typed, so a message such as
 	// "rerun with --force" keeps its dashes.
-	if err := fs.Parse(args); err != nil {
+	if err := f.Parse(args); err != nil {
 		return err
 	}
-	rest := fs.Args()
+	rest := f.Args()
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: mayfly send [--json] ID TEXT")
 	}
 	id := rest[0]
-	if err := fs.Parse(rest[1:]); err != nil {
+	if err := f.Parse(rest[1:]); err != nil {
 		return err
 	}
-	text := fs.Args()
+	text := f.Args()
 	if len(text) < 1 {
 		return fmt.Errorf("usage: mayfly send [--json] ID TEXT")
 	}
@@ -549,7 +642,7 @@ func cmdSend(args []string) error {
 	if err != nil {
 		return err
 	}
-	if *asJSON {
+	if *f.asJSON {
 		return printJSONResponse(resp)
 	}
 	var out struct {
@@ -562,17 +655,28 @@ func cmdSend(args []string) error {
 	return nil
 }
 
-func cmdClose(args []string) error {
+// closeFlags holds the flags of mayfly close.
+type closeFlags struct {
+	*flag.FlagSet
+	reason *string
+}
+
+// newCloseFlags builds the flag set that mayfly close parses.
+func newCloseFlags() *closeFlags {
 	fs := flag.NewFlagSet("close", flag.ContinueOnError)
-	reason := fs.String("reason", "closed", "close reason")
-	positional, err := parseArgs(fs, args, "reason")
+	return &closeFlags{FlagSet: fs, reason: fs.String("reason", "closed", "close reason")}
+}
+
+func cmdClose(args []string) error {
+	f := newCloseFlags()
+	positional, err := parseArgs(f.FlagSet, args, "reason")
 	if err != nil {
 		return err
 	}
 	if len(positional) < 1 {
 		return fmt.Errorf("usage: mayfly close ID")
 	}
-	body, _ := json.Marshal(map[string]string{"reason": *reason})
+	body, _ := json.Marshal(map[string]string{"reason": *f.reason})
 	resp, err := request(http.MethodPost, "/api/v1/sessions/"+url.PathEscape(positional[0])+"/close", body)
 	if err != nil {
 		return err
@@ -584,10 +688,21 @@ func cmdClose(args []string) error {
 	return nil
 }
 
-func cmdDelete(args []string) error {
+// deleteFlags holds the flags of mayfly delete.
+type deleteFlags struct {
+	*flag.FlagSet
+	yes *bool
+}
+
+// newDeleteFlags builds the flag set that mayfly delete parses.
+func newDeleteFlags() *deleteFlags {
 	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
-	yes := fs.Bool("yes", false, "do not ask for confirmation")
-	positional, err := parseArgs(fs, args)
+	return &deleteFlags{FlagSet: fs, yes: fs.Bool("yes", false, "do not ask for confirmation")}
+}
+
+func cmdDelete(args []string) error {
+	f := newDeleteFlags()
+	positional, err := parseArgs(f.FlagSet, args)
 	if err != nil {
 		return err
 	}
@@ -595,7 +710,7 @@ func cmdDelete(args []string) error {
 		return fmt.Errorf("usage: mayfly delete ID")
 	}
 	id := positional[0]
-	if !*yes {
+	if !*f.yes {
 		fmt.Printf("force-delete session %s? [y/N] ", id)
 		reader := bufio.NewReader(os.Stdin)
 		line, _ := reader.ReadString('\n')
@@ -626,11 +741,25 @@ func openArtifact(id string) (io.ReadCloser, error) {
 	return resp.Body, nil
 }
 
-func cmdArtifact(args []string) error {
+// artifactFlags holds the flags of mayfly artifact. The o flag is a second
+// name for output and shares its value.
+type artifactFlags struct {
+	*flag.FlagSet
+	output *string
+}
+
+// newArtifactFlags builds the flag set that mayfly artifact parses.
+func newArtifactFlags() *artifactFlags {
 	fs := flag.NewFlagSet("artifact", flag.ContinueOnError)
-	out := fs.String("output", "", "output file (default stdout)")
-	fs.StringVar(out, "o", "", "alias for --output")
-	positional, err := parseArgs(fs, args, "output", "o")
+	f := &artifactFlags{FlagSet: fs}
+	f.output = fs.String("output", "", "output file (default stdout)")
+	fs.StringVar(f.output, "o", "", "alias for --output")
+	return f
+}
+
+func cmdArtifact(args []string) error {
+	f := newArtifactFlags()
+	positional, err := parseArgs(f.FlagSet, args, "output", "o")
 	if err != nil {
 		return err
 	}
@@ -642,30 +771,46 @@ func cmdArtifact(args []string) error {
 		return err
 	}
 	defer body.Close()
-	if *out == "" {
+	if *f.output == "" {
 		_, err = io.Copy(os.Stdout, body)
 		return err
 	}
-	f, err := os.Create(*out)
+	file, err := os.Create(*f.output)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	n, err := io.Copy(f, body)
+	defer file.Close()
+	n, err := io.Copy(file, body)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("wrote %d bytes to %s\n", n, *out)
+	fmt.Printf("wrote %d bytes to %s\n", n, *f.output)
 	return nil
 }
 
-func cmdAttach(args []string) error {
+// attachFlags holds the flags of mayfly attach.
+type attachFlags struct {
+	*flag.FlagSet
+	name      *string
+	after     *int64
+	once      *bool
+	exitOnEOF *bool
+}
+
+// newAttachFlags builds the flag set that mayfly attach parses.
+func newAttachFlags() *attachFlags {
 	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
-	name := fs.String("name", "cli", "display name")
-	after := fs.Int64("after", 0, "replay events after sequence")
-	once := fs.Bool("once", false, "exit after the first assistant reply")
-	exitOnEOF := fs.Bool("exit-on-eof", false, "exit when stdin closes")
-	positional, err := parseArgs(fs, args, "name", "after")
+	f := &attachFlags{FlagSet: fs}
+	f.name = fs.String("name", "cli", "display name")
+	f.after = fs.Int64("after", 0, "replay events after sequence")
+	f.once = fs.Bool("once", false, "exit after the first assistant reply")
+	f.exitOnEOF = fs.Bool("exit-on-eof", false, "exit when stdin closes")
+	return f
+}
+
+func cmdAttach(args []string) error {
+	f := newAttachFlags()
+	positional, err := parseArgs(f.FlagSet, args, "name", "after")
 	if err != nil {
 		return err
 	}
@@ -673,7 +818,7 @@ func cmdAttach(args []string) error {
 		return fmt.Errorf("usage: mayfly attach ID")
 	}
 	id := positional[0]
-	body, _ := json.Marshal(map[string]string{"actor": *name})
+	body, _ := json.Marshal(map[string]string{"actor": *f.name})
 	resp, err := request(http.MethodPost, "/api/v1/sessions/"+url.PathEscape(id)+"/attach-ticket", body)
 	if err != nil {
 		return err
@@ -689,7 +834,7 @@ func cmdAttach(args []string) error {
 		return err
 	}
 	q := u.Query()
-	q.Set("after", fmt.Sprint(*after))
+	q.Set("after", fmt.Sprint(*f.after))
 	u.RawQuery = q.Encode()
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
@@ -697,7 +842,7 @@ func cmdAttach(args []string) error {
 	}
 	defer conn.Close()
 
-	fmt.Printf("attached to %s as %s; Ctrl-C to detach\n", id, *name)
+	fmt.Printf("attached to %s as %s; Ctrl-C to detach\n", id, *f.name)
 	done := make(chan struct{})
 	reader := bufio.NewScanner(os.Stdin)
 	go func() {
@@ -709,7 +854,7 @@ func cmdAttach(args []string) error {
 			}
 			_ = conn.WriteJSON(map[string]string{"type": "user_message", "text": text})
 		}
-		if *exitOnEOF {
+		if *f.exitOnEOF {
 			_ = conn.Close()
 		}
 	}()
@@ -734,7 +879,7 @@ func cmdAttach(args []string) error {
 				continue
 			}
 			printEvent(msg.Event)
-			if *once && msg.Event.Type == model.EventAssistantMessage {
+			if *f.once && msg.Event.Type == model.EventAssistantMessage {
 				return nil
 			}
 		}
