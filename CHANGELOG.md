@@ -2,7 +2,7 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
-## [1.0.0-rc.1] - Unreleased
+## [1.0.0-rc.1] - 2026-11-20
 
 ### Added
 
@@ -16,6 +16,8 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ### Security
 
+- Metrics labels no longer take values chosen by a client or a model. `mayfly_http_requests_total` and `mayfly_http_request_duration_seconds` record a non-standard HTTP method as `OTHER`, so unauthenticated requests with arbitrary methods cannot create unbounded series. `mayfly_gateway_calls_total` labels a denied call to a tool the session does not have as `tool="unknown"`.
+- Release binaries and images build with Go 1.27.4 or later (GO-2026-6859, an HTTP/1 server crash in `net/http`). The release workflow fails on an older toolchain.
 - The web UI no longer stores the API token in browser localStorage. It keeps the token in the form field only long enough to exchange it, then clears the field. An old `mayfly.token` value is removed from storage on load.
 
 ### Fixed
