@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/mayfly-banner.webp" alt="mayfly" width="100%"></p>
+<p align="center"><img src="docs/mayfly-banner.jpg" alt="mayfly" width="100%"></p>
 
 <p align="center">
   <a href="https://github.com/hayfever/mayfly/actions/workflows/ci.yml"><img src="https://github.com/hayfever/mayfly/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
