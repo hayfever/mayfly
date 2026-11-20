@@ -10,6 +10,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 - `mayfly artifact --output FILE` as the long form of `-o`.
 - `mayfly help` lists every command and every flag.
 - Configurable webhook body limit. `server.webhook_max_body_bytes` sets the default at 1 MiB, and `triggers[].max_body_bytes` overrides it for one trigger. A body over the limit returns `413 payload_too_large` before signature verification, so it spends no rate-limit token. The chart exposes both keys under `config`.
+- Persisted-format compatibility fixtures under `test/compat`. One set holds the 0.2.0 layout of the queue (bbolt and redis), journal, schedule watermark, and session records, and tests open every set with the current build. `go run ./test/compat/gen` writes the set for a release, and [docs/development.md](docs/development.md#persisted-formats-and-migrations) describes how a layout change adds a migration case.
 
 ### Breaking changes
 
