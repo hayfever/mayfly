@@ -1,5 +1,9 @@
+// The API token is exchanged once for an HttpOnly session cookie. Clear any
+// copy an earlier build wrote to storage, and never keep it in JS state.
+localStorage.removeItem("mayfly.token");
+
 const state = {
-  token: localStorage.getItem("mayfly.token") || "",
+  auth: null,
   name: localStorage.getItem("mayfly.name") || "web",
   config: null,
   sessions: [],
@@ -35,14 +39,28 @@ function errorMessage(data, status) {
   return "HTTP " + status;
 }
 
+function cookieValue(name) {
+  const prefix = name + "=";
+  for (const part of document.cookie.split(";")) {
+    const value = part.trim();
+    if (value.startsWith(prefix)) return decodeURIComponent(value.slice(prefix.length));
+  }
+  return "";
+}
+
+function mutates(method) {
+  return method !== "GET" && method !== "HEAD";
+}
+
 async function api(path, options = {}) {
+  const method = (options.method || "GET").toUpperCase();
   const headers = Object.assign({}, options.headers || {});
-  if (state.token) headers.Authorization = "Bearer " + state.token;
+  if (mutates(method)) headers["X-Mayfly-CSRF"] = cookieValue("mayfly_csrf");
   if (options.body && typeof options.body !== "string") {
     headers["Content-Type"] = "application/json";
     options.body = JSON.stringify(options.body);
   }
-  const res = await fetch(path, Object.assign({}, options, { headers }));
+  const res = await fetch(path, Object.assign({}, options, { method, headers, credentials: "same-origin" }));
   if (res.status === 204) return null;
   const text = await res.text();
   let data = null;
@@ -50,7 +68,7 @@ async function api(path, options = {}) {
     try { data = JSON.parse(text); } catch { data = { error: text }; }
   }
   if (!res.ok) {
-    if (res.status === 401) openSettings();
+    if (res.status === 401) requireSignIn();
     throw new Error(errorMessage(data, res.status));
   }
   return data;
@@ -62,10 +80,38 @@ function setConn(text, live) {
   node.className = "conn" + (live ? " live" : "");
 }
 
-function openSettings() {
-  $("token-input").value = state.token;
+function openAuth() {
+  $("token-input").value = "";
   $("name-input").value = state.name;
-  $("auth-dialog").showModal();
+  if (!$("auth-dialog").open) $("auth-dialog").showModal();
+}
+
+// requireSignIn drops every authenticated view and shows the token form. The
+// caller may still be inside a failed request.
+function requireSignIn() {
+  state.auth = null;
+  state.config = null;
+  state.sessions = [];
+  state.current = null;
+  state.session = null;
+  state.artifact = null;
+  closeSocket();
+  $("signout").hidden = true;
+  $("sessions").textContent = "";
+  $("session").hidden = true;
+  $("empty").hidden = false;
+  $("events").textContent = "";
+  if (location.hash) history.replaceState(null, "", location.pathname);
+  openAuth();
+}
+
+async function signOut() {
+  try {
+    await api("/api/v1/auth/session", { method: "DELETE" });
+  } catch {
+    // A 401 already returned to the token form.
+  }
+  requireSignIn();
 }
 
 async function loadConfig() {
@@ -374,7 +420,7 @@ async function sendMessage(text) {
 async function downloadArtifact() {
   if (!state.current) return;
   const res = await fetch("/api/v1/sessions/" + encodeURIComponent(state.current) + "/artifact", {
-    headers: { Authorization: "Bearer " + state.token },
+    credentials: "same-origin",
   });
   if (!res.ok) {
     toast("Artifact is not available yet.");
@@ -392,22 +438,39 @@ async function downloadArtifact() {
 }
 
 function bindUI() {
-  $("settings").addEventListener("click", openSettings);
+  $("settings").addEventListener("click", openAuth);
   $("refresh").addEventListener("click", () => { loadSessions().catch((e) => toast(e.message)); });
 
-  $("auth-form").addEventListener("submit", (event) => {
+  $("auth-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const token = $("token-input").value.trim();
     const name = $("name-input").value.trim() || "web";
-    if (!token) return;
-    state.token = token;
     state.name = name;
-    localStorage.setItem("mayfly.token", token);
     localStorage.setItem("mayfly.name", name);
-    $("auth-dialog").close();
-    initData();
+    $("token-input").value = "";
+    if (!token) {
+      if (state.auth) {
+        $("auth-dialog").close();
+        return;
+      }
+      toast("Enter an admin token.");
+      return;
+    }
+    const button = $("auth-form").querySelector("button.primary");
+    button.disabled = true;
+    try {
+      state.auth = await api("/api/v1/auth/session", { method: "POST", body: { token } });
+      $("signout").hidden = false;
+      $("auth-dialog").close();
+      await initData();
+    } catch (err) {
+      toast(err.message);
+    } finally {
+      button.disabled = false;
+    }
   });
   $("auth-cancel").addEventListener("click", () => $("auth-dialog").close());
+  $("signout").addEventListener("click", signOut);
 
   $("new-session").addEventListener("click", () => {
     if (!state.config) {
@@ -485,8 +548,8 @@ function bindUI() {
 }
 
 async function initData() {
-  if (!state.token) {
-    openSettings();
+  if (!state.auth) {
+    requireSignIn();
     return;
   }
   try {
@@ -499,6 +562,28 @@ async function initData() {
   }
 }
 
+// restoreSession reads the cookie session. A 401 is the normal first visit, so
+// it does not raise an error.
+async function restoreSession() {
+  try {
+    const res = await fetch("/api/v1/auth/session", { credentials: "same-origin" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+async function start() {
+  state.auth = await restoreSession();
+  if (!state.auth) {
+    requireSignIn();
+    return;
+  }
+  $("signout").hidden = false;
+  await initData();
+}
+
 bindUI();
-initData();
+start();
 setInterval(() => { if (state.current) loadSessions().catch(() => {}); }, 15000);

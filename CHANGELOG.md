@@ -2,6 +2,17 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
+## [1.0.0-rc.1] - Unreleased
+
+### Added
+
+- `POST /api/v1/auth/session` exchanges an API token for an `HttpOnly`, `SameSite=Strict` session cookie plus a CSRF cookie. `GET` reads the session and `DELETE` signs out. A mutating cookie request must send `X-Mayfly-CSRF`, and an `Origin` header must match the deployment.
+- The web UI restores its session from the cookie on load and has a Sign out control.
+
+### Security
+
+- The web UI no longer stores the API token in browser localStorage. It keeps the token in the form field only long enough to exchange it, then clears the field. An old `mayfly.token` value is removed from storage on load.
+
 ## [0.3.0] - 2026-11-19
 
 ### Added

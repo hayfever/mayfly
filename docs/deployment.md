@@ -242,7 +242,7 @@ The control plane needs RBAC for pods, pod logs, secrets, configmaps, networkpol
 - Each session creates one Secret, ConfigMap, NetworkPolicy, and Pod. Cleanup happens on finalize. If the control plane dies mid-close, the pod remains until its `activeDeadlineSeconds` backstop.
 - Local artifacts on an EmptyDir volume are lost when the control-plane pod restarts. Use S3 for durability.
 - Artifact bundles can contain sensitive data. Apply bucket encryption, retention, and access policy.
-- The web UI stores the token in localStorage. Treat the browser profile accordingly.
+- The web UI exchanges the token for an in-memory session cookie; the token is not stored in the browser. A control-plane restart signs every browser out.
 - `kubectl delete namespace mayfly` removes all sessions and control-plane state. Artifacts in S3 remain.
 
 ## Troubleshooting

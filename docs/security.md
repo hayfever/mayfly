@@ -74,6 +74,7 @@ A token acts on every session its scopes reach. There is no user identity.
 | Asset | Control today | Residual risk |
 |---|---|---|
 | API tokens | Each route requires one scope (`internal/httpapi/server.go`). Secrets compare in constant time, and an expired token is refused (`internal/httpapi/auth.go`, `internal/config/tokens.go`). A mutating call writes one audit line with the token name. | No revocation API. Change the Secret and restart the control plane. `expires_at` is optional. Reads are not audited. |
+| Browser session | `POST /api/v1/auth/session` exchanges a token for an in-memory session. The cookie is HttpOnly and SameSite=Strict, and Secure over https. A mutating cookie request needs `X-Mayfly-CSRF` and a matching Origin. The session lasts at most 12 hours, capped by the token expiry (`internal/httpapi/websession.go`). | Script in the page can act for the session. A restart ends every session. Sign-out is the only per-session revocation. |
 | Session tokens | Not in any API response. Attach uses a one-time ticket that expires after `server.attach_ticket_ttl` (60s default) (`internal/httpapi/server.go`). | A `sessions:write` token mints a ticket for any session. |
 | LLM and MCP credentials | Not in any API response. A token can create a session with a configured model and MCP server. | No per-token budget or quota. A `sessions:write` token spends the deployment LLM budget. |
 | Plugin gateway keys | Not exposed. | None. |
@@ -82,8 +83,11 @@ A token acts on every session its scopes reach. There is no user identity.
 
 - The `admin` scope grants every scope. The legacy `server.token_env` token is
   admin. Prefer named tokens with narrow scopes and `expires_at`.
-- The web UI stores the token in browser localStorage. An XSS or a shared
-  browser profile exposes it.
+- The web UI exchanges the token for an `HttpOnly`, `SameSite=Strict` session
+  cookie, so page script cannot read the token or the session id. A mutating
+  cookie request must echo the CSRF cookie and pass the Origin check. An XSS
+  can still act through the page until the session ends, and a shared browser
+  profile shares the session.
 
 ### Compromised or malicious agent session
 
@@ -277,9 +281,29 @@ Each route requires one scope. The `admin` scope grants every scope.
 | `schedules:read` | `GET /api/v1/schedules` |
 | `schedules:write` | `POST /api/v1/schedules/{name}/run` |
 
+The `/api/v1/auth/session` routes take no token scope. `POST` exchanges a token for the session cookie. `GET` and `DELETE` act on the cookie alone.
+
 The control plane compares every configured token with the presented bearer value in constant time. It never logs a token secret. The token name appears in the audit log.
 
 A request without a token, or with an unknown or expired token, gets `401` with code `unauthenticated`. A valid token without the scope of the route gets `403` with code `forbidden`. The attach WebSocket uses a one-time ticket instead of a bearer token.
+
+## Web UI session
+
+The web UI sends its API token once to `POST /api/v1/auth/session` and receives two cookies. The token secret is never written to browser storage, and the page keeps no copy after the form closes.
+
+| Cookie | Attributes | Purpose |
+|---|---|---|
+| `mayfly_session` | `Path=/`, `HttpOnly`, `SameSite=Strict`, `Secure` over https, `Max-Age` up to 12 hours | Identifies the session. JavaScript cannot read it. |
+| `mayfly_csrf` | `Path=/`, `SameSite=Strict`, `Secure` over https, `Max-Age` up to 12 hours | Double-submit value. JavaScript reads it and copies it into the request header. |
+
+- The store keeps sessions in memory, keyed by the SHA-256 of a 32-byte random id. The raw id exists only in the cookie. The map holds at most 1024 sessions and evicts the oldest.
+- A session expires after 12 hours, or earlier when the token's `expires_at` is sooner. A control-plane restart drops every session, so the operator signs in again. The chart runs one replica.
+- `GET /api/v1/auth/session` reports the session name, scopes, and expiry. `DELETE /api/v1/auth/session` ends it and expires both cookies.
+- `GET /api/v1/auth/session` uses only the cookie. A bearer token does not authenticate it, and a bearer token alone cannot end a session.
+
+The cookie is accepted in place of `Authorization: Bearer` on every `/api/v1` operation; the scopes of the token that created the session still apply. A request that carries a Bearer header is authenticated by that header alone, so a wrong header is not rescued by a valid cookie.
+
+A cookie-authenticated mutating request (`POST`, `PUT`, `PATCH`, `DELETE`) must send `X-Mayfly-CSRF` with the `mayfly_csrf` value. When the request carries an `Origin` header, its scheme and host must match the configured `server.public_url` or the request host. A failure returns `403` with code `forbidden` and message `csrf check failed`. Bearer requests are exempt, because a browser cannot attach the header on its own.
 
 ## Audit log
 
@@ -288,12 +312,13 @@ The control plane writes one audit line for every authenticated, mutating `/api/
 The line uses the message `audit` at info level. Its fields are:
 
 - `token_name`: the configured token name. The secret never appears.
+- `via`: `bearer` for an `Authorization` header, or `web` for a browser session cookie.
 - `method` and `route`: the HTTP method and the route pattern, for example `/api/v1/sessions/{id}`.
 - `target`: the session id, schedule name, or job id. A failed request can have an empty target.
 - `status`: the response status.
 - `request_id`: the caller `X-Request-Id`, or a generated id. The response echoes it in `X-Request-Id`.
 
-Read requests are not audited. A request with an unknown token is not audited, because it has no token name.
+Read requests are not audited. A request with an unknown token is not audited, because it has no token name. A failed `POST /api/v1/auth/session` is audited with `token_name` set to `unknown`, and a successful one with the token name and status `201`.
 
 ## Trigger authentication
 
@@ -313,7 +338,9 @@ A verified webhook becomes one queued job and is answered immediately. Replay pr
 - The shell tool (`run_command`) is off by default. Set `sessions.allow_shell: true`, or `allowShell` in an agent manifest, when an agent needs it. The container, not the tool, is the security boundary.
 - stdio MCP servers run as child processes in the container. Their environment cannot reference control-plane secrets; use an HTTP MCP server behind the proxy when credentials are needed.
 - The workspace is shared by all attach clients and the agent. Anyone with an attach ticket or a token with `sessions:write` can influence the session.
-- The web UI stores the API token in browser localStorage.
+- The web UI keeps its session on the control plane, in memory. A restart ends
+  every browser session, so the operator signs in again. The API token is not
+  stored in the browser.
 
 ## Known gaps before production
 
