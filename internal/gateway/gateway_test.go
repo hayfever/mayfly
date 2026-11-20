@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -713,7 +714,7 @@ func TestObserverSeesCompletedAndDeniedCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"not_granted:denied", getTool + ":ok"}
+	want := []string{"unknown:denied", getTool + ":ok"}
 	if len(observer.calls) != len(want) {
 		t.Fatalf("observed %v, want %v", observer.calls, want)
 	}
@@ -721,6 +722,24 @@ func TestObserverSeesCompletedAndDeniedCalls(t *testing.T) {
 		if observer.calls[i] != call {
 			t.Fatalf("observed %v, want %v", observer.calls, want)
 		}
+	}
+}
+
+func TestObserverLabelsUngrantedToolsUnknown(t *testing.T) {
+	observer := &recordingCallObserver{}
+	g, _ := newTestGateway(t, Options{Observer: observer}, inlineTool(getTool, "alpha", "get", true))
+	for i := 0; i < 20; i++ {
+		if _, err := begin(g, fmt.Sprintf("made_up_%d", i), 1, i+1, `{}`); statusOf(err) != http.StatusForbidden {
+			t.Fatalf("ungranted tool error = %v", err)
+		}
+	}
+	for _, call := range observer.calls {
+		if call != "unknown:denied" {
+			t.Fatalf("observed %v, want only unknown:denied", observer.calls)
+		}
+	}
+	if len(observer.calls) != 20 {
+		t.Fatalf("observed %d calls, want 20", len(observer.calls))
 	}
 }
 

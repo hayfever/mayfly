@@ -19,6 +19,15 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "1.27.x"
+          check-latest: true
+      - name: require a patched Go toolchain
+        run: |
+          # GO-2026-6859 (net/http) is fixed in 1.27.4.
+          v="$(go env GOVERSION)"; v="${v#go}"
+          if ! printf '%s\n%s\n' 1.27.4 "$v" | sort -V -C; then
+            echo "::error::Go $v is older than 1.27.4 (GO-2026-6859)"
+            exit 1
+          fi
       - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser

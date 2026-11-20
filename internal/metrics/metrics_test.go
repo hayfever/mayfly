@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -224,4 +225,25 @@ func TestNilMetricsAcceptsEveryCall(t *testing.T) {
 	m.HTTPRequest("/", "GET", 500, time.Second)
 	m.LLMRequest("model", "error", time.Second)
 	m.ToolCall("tool", "error")
+}
+
+func TestHTTPRequestBoundsTheMethodLabel(t *testing.T) {
+	m := New(Sources{}, BuildInfo{})
+	for i := 0; i < 50; i++ {
+		m.HTTPRequest("unmatched", fmt.Sprintf("BOGUS%d", i), 405, time.Millisecond)
+	}
+	m.HTTPRequest("unmatched", "get", 405, time.Millisecond)
+	m.HTTPRequest("unmatched", "PATCH", 405, time.Millisecond)
+
+	got := gather(t, m)
+	methods := map[string]float64{}
+	for _, s := range got["mayfly_http_requests_total"] {
+		methods[s.labels["method"]] += s.value
+	}
+	if len(methods) != 2 || methods["OTHER"] != 51 || methods["PATCH"] != 1 {
+		t.Fatalf("method series = %v, want OTHER=51 and PATCH=1", methods)
+	}
+	if n := len(got["mayfly_http_request_duration_seconds"]); n != 2 {
+		t.Fatalf("duration series = %d, want 2", n)
+	}
 }

@@ -138,6 +138,10 @@ const (
 	CallBusy        = "busy"
 )
 
+// unknownToolLabel is the tool label of a call to a tool the session does
+// not have.
+const unknownToolLabel = "unknown"
+
 func (g *Gateway) observeCall(tool, result string) {
 	if g.opts.Observer != nil {
 		g.opts.Observer.ToolCall(tool, result)
@@ -402,7 +406,9 @@ func (g *Gateway) Begin(ctx context.Context, session string, req BeginRequest) (
 		// fixed table; resolve it against the entry before refusing.
 		tool, ok = g.wildcardTool(ctx, grant, req.Tool)
 		if !ok {
-			g.observeCall(req.Tool, CallDenied)
+			// The model chooses the name, so a refused unknown tool must not
+			// become a metric label of its own.
+			g.observeCall(unknownToolLabel, CallDenied)
 			return BeginResponse{}, errf(http.StatusForbidden, "tool %q is not granted to this session", req.Tool)
 		}
 	}
