@@ -41,40 +41,28 @@ func TestAPIRouteScopesMatchSpec(t *testing.T) {
 	}
 }
 
-// TestRouteScopeCheckCatchesMismatch feeds the scope check a document whose
-// scope differs from its route, so a silent regression in the check itself
-// fails here.
+// TestRouteScopeCheckCatchesMismatch breaks one scope in an in-memory copy of
+// the real spec, so a silent regression in the check itself fails here. The
+// file on disk is not touched.
 func TestRouteScopeCheckCatchesMismatch(t *testing.T) {
-	const fixture = `
-openapi: 3.1.0
-paths:
-  /api/v1/sessions:
-    post:
-      operationId: createSession
-      security:
-        - bearerAuth: [sessions:read]
-`
 	var doc specSecurity
-	if err := yaml.Unmarshal([]byte(fixture), &doc); err != nil {
+	loadSpec(t, &doc)
+	server := New(config.Default(), nil, nil, testLogger())
+
+	const createSession = "operationId: createSession\nsecurity:\n  - bearerAuth: [sessions:read]\n"
+	var replacement yaml.Node
+	if err := yaml.Unmarshal([]byte(createSession), &replacement); err != nil {
 		t.Fatal(err)
 	}
-	routes := []apiRoute{{pattern: "POST /api/v1/sessions", scope: config.ScopeSessionsWrite}}
+	doc.Paths["/api/v1/sessions"]["post"] = *replacement.Content[0]
 
-	problems := routeScopeProblems(doc, routes)
+	problems := routeScopeProblems(doc, server.apiRoutes())
 	if len(problems) != 1 {
-		t.Fatalf("want one problem for a mismatched scope, got %v", problems)
+		t.Fatalf("want one problem for a wrong scope, got %v", problems)
 	}
-	if !strings.Contains(problems[0], `[sessions:read]`) || !strings.Contains(problems[0], `["sessions:write"]`) {
-		t.Fatalf("the problem does not name both scopes: %s", problems[0])
-	}
-
-	doc.Paths["/api/v1/sessions"]["post"] = yaml.Node{}
-	var matching specSecurity
-	if err := yaml.Unmarshal([]byte(strings.Replace(fixture, "sessions:read", "sessions:write", 1)), &matching); err != nil {
-		t.Fatal(err)
-	}
-	if problems := routeScopeProblems(matching, routes); len(problems) != 0 {
-		t.Fatalf("a matching scope reported problems: %v", problems)
+	want := `operation "POST /api/v1/sessions" has bearerAuth scopes [sessions:read]; want ["sessions:write"]`
+	if problems[0] != want {
+		t.Fatalf("got %q; want %q", problems[0], want)
 	}
 }
 
