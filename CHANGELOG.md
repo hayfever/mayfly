@@ -17,6 +17,10 @@ All notable changes are recorded here. The project follows semantic versioning o
 - `mayfly get` printed JSON with no flag. It now prints a readable summary by default; add `--json` to get the API object.
 - `--json` output for a session no longer includes a `backend` field. The CLI decoded the API response into a local struct and wrote it back; it now writes the API object unchanged.
 
+### Fixed
+
+- The load harness deletes a webhook job's session when the job creates it after the harness stops waiting for that job. The final report counts the sessions it cleans up and the ones it leaves behind.
+
 ### Changed
 
 - `--json` output for `run`, `ls`, `agents`, and `events` is the API object unchanged. Fields the CLI does not model pass through, and the CLI no longer adds or drops fields.
