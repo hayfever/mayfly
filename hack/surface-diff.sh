@@ -74,13 +74,15 @@ echo "surface-diff: the CLI surface lost or changed these lines:" >&2
 printf '%s\n' "$removed" | sed 's/^/  - /' >&2
 
 # changelog_records_cli_break reports whether the change against the base adds
-# a bullet under a "Breaking changes" heading that names the CLI.
+# a bullet under a "Breaking changes" heading that names the CLI: the word
+# "CLI" or a `mayfly ...` command. The diff carries the whole file as context
+# so a bullet far below its heading still sees the heading.
 changelog_records_cli_break() {
-  git diff --no-color "$base" -- CHANGELOG.md | awk '
+  git diff --no-color --unified=100000 "$base" -- CHANGELOG.md | awk '
     /^[+ ]##/ { heading = ($0 ~ /Breaking changes/); next }
     heading && /^\+[-*] / {
       line = tolower($0)
-      if (line ~ /(cli|mayfly)/) { found = 1 }
+      if (line ~ /(^|[^a-z])cli([^a-z]|$)/ || line ~ /`mayfly[ `]/) { found = 1 }
     }
     END { exit(found ? 0 : 1) }
   '
