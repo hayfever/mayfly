@@ -150,6 +150,9 @@ config:
     job_timeout: 30m
   skills:
     dirs: [/etc/mayfly-skills]
+    # Verified source archives, named by SHA-256. A restart reads them instead
+    # of downloading. Empty derives "<journal directory>/skill-cache".
+    cache_dir: /var/lib/mayfly/skill-cache
   agents:
     dirs: [/etc/mayfly-agents, /etc/mayfly-bundles]
     allowed_images: []

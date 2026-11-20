@@ -60,7 +60,7 @@ func TestLoadRemoteSource(t *testing.T) {
 		StripComponents: 1,
 		Headers:         map[string]string{"Authorization": "Bearer token"},
 		Timeout:         5 * time.Second,
-	}})
+	}}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestRemoteSourceRejectsBadDigestAndTraversal(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if _, err := Load(nil, []Source{{Name: "bad", URL: server.URL, SHA256: strings.Repeat("0", 64)}}); err == nil {
+	if _, err := Load(nil, []Source{{Name: "bad", URL: server.URL, SHA256: strings.Repeat("0", 64)}}, Options{}); err == nil {
 		t.Fatal("expected digest error")
 	}
 	if _, err := Load(nil, []Source{{
@@ -89,7 +89,7 @@ func TestRemoteSourceRejectsBadDigestAndTraversal(t *testing.T) {
 		SHA256:          hex.EncodeToString(sum[:]),
 		Subdir:          "skills",
 		StripComponents: 1,
-	}}); err != nil {
+	}}, Options{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Load(nil, []Source{{
@@ -98,7 +98,7 @@ func TestRemoteSourceRejectsBadDigestAndTraversal(t *testing.T) {
 		SHA256:          hex.EncodeToString(sum[:]),
 		Subdir:          "missing",
 		StripComponents: 1,
-	}}); err == nil {
+	}}, Options{}); err == nil {
 		t.Fatal("expected no-skills error")
 	}
 
@@ -108,7 +108,7 @@ func TestRemoteSourceRejectsBadDigestAndTraversal(t *testing.T) {
 		_, _ = w.Write(traversal)
 	}))
 	defer tserver.Close()
-	if _, err := Load(nil, []Source{{Name: "escape", URL: tserver.URL, SHA256: hex.EncodeToString(tsum[:])}}); err == nil {
+	if _, err := Load(nil, []Source{{Name: "escape", URL: tserver.URL, SHA256: hex.EncodeToString(tsum[:])}}, Options{}); err == nil {
 		t.Fatal("expected traversal error")
 	}
 }
@@ -130,7 +130,7 @@ func TestRemoteSourceDuplicatesLocal(t *testing.T) {
 		SHA256:          hex.EncodeToString(sum[:]),
 		Subdir:          "skills",
 		StripComponents: 1,
-	}}); err == nil {
+	}}, Options{}); err == nil {
 		t.Fatal("expected duplicate skill error")
 	}
 }

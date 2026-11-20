@@ -2,6 +2,12 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
+## [1.0.0-rc.1] - Unreleased
+
+### Added
+
+- `skills.cache_dir` stores verified skill source archives by SHA-256, so a control-plane restart does not need the archive host. An empty value derives `<journal directory>/skill-cache`. Unreferenced entries are pruned at startup.
+
 ## [0.3.0] - 2026-11-19
 
 ### Added

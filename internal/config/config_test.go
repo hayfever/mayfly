@@ -151,6 +151,66 @@ func TestRepoSkillSourceResolution(t *testing.T) {
 	}
 }
 
+func TestSkillsCacheDir(t *testing.T) {
+	derived := validBase()
+	want := filepath.Join(".mayfly", "skill-cache")
+	if derived.Skills.CacheDir != want {
+		t.Fatalf("derived cache_dir = %q, want %q", derived.Skills.CacheDir, want)
+	}
+
+	besideJournal := Default()
+	besideJournal.Journal.Bolt.Path = "/var/lib/mayfly/journal.db"
+	besideJournal.applyDefaults()
+	if besideJournal.Skills.CacheDir != "/var/lib/mayfly/skill-cache" {
+		t.Fatalf("derived cache_dir = %q", besideJournal.Skills.CacheDir)
+	}
+
+	memory := Default()
+	memory.Journal.Backend = "memory"
+	memory.applyDefaults()
+	if memory.Skills.CacheDir != "" {
+		t.Fatalf("memory journal derived cache_dir = %q", memory.Skills.CacheDir)
+	}
+
+	explicit := validBase()
+	explicit.Skills.CacheDir = "/var/lib/mayfly/skill-cache"
+	explicit.applyDefaults()
+	if explicit.Skills.CacheDir != "/var/lib/mayfly/skill-cache" {
+		t.Fatalf("explicit cache_dir = %q", explicit.Skills.CacheDir)
+	}
+	if err := explicit.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	unclean := validBase()
+	unclean.Skills.CacheDir = "state/skill-cache/"
+	if err := unclean.Validate(); err == nil {
+		t.Fatal("expected clean path validation error")
+	}
+
+	database := validBase()
+	database.Skills.CacheDir = "/var/lib/mayfly/skills.db"
+	if err := database.Validate(); err == nil {
+		t.Fatal("expected database file validation error")
+	}
+}
+
+func TestLoadAcceptsSkillsCacheDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := loadableConfig + "skills: {cache_dir: /var/lib/mayfly/skill-cache}\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Skills.CacheDir != "/var/lib/mayfly/skill-cache" {
+		t.Fatalf("cache_dir = %q", cfg.Skills.CacheDir)
+	}
+}
+
 func TestLoadLiteLLMExample(t *testing.T) {
 	t.Setenv("MAYFLY_WEBHOOK_SECRET", "test")
 	cfg, err := Load(filepath.Join("..", "..", "examples", "config.litellm.yaml"))
