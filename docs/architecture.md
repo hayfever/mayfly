@@ -270,3 +270,53 @@ The local backend uses a child process, a per-session state directory, and the s
 - One replacement container may exist per session; `pollPods` matches only the current pod name, and the restart guard ignores overlapping failure observations.
 - WebSocket clients share the session thread; every user message is broadcast to other clients and delivered to the runtime once.
 - Subscribers have bounded buffers. Slow attach clients can miss live events; reconnect replays the retained backlog.
+
+## Non-goals for this version
+
+- Multi-tenant SaaS with per-user isolation.
+- Persistent, long-running agent workspaces.
+- Replacing commercial SRE agents.
+- Workflow DAGs. A schedule runs one source chain and starts at most one session; there is no multi-step orchestration.
+- Native GCS/Artifact Registry artifact backends.
+
+## Project layout
+
+| Path | Purpose |
+|---|---|
+| `cmd/mayflyd` | control plane |
+| `cmd/mayfly-harness` | image entrypoint: selects an in-image harness or Mayfly fallback |
+| `cmd/mayfly-agent` | built-in session runtime |
+| `cmd/mayfly-plugin-shim` | copies plugin trees into a pod and serves a stdio plugin over HTTP |
+| `cmd/mayfly` | CLI |
+| `cmd/llmstub`, `cmd/mcpstub` | deterministic LLM and MCP stub servers for k3d and local runs |
+| `internal/session` | lifecycle, thread, agent registry, artifact export |
+| `internal/agents` | agent manifest loading and prompt templates |
+| `internal/plugin` | plugin manifest, validation, and names |
+| `internal/gateway` | tool grant, ledger, call tokens, rate limits, audit, remote dispatch |
+| `internal/pluginhost` | inline supervisor and sidecar client |
+| `internal/pluginsvc` | service plugin reconcile and local service children |
+| `internal/httpapi` | API, web UI, webhooks, WebSocket |
+| `internal/k8s` | pod, secret, config map, NetworkPolicy, plugin volumes and sidecars |
+| `internal/agent` | agent loop, tools, traces, bundle |
+| `internal/mcp`, `internal/llm` | protocol clients |
+| `internal/broker` | LLM and MCP credential proxy |
+| `internal/artifact` | local and S3-compatible stores |
+| `internal/queue` | job store (memory, bbolt, Redis protocol) and worker |
+| `internal/workflow`, `internal/sources`, `internal/state` | schedules, source chains, and their watermarks |
+| `internal/journal` | turn journal and tool-call ledger storage |
+| `internal/triggers` | webhook verification and prompt building |
+| `internal/skills` | skill loading, remote sources, and the archive cache |
+| `internal/hub` | in-memory event thread and fan-out |
+| `internal/metrics` | Prometheus registry |
+| `internal/config`, `internal/project` | config and project bundle loading |
+| `internal/bundle` | session artifact bundle format |
+| `internal/runner` | Kubernetes and local execution backends |
+| `internal/ratelimit` | token-bucket limiter |
+| `api` | OpenAPI spec and queue job schema |
+| `docs` | operator and developer docs |
+| `examples/plugins` | Go sidecar, Python service, and TypeScript inline examples |
+| `deploy/k8s` | base manifests and local overlay |
+| `deploy/helm/mayfly` | Helm chart with optional LiteLLM |
+| `hack` | local run, k3d cluster, e2e runner |
+| `e2e` | end-to-end suite against a deployed release |
+| `test` | in-process integration tests and persisted-format compatibility fixtures |
