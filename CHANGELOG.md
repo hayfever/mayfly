@@ -2,6 +2,16 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
+## [1.0.0-rc.1] - Unreleased
+
+### Added
+
+- Stability gate for 1.0. `.github/workflows/e2e-stability.yml` runs the e2e suite 20 times, splitting the runs across the bbolt and redis queues, plus `hack/stress.sh 20`; the `gate` job fails unless every run passes and writes one pass or fail row per run to the run summary. Trigger it with `gh workflow run e2e-stability.yml -f runs=20 -f ref=main` before a release tag. Run the repeated unit tests locally with `hack/stress.sh` or `make stress`.
+
+### Fixed
+
+- A plugin call no longer waits out its full tool timeout when the plugin answers and exits. The stdio client closed the response stream only when its reader reached end of file, so a server that exited right after its answer could lose that answer and leave the call blocked. The stream now closes on every exit path.
+
 ## [0.3.0] - 2026-11-19
 
 ### Added
