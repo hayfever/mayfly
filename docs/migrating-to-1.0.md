@@ -65,6 +65,9 @@ with the value of the `mayfly_csrf` cookie. An `Origin` header must match
 `server.public_url` or the request host. See
 [Web UI session](security.md#web-ui-session) for the full rule.
 
+Sign-in itself accepts only an `application/json` body and refuses an `Origin`
+that fails the same check with `403 forbidden`.
+
 Automation that calls the API with a bearer token needs no change.
 
 ## Audit log line
@@ -109,5 +112,5 @@ maintainers who tag the release, not to an operator.
 
 The state format is unchanged, so a rollback to 0.3.0 reads the same files. Stop
 the new control plane first, then run `helm rollback mayfly -n mayfly`. Browser
-sessions and skill cache entries do not survive the rollback, and neither
-affects session recovery.
+sessions end with the restart, and 0.3.0 ignores the skill cache directory.
+Neither affects session recovery.

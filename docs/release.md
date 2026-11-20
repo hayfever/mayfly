@@ -70,7 +70,7 @@ Each command must print the workflow identity and the tag. The OIDC issuer is th
 
 ## Pre-release checklist
 
-1. Update `CHANGELOG.md` and the chart `version` and `appVersion` if they differ from the tag.
+1. Update `CHANGELOG.md` and the chart `version` and `appVersion` if they differ from the tag. Replace `Unreleased` in the release heading with the tag date, for example `## [1.0.0-rc.1] - 2026-11-20`, in the commit you tag. Do this for an RC too.
 2. Run the full test path:
 
 ```bash
@@ -129,7 +129,7 @@ git tag -a vX.Y.Z-rc.1 -m "Mayfly vX.Y.Z-rc.1"
 git push origin vX.Y.Z-rc.1
 ```
 
-The same workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`). The image tags come from the semver patterns in `release.yml`: an RC tag like `v1.0.0-rc.1` publishes `1.0.0-rc.1` and `1.0`, and no `latest` tag, because `latest` is enabled only for a tag with no `-`. The chart is pushed as `1.0.0-rc.1`. Install it with `--version 1.0.0-rc.1`. When the candidate passes, tag `v1.0.0` on the same commit; that tag publishes `1.0.0`, `1.0`, and `latest`.
+The same workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`). The image tags come from the semver patterns in `release.yml`: an RC tag like `v1.0.0-rc.1` publishes only `1.0.0-rc.1`. `docker/metadata-action` skips the `{{major}}.{{minor}}` pattern for a pre-release, and `latest` is enabled only for a tag with no `-`. The chart is pushed as `1.0.0-rc.1`. Install it with `--version 1.0.0-rc.1`. When the candidate passes, tag `v1.0.0` on the same commit; that tag publishes `1.0.0`, `1.0`, and `latest`.
 
 ## Post-release verification
 
