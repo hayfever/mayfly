@@ -108,7 +108,9 @@ Operators moving from 0.1.x or a release candidate should read
 - The plugin shim drops readiness as soon as a child request fails, so `/readyz` no longer passes after the child has exited.
 - Adoption reports the current attempt count and the correct singular or plural in the failure message. `DELETE` is safe against an adoption retry in flight.
 
-## [0.1.0] - Unreleased
+## [0.1.0] - Not released
+
+0.1.0 shipped only as `v0.1.0-rc.1` and `v0.1.0-rc.2`; 0.2.0 superseded it.
 
 ### Added
 
@@ -179,6 +181,8 @@ Operators moving from 0.1.x or a release candidate should read
 - Kubernetes and Helm options for the project bundle and the `mayfly-sources` provider secret.
 
 ### Known limitations
+
+Historical: these describe 0.1.0, and many no longer apply. See the README for current limitations.
 
 - The control plane runs one replica. Session records and thread history are in memory; artifacts are durable. Finished sessions are dropped after `sessions.retention`.
 - Single tenant. There is no SSO or per-user authorization, and no general audit log. The tool gateway logs one record per non-built-in tool call (session, agent, tool, placement, idempotency key, argument hash, outcome), without arguments or results. Built-in tools, API requests, and operator actions are not audited.

@@ -139,7 +139,7 @@ One unavailable MCP server does not reject the session. The runtime records a `s
 
 ```bash
 curl -sS http://localhost:8080/api/v1/sessions \
-  -H "Authorization: Bearer $MAYFLY_TOKEN" \
+  -H "Authorization: Bearer $MAYFLY_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"...","mcp_servers":["github"]}'
 ```
