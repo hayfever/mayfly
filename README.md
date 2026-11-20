@@ -9,31 +9,46 @@
 
 Mayfly is a self-hosted control plane for **short-lived, interactive AI agent sessions** on Kubernetes. A webhook, a schedule, the API, the CLI, or the web UI starts a session in a locked-down pod; people can join its live thread, and when it ends you get a durable artifact bundle. The control plane holds every credential: agents reach models, MCP servers, and plugins only through its LLM proxy and audited tool gateway, and nothing runs between sessions.
 
-## What works
+## Features
 
-- Webhook triggers: generic HMAC/token, GitHub, Slack slash commands, Datadog.
-- Durable webhook intake: verified deliveries are queued (`memory`, `bbolt`, or any Redis-protocol cache) and answered immediately, then a worker creates the session.
-- Raw API and CLI creation.
-- One Kubernetes pod per session, or a local process backend for development.
-- Selectable agent manifests: prompt, model, skills, MCP servers, plugins, limits, and an in-image harness name.
-- `mayfly-harness` entrypoint selects a named harness or falls back to the built-in loop.
-- MCP servers (stdio in the container, HTTP through a credential proxy) and Markdown skills injected at startup, including verified remote skill sources from repo or archive links. Archives are cached by SHA-256 (`skills.cache_dir`), so a restart does not need the archive host.
-- Plugins: MCP servers declared in the bundle as `inline`, `sidecar`, or `service` workloads, with one tool gateway, a delivery ledger, call tokens, per-plugin rate limits, and an audit log. `mayfly plugin init|check|test` works offline.
-- Shared interactive thread over WebSocket: many people can attach, send messages, and watch tool calls.
-- Explicit close, TTL expiry, idle timeout, and crash recovery.
-- A session cap (`sessions.max_concurrent`) and per-trigger webhook rate limits, so one noisy trigger cannot overrun the cluster.
-- Artifact export on teardown: conversation, events, traces, generated workspace files, and a manifest. Local filesystem or S3-compatible storage.
-- Isolation defaults: non-root, read-only root filesystem, all capabilities dropped, no service account token, default-deny ingress, egress only to the control plane and DNS.
-- LLM and HTTP MCP credentials stay in the control plane. Sessions receive one scoped token.
-- Prometheus metrics on the main port or a separate address, and one structured request log line per request with a request ID. See [docs/observability.md](docs/observability.md).
-- Scheduled source runs: a declarative `http.json` source chain reads providers (Notion, Firecrawl, anything JSON), writes a run artifact, and starts one session on a material change. `GET /api/v1/schedules` lists schedules and `POST /api/v1/schedules/{name}/run` starts one now.
-- Named API tokens with scopes (`server.tokens`). Every mutating `/api/v1` request writes one audit log line with the token name and `via` (`bearer` or `web`).
-- Web UI: it exchanges a token once for an `HttpOnly`, `SameSite=Strict` session cookie, and mutating requests need the CSRF header. The token is never kept in browser storage.
-- Turn journal: each completed step is journaled in the control plane, so a replacement container resumes an interrupted turn instead of starting over.
-- Queue admin API: queue depth, job status, and the dead-job list with retry and delete under `/api/v1/queue`.
-- OpenAPI spec in [api/openapi.yaml](api/openapi.yaml) with a generated reference in [docs/api-reference.md](docs/api-reference.md). Tests fail when routes, scopes, the docs, or the spec drift apart.
-- Signed releases: images and chart are signed with cosign keyless, and both images carry SBOM and provenance attestations.
-- `mayflyd -check` validates the config and project bundle without starting servers. Every CLI data command takes `--json`, and `mayfly transcript` prints a finished session's conversation.
+### Sessions
+
+- Start a session from a signed webhook (generic HMAC or token, GitHub, Slack slash commands, Datadog), a schedule, the API, the CLI, or the web UI.
+- Webhook deliveries are verified, queued, and answered at once; a worker creates the session.
+- Scheduled source runs: an `http.json` source chain reads providers (Notion, Firecrawl, any JSON), writes a run artifact, and starts one session on a material change.
+- Shared live thread over WebSocket: many people attach, send messages, and watch tool calls.
+- Selectable agent manifests: prompt, model, skills, MCP servers, plugins, limits, and an in-image harness.
+- Explicit close, TTL expiry, and idle timeout. A session cap and per-trigger rate limits keep one trigger from overrunning the cluster.
+- Turn journal: a replacement container resumes an interrupted turn instead of starting over.
+- Artifact bundle on teardown: conversation, events, traces, workspace files, and a manifest, in local or S3-compatible storage.
+
+### Security and credentials
+
+- LLM, MCP, and object-store credentials stay in the control plane. A session gets one scoped token and reaches models and HTTP MCP servers through the control plane's proxy.
+- Named API tokens with scopes (`server.tokens`), and one audit line per mutating `/api/v1` request.
+- Web UI sign-in swaps the token for an `HttpOnly`, `SameSite=Strict` cookie; mutating requests need the CSRF header.
+- Hardened session pods on Kubernetes: non-root, read-only root filesystem, all capabilities dropped, no service account token, no ingress, egress only to the control plane and DNS.
+
+### Tools and gateway
+
+- MCP servers: stdio inside the session, HTTP through the control plane.
+- Plugins as `inline`, `sidecar`, or `service` workloads, all behind one tool gateway with grants, a call ledger, call tokens, per-plugin rate limits, and an audit log. `mayfly plugin init|check|test` works offline.
+- Markdown skills from directories or verified remote archives, cached by SHA-256 (`skills.cache_dir`).
+
+### Operations
+
+- Helm chart with optional LiteLLM, plus a local process backend for development.
+- Queue, journal, and session records in `bbolt` or memory; the queue can also use any Redis-protocol server.
+- Prometheus metrics and one structured log line per request with a request ID. See [docs/observability.md](docs/observability.md).
+- Queue admin API: depth, job status, and dead jobs with retry and delete. Schedules API to list schedules and run one now.
+- `mayflyd -check` validates the config and project bundle without starting servers.
+- OpenAPI spec with a generated reference in [docs/api-reference.md](docs/api-reference.md); tests fail when routes, scopes, docs, or the spec drift.
+- CLI with `--json` on every data command and `mayfly transcript` for a finished session.
+
+### Release and supply chain
+
+- Images for `linux/amd64` and `linux/arm64`, and CLI archives for Linux and macOS.
+- Images and chart signed with cosign keyless; images carry SBOM and provenance attestations. See [Verify a release](#verify-a-release).
 
 ## Architecture
 
@@ -63,7 +78,7 @@ flowchart LR
 
 `mayflyd` owns the trigger, queue, session, and tool gateway layers. The session runtime only makes outbound calls to it, and it never holds an LLM, MCP, or object-store credential. Delivery is at least once: jobs are leased, and a lease that expires makes the job claimable again. Tool calls are recorded in a ledger, so a replacement container replays a completed call instead of repeating it.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the code map and invariants, and [docs/architecture.md](docs/architecture.md) for sequence diagrams and failure handling.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the code map and invariants, and [docs/architecture.md](docs/architecture.md) for sequence diagrams, failure handling, non-goals, and the project layout.
 
 ## Install with Helm
 
@@ -295,56 +310,6 @@ Read [docs/security.md](docs/security.md) before exposing the platform beyond lo
 - **Plugin placement:** `internal/plugin` owns the manifest, `internal/pluginsvc` renders service workloads, and `internal/pluginhost` runs what is inside the pod.
 
 Keep the credential boundary: new tool backends should be reached through the control plane when they need secrets.
-
-## Non-goals for this version
-
-- Multi-tenant SaaS with per-user isolation.
-- Persistent, long-running agent workspaces.
-- Replacing commercial SRE agents.
-- Workflow DAGs. A schedule runs one source chain and starts at most one session; there is no multi-step orchestration.
-- Native GCS/Artifact Registry artifact backends.
-
-## Project layout
-
-| Path | Purpose |
-|---|---|
-| `cmd/mayflyd` | control plane |
-| `cmd/mayfly-harness` | image entrypoint: selects an in-image harness or Mayfly fallback |
-| `cmd/mayfly-agent` | built-in session runtime |
-| `cmd/mayfly-plugin-shim` | copies plugin trees into a pod and serves a stdio plugin over HTTP |
-| `cmd/mayfly` | CLI |
-| `cmd/llmstub`, `cmd/mcpstub` | deterministic LLM and MCP stub servers for k3d and local runs |
-| `internal/session` | lifecycle, thread, agent registry, artifact export |
-| `internal/agents` | agent manifest loading and prompt templates |
-| `internal/plugin` | plugin manifest, validation, and names |
-| `internal/gateway` | tool grant, ledger, call tokens, rate limits, audit, remote dispatch |
-| `internal/pluginhost` | inline supervisor and sidecar client |
-| `internal/pluginsvc` | service plugin reconcile and local service children |
-| `internal/httpapi` | API, web UI, webhooks, WebSocket |
-| `internal/k8s` | pod, secret, config map, NetworkPolicy, plugin volumes and sidecars |
-| `internal/agent` | agent loop, tools, traces, bundle |
-| `internal/mcp`, `internal/llm` | protocol clients |
-| `internal/broker` | LLM and MCP credential proxy |
-| `internal/artifact` | local and S3-compatible stores |
-| `internal/queue` | job store (memory, bbolt, Redis protocol) and worker |
-| `internal/workflow`, `internal/sources`, `internal/state` | schedules, source chains, and their watermarks |
-| `internal/journal` | turn journal and tool-call ledger storage |
-| `internal/triggers` | webhook verification and prompt building |
-| `internal/skills` | skill loading, remote sources, and the archive cache |
-| `internal/hub` | in-memory event thread and fan-out |
-| `internal/metrics` | Prometheus registry |
-| `internal/config`, `internal/project` | config and project bundle loading |
-| `internal/bundle` | session artifact bundle format |
-| `internal/runner` | Kubernetes and local execution backends |
-| `internal/ratelimit` | token-bucket limiter |
-| `api` | OpenAPI spec and queue job schema |
-| `docs` | operator and developer docs |
-| `examples/plugins` | Go sidecar, Python service, and TypeScript inline examples |
-| `deploy/k8s` | base manifests and local overlay |
-| `deploy/helm/mayfly` | Helm chart with optional LiteLLM |
-| `hack` | local run, k3d cluster, e2e runner |
-| `e2e` | end-to-end suite against a deployed release |
-| `test` | in-process integration tests and persisted-format compatibility fixtures |
 
 ## License
 
