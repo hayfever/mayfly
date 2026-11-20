@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -32,6 +33,22 @@ func (s Source) label() string {
 	return s.URL
 }
 
+// logLabel names a source in log lines. A source without a name falls back to
+// its URL without user info, query, or fragment, which can carry credentials.
+func (s Source) logLabel() string {
+	if s.Name != "" {
+		return s.Name
+	}
+	u, err := url.Parse(s.URL)
+	if err != nil {
+		return "<unparsable url>"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
 func (l *skillLoader) loadSource(source Source) error {
 	if strings.TrimSpace(source.URL) == "" {
 		return fmt.Errorf("skill source %q: url is required", source.Name)
@@ -48,15 +65,15 @@ func (l *skillLoader) loadSource(source Source) error {
 		archive, err := readCachedArchive(l.cacheDir, source.SHA256)
 		switch {
 		case err == nil:
-			l.logInfo("skill source cache hit", "source", source.label(), "sha256", strings.ToLower(source.SHA256))
+			l.logInfo("skill source cache hit", "source", source.logLabel(), "sha256", strings.ToLower(source.SHA256))
 			return l.extractArchive(source, archive)
 		case errors.Is(err, fs.ErrNotExist):
 			// No entry yet. Fetch as usual.
 		default:
 			l.logWarn("skill source cache read failed; refetching",
-				"source", source.label(), "sha256", strings.ToLower(source.SHA256), "error", err)
+				"source", source.logLabel(), "sha256", strings.ToLower(source.SHA256), "error", err)
 			if err := os.Remove(filepath.Join(l.cacheDir, cacheEntryName(source.SHA256))); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				l.logWarn("skill source cache remove failed", "source", source.label(), "error", err)
+				l.logWarn("skill source cache remove failed", "source", source.logLabel(), "error", err)
 			}
 		}
 	}
@@ -68,14 +85,14 @@ func (l *skillLoader) loadSource(source Source) error {
 		}
 		return err
 	}
-	l.logInfo("skill source fetched", "source", source.label(), "sha256", strings.ToLower(source.SHA256))
+	l.logInfo("skill source fetched", "source", source.logLabel(), "sha256", strings.ToLower(source.SHA256))
 
 	if err := l.extractArchive(source, archive); err != nil {
 		return err
 	}
 	if cacheable {
 		if err := writeCachedArchive(l.cacheDir, source.SHA256, archive); err != nil {
-			l.logWarn("skill source cache write failed", "source", source.label(), "error", err)
+			l.logWarn("skill source cache write failed", "source", source.logLabel(), "error", err)
 		}
 	}
 	return nil

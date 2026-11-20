@@ -218,3 +218,13 @@ func TestCacheSharesOneEntryPerDigest(t *testing.T) {
 		t.Fatalf("cache entries = %+v", entries)
 	}
 }
+
+func TestSourceLogLabelRedactsURL(t *testing.T) {
+	src := Source{URL: "https://user:secret@example.com/a.tar.gz?token=secret#frag"}
+	if got := src.logLabel(); got != "https://example.com/a.tar.gz" {
+		t.Fatalf("logLabel = %q", got)
+	}
+	if got := (Source{Name: "acme", URL: src.URL}).logLabel(); got != "acme" {
+		t.Fatalf("named logLabel = %q", got)
+	}
+}
