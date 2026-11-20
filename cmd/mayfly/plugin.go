@@ -89,7 +89,7 @@ var pluginCommands = map[string]func([]string) error{
 // plugin that passes here behaves the same in every placement.
 func cmdPlugin(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: mayfly plugin init|check|test ...")
+		return fmt.Errorf("usage: mayfly plugin init|check|test ...") //nolint:staticcheck // usage text ends with the ellipsis shown in help output.
 	}
 	switch args[0] {
 	case "help", "-h", "--help":
@@ -495,11 +495,11 @@ func writeSecrets(manifest plugin.Manifest) (string, error) {
 	for _, secret := range manifest.Secrets {
 		value := os.Getenv(secret.Env)
 		if value == "" {
-			os.RemoveAll(dir)
+			_ = os.RemoveAll(dir)
 			return "", fmt.Errorf("secret %s: set %s in the environment", secret.Env, secret.Env)
 		}
 		if err := os.WriteFile(filepath.Join(dir, secret.Env), []byte(value), 0o600); err != nil {
-			os.RemoveAll(dir)
+			_ = os.RemoveAll(dir)
 			return "", err
 		}
 	}

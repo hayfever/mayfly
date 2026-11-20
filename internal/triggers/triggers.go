@@ -89,7 +89,7 @@ func parseGeneric(cfg config.TriggerConfig, header http.Header, body []byte) (*R
 	contentType := header.Get("Content-Type")
 	if strings.Contains(contentType, "application/json") || (len(body) > 0 && body[0] == '{') {
 		if err := json.Unmarshal(body, &payload); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
+			return nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
 		}
 	}
 	opts := session.CreateOptions{
@@ -147,7 +147,7 @@ func parseDatadog(cfg config.TriggerConfig, header http.Header, body []byte) (*R
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
+		return nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
 	}
 	title := str(payload, "title")
 	text := str(payload, "text")
@@ -203,7 +203,7 @@ func parseGitHub(cfg config.TriggerConfig, header http.Header, body []byte) (*Re
 	delivery := header.Get("X-GitHub-Delivery")
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
+		return nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
 	}
 	summary, title, actor, link := summarizeGitHub(event, payload)
 	summary = truncate(summary, 12<<10)
@@ -249,7 +249,7 @@ func parseSlack(cfg config.TriggerConfig, header http.Header, body []byte) (*Res
 	if strings.Contains(contentType, "application/json") || len(body) > 0 && body[0] == '{' {
 		var payload map[string]any
 		if err := json.Unmarshal(body, &payload); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
+			return nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
 		}
 		if payload["type"] == "url_verification" {
 			challenge := str(payload, "challenge")
@@ -259,7 +259,7 @@ func parseSlack(cfg config.TriggerConfig, header http.Header, body []byte) (*Res
 	}
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
+		return nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
 	}
 	text := strings.TrimSpace(values.Get("text"))
 	if text == "" {
@@ -305,11 +305,11 @@ func applyTemplate(cfg config.TriggerConfig, data Data, fallback string) (string
 	}
 	tmpl, err := template.New(cfg.Name).Option("missingkey=zero").Parse(cfg.Template)
 	if err != nil {
-		return "", fmt.Errorf("%w: trigger template: %v", ErrBadRequest, err)
+		return "", fmt.Errorf("%w: trigger template: %w", ErrBadRequest, err)
 	}
 	var out strings.Builder
 	if err := tmpl.Execute(&out, data); err != nil {
-		return "", fmt.Errorf("%w: trigger template: %v", ErrBadRequest, err)
+		return "", fmt.Errorf("%w: trigger template: %w", ErrBadRequest, err)
 	}
 	return strings.TrimSpace(out.String()), nil
 }
@@ -372,7 +372,7 @@ func verifySlack(cfg config.TriggerConfig, header http.Header, body []byte) bool
 		return false
 	}
 	mac := hmac.New(sha256.New, []byte(cfg.Secret))
-	fmt.Fprintf(mac, "v0:%s:%s", ts, body)
+	_, _ = fmt.Fprintf(mac, "v0:%s:%s", ts, body)
 	expected := "v0=" + hex.EncodeToString(mac.Sum(nil))
 	return hmac.Equal([]byte(expected), []byte(sig))
 }

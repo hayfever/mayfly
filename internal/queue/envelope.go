@@ -196,7 +196,7 @@ func (j *Job) fromLegacy(data []byte) error {
 	if err := json.Unmarshal(data, &legacy); err != nil {
 		return err
 	}
-	kind := KindSession
+	var kind Kind
 	switch legacy.Kind {
 	case "", "session", string(KindSession):
 		kind = KindSession

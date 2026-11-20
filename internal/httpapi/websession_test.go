@@ -23,7 +23,8 @@ func webTestServer(t *testing.T, publicURL string, tokens ...config.APITokenConf
 		cfg.Server.Tokens = []config.APITokenConfig{{Name: "web", Scopes: []string{config.ScopeAdmin}, Secret: "web-secret"}}
 	}
 	s := New(cfg, nil, nil, testLogger())
-	return s, s.Handler()
+	handler := s.Handler()
+	return s, handler
 }
 
 type loginCookies struct {

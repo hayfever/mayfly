@@ -105,7 +105,7 @@ func main() {
 		boltJournal, err := journal.OpenBolt(cfg.Journal.Bolt.Path)
 		if err != nil {
 			logger.Error("configure journal", "error", err)
-			os.Exit(2)
+			os.Exit(2) //nolint:gocritic // the process exits here, so the deferred queue close is moot.
 		}
 		defer func() {
 			if err := boltJournal.Close(); err != nil {
@@ -238,7 +238,7 @@ func main() {
 		Queue:    queueStore,
 		State:    stateStore,
 		Sessions: mgr,
-		MaxBytes: int64(cfg.Sources.MaxArtifactBytes),
+		MaxBytes: cfg.Sources.MaxArtifactBytes,
 		Logger:   logger,
 	})
 	if err != nil {

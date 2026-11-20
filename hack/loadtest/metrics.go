@@ -46,7 +46,7 @@ func scrapeRuntime(ctx context.Context, client *apiClient, metricsURL string) Ru
 		sample.Err = err.Error()
 		return sample
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		sample.Err = err.Error()

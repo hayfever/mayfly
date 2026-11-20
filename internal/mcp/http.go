@@ -67,7 +67,7 @@ func (t *httpTransport) Do(ctx context.Context, id int64, payload []byte) ([]byt
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	contentType := resp.Header.Get("Content-Type")
 	if strings.HasPrefix(contentType, "text/event-stream") {
 		return decodeSSE(resp.Body, id)
@@ -90,7 +90,7 @@ func (t *httpTransport) Notify(ctx context.Context, payload []byte) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	return nil
 }

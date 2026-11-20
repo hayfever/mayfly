@@ -33,7 +33,7 @@ import (
 func testRecordStores(t *testing.T) map[string]func() RecordStore {
 	t.Helper()
 	return map[string]func() RecordStore{
-		"memory": func() RecordStore { return NewMemoryRecords() },
+		"memory": NewMemoryRecords,
 		"bbolt": func() RecordStore {
 			store, err := OpenRecords(config.RecordConfig{Backend: "bbolt", Path: filepath.Join(t.TempDir(), "sessions.db")})
 			if err != nil {
@@ -418,7 +418,7 @@ func TestDeleteDropsStoredSession(t *testing.T) {
 	if stored, _ := records.List(ctx); len(stored) != 0 {
 		t.Fatalf("stored records = %+v", stored)
 	}
-	if err := m.Delete("gone"); err != ErrNotFound {
+	if err := m.Delete("gone"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second delete = %v, want ErrNotFound", err)
 	}
 }

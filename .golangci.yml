@@ -1,0 +1,41 @@
+version: "2"
+
+run:
+  # Build the e2e package so its files are linted too.
+  build-tags:
+    - e2e
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gocritic
+    - misspell
+    - nolintlint
+    - unconvert
+  settings:
+    gocritic:
+      # Diagnostic checks only. Style and performance checks are not enabled.
+      enabled-tags:
+        - diagnostic
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    generated: lax
+    rules:
+      # Tests write to buffers and files that the test itself closes or that
+      # the OS reclaims at exit; unchecked errors there hide no real failure.
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/hayfever/mayfly

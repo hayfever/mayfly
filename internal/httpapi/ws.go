@@ -30,7 +30,7 @@ func (s *Server) attachWebSocket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	ch, cancel, ok := s.mgr.SubscribeEvents(id, after)
 	if !ok {

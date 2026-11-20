@@ -275,7 +275,7 @@ func (r *Runner) Handle(ctx context.Context, job queue.Job) (queue.Result, error
 	sess, err := r.sessions.Create(ctx, opts)
 	if err != nil {
 		if errors.Is(err, session.ErrCapacity) {
-			return queue.Result{}, fmt.Errorf("%w: %v", queue.ErrRetryLater, err)
+			return queue.Result{}, fmt.Errorf("%w: %w", queue.ErrRetryLater, err)
 		}
 		return queue.Result{}, err
 	}
@@ -295,7 +295,7 @@ func (r *Runner) loadArtifact(ctx context.Context, key, schedule, runID string) 
 	if err != nil {
 		return sources.Result{}, "", 0, false, fmt.Errorf("read run artifact %s: %w", key, err)
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(body, r.maxBytes+1))
 	if err != nil {
 		return sources.Result{}, "", 0, false, fmt.Errorf("read run artifact %s: %w", key, err)
@@ -511,7 +511,7 @@ func (r *Runner) accept(ctx context.Context, schedule project.Schedule, slot tim
 		r.logger.Debug("source slot already accepted", "schedule", schedule.Name, "slot", slot)
 	case errors.Is(err, queue.ErrFull):
 		r.logger.Warn("source slot skipped: queue is full", "schedule", schedule.Name, "slot", slot)
-		return "", fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return "", fmt.Errorf("%w: %w", ErrUnavailable, err)
 	default:
 		return "", err
 	}

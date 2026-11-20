@@ -312,7 +312,7 @@ func rewriteQueueDatabase(path string, dead, done queue.Job) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	dead.Attempts = 1
 	deadPayload, err := json.Marshal(queueDeadRecord{Job: dead, Error: deadCause, FailedAt: fixtureDeadFailedAt})
 	if err != nil {

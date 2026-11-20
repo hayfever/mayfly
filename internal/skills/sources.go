@@ -118,7 +118,7 @@ func (l *skillLoader) fetchSource(source Source) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("skill source %q: fetch: %w", source.Name, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("skill source %q: status %d: %s", source.Name, resp.StatusCode, strings.TrimSpace(string(body)))
@@ -144,7 +144,7 @@ func (l *skillLoader) extractArchive(source Source, archive []byte) error {
 	if err != nil {
 		return fmt.Errorf("skill source %q: gzip: %w", source.Name, err)
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 	tr := tar.NewReader(gz)
 	label := source.label()
 	subdir := strings.Trim(path.Clean("/"+source.Subdir), "/")
@@ -155,13 +155,13 @@ func (l *skillLoader) extractArchive(source Source, archive []byte) error {
 	extracted := 0
 	for {
 		header, err := tr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
 			return fmt.Errorf("skill source %q: tar: %w", source.Name, err)
 		}
-		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA { //nolint:staticcheck // old tar writers use the deprecated regular-file typeflag.
 			continue
 		}
 		name := path.Clean(strings.TrimPrefix(header.Name, "./"))

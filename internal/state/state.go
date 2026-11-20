@@ -83,12 +83,11 @@ func checkFormat(tx *bolt.Tx) error {
 }
 
 // migrateFormat moves a store written by an older build to formatVersion. Each
-// case rewrites one version's difference. Version 1 is the first stamped
-// layout, so there is nothing to rewrite yet; a later version adds its case
+// branch rewrites one version's difference. Version 1 is the first stamped
+// layout, so there is nothing to rewrite yet; a later version adds its branch
 // before raising formatVersion.
 func migrateFormat(from int) error {
-	switch from {
-	case 1:
+	if from == 1 {
 		return nil
 	}
 	return fmt.Errorf("state format version %d has no migration path", from)
