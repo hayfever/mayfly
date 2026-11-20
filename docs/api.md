@@ -84,6 +84,7 @@ Responses:
 - Others: `202 {"accepted":true,"duplicate":false,"job_id":"...","delivery":"...","status":"queued"}`. The manual schedule run and the dead-job retry return the same object.
 - Duplicate delivery (same `X-GitHub-Delivery`, Slack `trigger_id`, or `Idempotency-Key`): `202` with `"duplicate":true`. No second job is stored.
 - Slack URL verification: `200 {"challenge":"..."}`.
+- Body over the trigger limit (`server.webhook_max_body_bytes`, or `triggers[].max_body_bytes` when set): `413` with `code: payload_too_large`. The check runs before signature verification, so an oversize delivery does not spend a rate-limit token.
 - Session options the control plane cannot run (unknown agent, skill, or MCP server; model not in `llm.allow_models`; empty prompt): `400` with `code: invalid_request` and the reason. Nothing is queued.
 - Over the trigger rate limit, or when `queue.max_jobs` is reached: `429` with `Retry-After`. The rate limit counts only requests that pass signature verification, so unauthenticated traffic cannot exhaust a trigger.
 

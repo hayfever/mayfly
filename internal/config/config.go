@@ -87,6 +87,9 @@ type ServerConfig struct {
 	Tokens          []APITokenConfig `yaml:"tokens"`
 	AttachTicketTTL Duration         `yaml:"attach_ticket_ttl"`
 	MaxBodyBytes    int64            `yaml:"max_body_bytes"`
+	// WebhookMaxBodyBytes bounds a webhook body when its trigger sets no
+	// max_body_bytes. Webhook bodies are smaller than admin JSON bodies.
+	WebhookMaxBodyBytes int64 `yaml:"webhook_max_body_bytes"`
 	// ShutdownBudget bounds the whole stop sequence: HTTP drain, queue worker
 	// drain, and session manager shutdown. It must fit inside the pod's
 	// terminationGracePeriodSeconds with margin.
@@ -127,6 +130,26 @@ func (c ServerConfig) MetricsRequireAuth() bool {
 // DefaultShutdownBudget leaves five seconds of the thirty-second default pod
 // grace period for the runtime to kill the process.
 const DefaultShutdownBudget = 25 * time.Second
+
+// DefaultWebhookMaxBodyBytes bounds a webhook body when neither the trigger
+// nor the server sets a limit.
+const DefaultWebhookMaxBodyBytes = 1 << 20
+
+// MaxWebhookBodyBytes is the largest webhook body limit a configuration may
+// set. A webhook body is a signed event, not a session bundle.
+const MaxWebhookBodyBytes = 16 << 20
+
+// WebhookBodyLimit returns the body limit for one trigger. The trigger-level
+// max_body_bytes overrides server.webhook_max_body_bytes.
+func (c *Config) WebhookBodyLimit(t TriggerConfig) int64 {
+	if t.MaxBodyBytes > 0 {
+		return t.MaxBodyBytes
+	}
+	if c.Server.WebhookMaxBodyBytes > 0 {
+		return c.Server.WebhookMaxBodyBytes
+	}
+	return DefaultWebhookMaxBodyBytes
+}
 
 // Shutdown budget shares, in percent. The stages run in order, so each one
 // gets its own window inside the budget.
@@ -425,18 +448,21 @@ type RedisQueueConfig struct {
 
 // TriggerConfig defines one webhook endpoint at /hooks/<name>.
 type TriggerConfig struct {
-	Name          string           `yaml:"name"`
-	Type          string           `yaml:"type"` // generic, github, slack, datadog
-	SecretEnv     string           `yaml:"secret_env"`
-	AllowUnsigned bool             `yaml:"allow_unsigned"`
-	Template      string           `yaml:"template"`
-	TTL           Duration         `yaml:"ttl"`
-	Model         string           `yaml:"model"`
-	Agent         string           `yaml:"agent"`
-	Skills        []string         `yaml:"skills"`
-	MCPServers    []string         `yaml:"mcp_servers"`
-	RateLimit     *RateLimitConfig `yaml:"rate_limit"`
-	Secret        string           `yaml:"-"`
+	Name          string   `yaml:"name"`
+	Type          string   `yaml:"type"` // generic, github, slack, datadog
+	SecretEnv     string   `yaml:"secret_env"`
+	AllowUnsigned bool     `yaml:"allow_unsigned"`
+	Template      string   `yaml:"template"`
+	TTL           Duration `yaml:"ttl"`
+	Model         string   `yaml:"model"`
+	Agent         string   `yaml:"agent"`
+	Skills        []string `yaml:"skills"`
+	MCPServers    []string `yaml:"mcp_servers"`
+	// MaxBodyBytes overrides server.webhook_max_body_bytes for this trigger.
+	// Zero uses the server default.
+	MaxBodyBytes int64            `yaml:"max_body_bytes"`
+	RateLimit    *RateLimitConfig `yaml:"rate_limit"`
+	Secret       string           `yaml:"-"`
 }
 
 // RateLimitConfig bounds how many sessions one trigger can request. Requests
@@ -457,7 +483,10 @@ func Default() *Config {
 			TokenEnv:        "MAYFLY_API_TOKEN",
 			AttachTicketTTL: Duration(60 * time.Second),
 			MaxBodyBytes:    4 << 20,
-			ShutdownBudget:  Duration(DefaultShutdownBudget),
+			// A webhook body carries one signed event, so its default is
+			// smaller than the admin JSON limit.
+			WebhookMaxBodyBytes: DefaultWebhookMaxBodyBytes,
+			ShutdownBudget:      Duration(DefaultShutdownBudget),
 		},
 		Sessions: SessionsConfig{
 			Namespace:           "mayfly",
@@ -800,6 +829,12 @@ func (c *Config) Validate() error {
 	if c.Server.ShutdownBudget.Std() < 3*time.Second {
 		return fmt.Errorf("server.shutdown_budget must be at least 3s")
 	}
+	if c.Server.WebhookMaxBodyBytes <= 0 {
+		return fmt.Errorf("server.webhook_max_body_bytes must be positive")
+	}
+	if c.Server.WebhookMaxBodyBytes > MaxWebhookBodyBytes {
+		return fmt.Errorf("server.webhook_max_body_bytes must not exceed %d bytes", MaxWebhookBodyBytes)
+	}
 	if err := c.Server.validateTokens(); err != nil {
 		return err
 	}
@@ -1047,6 +1082,9 @@ func (c *Config) Validate() error {
 		}
 		if t.Secret == "" && !t.AllowUnsigned {
 			return fmt.Errorf("trigger %q: secret_env %s is not set and allow_unsigned is false", t.Name, t.SecretEnv)
+		}
+		if t.MaxBodyBytes < 0 || t.MaxBodyBytes > MaxWebhookBodyBytes {
+			return fmt.Errorf("trigger %q: max_body_bytes must be between 0 and %d bytes", t.Name, MaxWebhookBodyBytes)
 		}
 		if t.RateLimit != nil {
 			if t.RateLimit.Requests < 0 {
