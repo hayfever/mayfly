@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -44,6 +45,19 @@ func TestMCPHelperProcess(t *testing.T) {
 			response["result"] = result
 		}
 		_ = encoder.Encode(response)
+	}
+	os.Exit(0)
+}
+
+// TestMCPFloodHelperProcess writes more lines than the stdio stream buffer
+// holds, then exits without reading stdin. It is the helper process of
+// TestStdioStreamClosesOnServerExit.
+func TestMCPFloodHelperProcess(t *testing.T) {
+	if os.Getenv("MAYFLY_MCP_FLOOD") != "1" {
+		return
+	}
+	for id := 1; id <= 200; id++ {
+		fmt.Fprintf(os.Stdout, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{}}\n", id)
 	}
 	os.Exit(0)
 }
@@ -134,6 +148,36 @@ func TestStdioEnvDropsRuntimeSecrets(t *testing.T) {
 	for _, name := range []string{"MAYFLY_SESSION_TOKEN", "MAYFLY_CONFIG", "OPENAI_API_KEY"} {
 		if value, ok := inherited[name]; ok {
 			t.Errorf("%s was inherited: %q", name, value)
+		}
+	}
+}
+
+// TestStdioStreamClosesOnServerExit pins the end of the response stream. A
+// server that writes more lines than the stream buffer holds and then exits
+// leaves a line pending; the stream must still close, so a waiting call ends
+// with the exit instead of running to its deadline.
+func TestStdioStreamClosesOnServerExit(t *testing.T) {
+	transport, err := newStdioTransportExact(context.Background(), os.Args[0],
+		[]string{"-test.run=TestMCPFloodHelperProcess"},
+		append(os.Environ(), "MAYFLY_MCP_FLOOD=1"), t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transport.Close()
+	select {
+	case <-transport.Exited():
+	case <-time.After(15 * time.Second):
+		t.Fatal("the helper server did not exit")
+	}
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case _, ok := <-transport.lines:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			t.Fatal("the response stream did not close after the server exited")
 		}
 	}
 }

@@ -71,17 +71,27 @@ func newStdioTransportExact(_ context.Context, command string, args, env []strin
 		return nil, fmt.Errorf("start %s: %w", command, err)
 	}
 	go func() {
+		defer close(t.lines)
 		scanner := bufio.NewScanner(stdout)
 		scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 		for scanner.Scan() {
 			line := append([]byte(nil), scanner.Bytes()...)
+			// Offer the line while the buffer has room. A select would race
+			// t.done here, and a server that exits right after its answer
+			// closes t.done before the waiting call reads that answer.
+			select {
+			case t.lines <- line:
+				continue
+			default:
+			}
+			// The buffer is full, so no call is reading. Wait for room, but
+			// stop when the server is gone; Do drains what is buffered.
 			select {
 			case t.lines <- line:
 			case <-t.done:
 				return
 			}
 		}
-		close(t.lines)
 	}()
 	go func() {
 		t.waitErr = cmd.Wait()
