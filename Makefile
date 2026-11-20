@@ -9,7 +9,7 @@ LOADTEST_ARGS ?= -mode sessions -n 5 -duration 2m
 LDFLAGS := -s -w -X github.com/hayfever/mayfly/internal/version.Version=$(VERSION) -X github.com/hayfever/mayfly/internal/version.Commit=$(COMMIT) -X github.com/hayfever/mayfly/internal/version.Date=$(DATE)
 CMDS := mayflyd mayfly-agent mayfly mayfly-harness mayfly-plugin-shim llmstub mcpstub
 
-.PHONY: build test vet fmt image cluster-create cluster-up cluster-down deploy e2e e2e-up e2e-test e2e-down run-local loadtest clean FORCE
+.PHONY: build test vet fmt image cluster-create cluster-up cluster-down deploy e2e e2e-up e2e-test e2e-down stress e2e-stability run-local loadtest clean FORCE
 
 build: $(addprefix $(BIN)/,$(CMDS))
 
@@ -61,6 +61,14 @@ e2e-test:
 
 e2e-down:
 	./hack/e2e.sh down
+
+# Repeated unit tests under -race and a fixed shuffle seed; see docs/testing.md.
+stress:
+	./hack/stress.sh
+
+# The 1.0 stability gate runs in CI. This target only prints how to start it.
+e2e-stability:
+	@echo "gh workflow run e2e-stability.yml -f runs=20 -f ref=main"
 
 run-local:
 	./hack/run-local.sh
