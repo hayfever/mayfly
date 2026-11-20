@@ -50,7 +50,7 @@ The sender cannot address a session, artifact, or Secret.
 | LLM and MCP credentials | Not in the webhook path. The broker injects them. | None. |
 | Plugin gateway keys | Created with the session. | None. |
 | Workspace and artifacts | Not addressable by the webhook. | A verified delivery starts real work with an arbitrary prompt. Prompt injection is not a webhook defect. |
-| Control-plane state | Body capped at 1 MiB; the rate limit spends only after verification; `queue.max_jobs` rejects a full queue (`internal/httpapi/webhook.go`). | Each accepted job uses queue space and a session slot. `sessions.max_concurrent` bounds live sessions. |
+| Control-plane state | Body capped by `server.webhook_max_body_bytes` (default 1 MiB) or the trigger's `max_body_bytes`, checked before verification; the rate limit spends only after verification; `queue.max_jobs` rejects a full queue (`internal/httpapi/webhook.go`). | Each accepted job uses queue space and a session slot. `sessions.max_concurrent` bounds live sessions. |
 
 - The generic receiver accepts `agent`, `model`, `ttl`, `skills`, and
   `mcp_servers` from the body. Values must resolve against configured agents,
