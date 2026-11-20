@@ -495,11 +495,11 @@ func writeSecrets(manifest plugin.Manifest) (string, error) {
 	for _, secret := range manifest.Secrets {
 		value := os.Getenv(secret.Env)
 		if value == "" {
-			os.RemoveAll(dir)
+			_ = os.RemoveAll(dir)
 			return "", fmt.Errorf("secret %s: set %s in the environment", secret.Env, secret.Env)
 		}
 		if err := os.WriteFile(filepath.Join(dir, secret.Env), []byte(value), 0o600); err != nil {
-			os.RemoveAll(dir)
+			_ = os.RemoveAll(dir)
 			return "", err
 		}
 	}

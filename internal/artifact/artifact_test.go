@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -42,7 +43,7 @@ func TestLocalStoreRoundTrip(t *testing.T) {
 	if size != int64(len(payload)) || string(got) != string(payload) {
 		t.Fatalf("round trip mismatch: size=%d got=%q", size, got)
 	}
-	if _, _, err := store.Get(context.Background(), "missing"); err != ErrNotFound {
+	if _, _, err := store.Get(context.Background(), "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing key error = %v", err)
 	}
 }

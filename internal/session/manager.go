@@ -1641,7 +1641,7 @@ func (m *Manager) ReadArtifact(ctx context.Context, id, token, key string, offse
 	if err != nil {
 		return ArtifactWindow{}, err
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	if size != ref.Bytes {
 		return ArtifactWindow{}, fmt.Errorf("artifact %q changed size: %d bytes stored, %d declared", key, size, ref.Bytes)
 	}

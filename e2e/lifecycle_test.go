@@ -163,12 +163,15 @@ func attachAndFollowUp(t *testing.T, id string) {
 	}](t, r).Ticket
 	wsURL := "ws" + strings.TrimPrefix(env.url("/api/v1/sessions/"+id+"/ws?ticket="+ticket), "http")
 
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	conn, wsResp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
+	defer func() { _ = wsResp.Body.Close() }()
 	defer conn.Close()
-	if second, resp, err := websocket.DefaultDialer.Dial(wsURL, nil); err == nil {
+	second, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err == nil {
+		defer func() { _ = resp.Body.Close() }()
 		second.Close()
 		t.Error("an attach ticket was accepted twice")
 	} else if resp == nil || resp.StatusCode < 400 {

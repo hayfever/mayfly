@@ -143,7 +143,7 @@ func resolveToken(getenv func(string) string, warn io.Writer) string {
 		return value
 	}
 	if value := strings.TrimSpace(getenv(envTokenAlias)); value != "" {
-		fmt.Fprintf(warn, "mayfly: %s is deprecated; set %s instead\n", envTokenAlias, envToken)
+		_, _ = fmt.Fprintf(warn, "mayfly: %s is deprecated; set %s instead\n", envTokenAlias, envToken)
 		return value
 	}
 	return ""
@@ -180,7 +180,7 @@ func request(method, path string, body []byte) (*http.Response, error) {
 // responseError reads the API error envelope. It still accepts a plain string
 // or text body so an older control plane gives a readable message.
 func responseError(resp *http.Response) error {
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var env struct {
 		Error json.RawMessage `json:"error"`
@@ -212,7 +212,7 @@ func decodeResponse(resp *http.Response, dst any) error {
 	if resp.StatusCode >= 300 {
 		return responseError(resp)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if dst == nil {
 		return nil
@@ -247,7 +247,7 @@ func printJSONResponse(resp *http.Response) error {
 	if resp.StatusCode >= 300 {
 		return responseError(resp)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
 		return err
@@ -367,7 +367,7 @@ func cmdRun(args []string) error {
 		"skills":      f.skills,
 		"mcp_servers": f.mcps,
 	})
-	resp, err := request(http.MethodPost, "/api/v1/sessions", body)
+	resp, err := request(http.MethodPost, "/api/v1/sessions", body) //nolint:bodyclose // decodeResponse closes the body.
 	if err != nil {
 		return err
 	}
@@ -399,7 +399,7 @@ func cmdAgents(args []string) error {
 	if _, err := parseArgs(f.FlagSet, args); err != nil {
 		return err
 	}
-	resp, err := request(http.MethodGet, "/api/v1/config", nil)
+	resp, err := request(http.MethodGet, "/api/v1/config", nil) //nolint:bodyclose // decodeResponse closes the body.
 	if err != nil {
 		return err
 	}
@@ -478,7 +478,7 @@ func allSessions() ([]json.RawMessage, error) {
 		if cursor != "" {
 			path += "?cursor=" + url.QueryEscape(cursor)
 		}
-		resp, err := request(http.MethodGet, path, nil)
+		resp, err := request(http.MethodGet, path, nil) //nolint:bodyclose // decodeResponse closes the body.
 		if err != nil {
 			return nil, err
 		}
@@ -541,7 +541,7 @@ func cmdGet(args []string) error {
 	if len(positional) < 1 {
 		return fmt.Errorf("usage: mayfly get ID")
 	}
-	resp, err := request(http.MethodGet, "/api/v1/sessions/"+url.PathEscape(positional[0]), nil)
+	resp, err := request(http.MethodGet, "/api/v1/sessions/"+url.PathEscape(positional[0]), nil) //nolint:bodyclose // decodeResponse closes the body.
 	if err != nil {
 		return err
 	}
@@ -582,7 +582,7 @@ func cmdEvents(args []string) error {
 		return fmt.Errorf("usage: mayfly events ID")
 	}
 	path := fmt.Sprintf("/api/v1/sessions/%s/events?after=%d", url.PathEscape(positional[0]), *f.after)
-	resp, err := request(http.MethodGet, path, nil)
+	resp, err := request(http.MethodGet, path, nil) //nolint:bodyclose // decodeResponse closes the body.
 	if err != nil {
 		return err
 	}
@@ -638,7 +638,7 @@ func cmdSend(args []string) error {
 		return fmt.Errorf("usage: mayfly send [--json] ID TEXT")
 	}
 	body, _ := json.Marshal(map[string]string{"text": strings.Join(text, " ")})
-	resp, err := request(http.MethodPost, "/api/v1/sessions/"+url.PathEscape(id)+"/messages", body)
+	resp, err := request(http.MethodPost, "/api/v1/sessions/"+url.PathEscape(id)+"/messages", body) //nolint:bodyclose // decodeResponse closes the body.
 	if err != nil {
 		return err
 	}
@@ -677,7 +677,7 @@ func cmdClose(args []string) error {
 		return fmt.Errorf("usage: mayfly close ID")
 	}
 	body, _ := json.Marshal(map[string]string{"reason": *f.reason})
-	resp, err := request(http.MethodPost, "/api/v1/sessions/"+url.PathEscape(positional[0])+"/close", body)
+	resp, err := request(http.MethodPost, "/api/v1/sessions/"+url.PathEscape(positional[0])+"/close", body) //nolint:bodyclose // decodeResponse closes the body.
 	if err != nil {
 		return err
 	}
@@ -718,7 +718,7 @@ func cmdDelete(args []string) error {
 			return fmt.Errorf("aborted")
 		}
 	}
-	resp, err := request(http.MethodDelete, "/api/v1/sessions/"+url.PathEscape(id), nil)
+	resp, err := request(http.MethodDelete, "/api/v1/sessions/"+url.PathEscape(id), nil) //nolint:bodyclose // decodeResponse closes the body.
 	if err != nil {
 		return err
 	}
@@ -770,7 +770,7 @@ func cmdArtifact(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	if *f.output == "" {
 		_, err = io.Copy(os.Stdout, body)
 		return err
@@ -779,7 +779,7 @@ func cmdArtifact(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	n, err := io.Copy(file, body)
 	if err != nil {
 		return err
@@ -836,11 +836,12 @@ func cmdAttach(args []string) error {
 	q := u.Query()
 	q.Set("after", fmt.Sprint(*f.after))
 	u.RawQuery = q.Encode()
-	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = conn.Close() }()
 
 	fmt.Printf("attached to %s as %s; Ctrl-C to detach\n", id, *f.name)
 	done := make(chan struct{})

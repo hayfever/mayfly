@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -175,11 +176,12 @@ func TestWebhookToArtifact(t *testing.T) {
 		WSURL string `json:"ws_url"`
 	}
 	decode(t, ticketResp, &ticket)
-	conn, _, err := websocket.DefaultDialer.Dial(ticket.WSURL, nil)
+	conn, wsResp, err := websocket.DefaultDialer.Dial(ticket.WSURL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = wsResp.Body.Close() }()
+	defer func() { _ = conn.Close() }()
 	wsCh := make(chan model.Event, 128)
 	go func() {
 		defer close(wsCh)
@@ -230,10 +232,13 @@ func TestWebhookToArtifact(t *testing.T) {
 		}
 	}
 
-	if resp, err := admin(http.MethodPost, base+"/internal/v1/sessions/"+id+"/events", nil); err != nil {
+	internalResp, err := admin(http.MethodPost, base+"/internal/v1/sessions/"+id+"/events", nil)
+	if err != nil {
 		t.Fatal(err)
-	} else if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("internal endpoint without token returned %d", resp.StatusCode)
+	}
+	defer func() { _ = internalResp.Body.Close() }()
+	if internalResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("internal endpoint without token returned %d", internalResp.StatusCode)
 	}
 
 	// Close and wait for export.
@@ -538,7 +543,7 @@ func readBundle(t *testing.T, raw []byte) map[string][]byte {
 	out := map[string][]byte{}
 	for {
 		header, err := tr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

@@ -56,7 +56,7 @@ func realMain(args []string, stdout, stderr io.Writer) int {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
-		fmt.Fprintln(stderr, "loadtest:", err)
+		_, _ = fmt.Fprintln(stderr, "loadtest:", err)
 		return 2
 	}
 	if opts.dryRun {
@@ -65,7 +65,7 @@ func realMain(args []string, stdout, stderr io.Writer) int {
 	}
 	token := os.Getenv(opts.tokenEnv)
 	if token == "" {
-		fmt.Fprintf(stderr, "loadtest: %s is not set; it must hold an API token with the admin scope\n", opts.tokenEnv)
+		_, _ = fmt.Fprintf(stderr, "loadtest: %s is not set; it must hold an API token with the admin scope\n", opts.tokenEnv)
 		return 2
 	}
 	var webhookSecret string
@@ -78,7 +78,7 @@ func realMain(args []string, stdout, stderr io.Writer) int {
 
 	tgt, err := openTarget(ctx, opts)
 	if err != nil {
-		fmt.Fprintln(stderr, "loadtest:", err)
+		_, _ = fmt.Fprintln(stderr, "loadtest:", err)
 		return 1
 	}
 	defer tgt.stop()
@@ -104,7 +104,7 @@ func realMain(args []string, stdout, stderr io.Writer) int {
 	summary, runErr := runLoad(ctx, cfg, client, tgt.lost)
 	printSummary(stdout, summary)
 	if runErr != nil {
-		fmt.Fprintln(stderr, "loadtest:", runErr)
+		_, _ = fmt.Fprintln(stderr, "loadtest:", runErr)
 		return 1
 	}
 	return 0
@@ -201,21 +201,21 @@ func printPlan(w io.Writer, opts options, getenv func(string) string) {
 	if opts.baseURL != "" {
 		where = opts.baseURL
 	}
-	fmt.Fprintf(w, "loadtest plan\n")
-	fmt.Fprintf(w, "  mode:        %s\n", opts.mode)
-	fmt.Fprintf(w, "  workers:     %d\n", opts.concurrency)
-	fmt.Fprintf(w, "  window:      %s", opts.duration)
+	_, _ = fmt.Fprintf(w, "loadtest plan\n")
+	_, _ = fmt.Fprintf(w, "  mode:        %s\n", opts.mode)
+	_, _ = fmt.Fprintf(w, "  workers:     %d\n", opts.concurrency)
+	_, _ = fmt.Fprintf(w, "  window:      %s", opts.duration)
 	if opts.iterations > 0 {
-		fmt.Fprintf(w, " or %d operations per worker", opts.iterations)
+		_, _ = fmt.Fprintf(w, " or %d operations per worker", opts.iterations)
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  target:      %s\n", where)
-	fmt.Fprintf(w, "  token:       $%s (%s)\n", opts.tokenEnv, setState(getenv(opts.tokenEnv)))
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintf(w, "  target:      %s\n", where)
+	_, _ = fmt.Fprintf(w, "  token:       $%s (%s)\n", opts.tokenEnv, setState(getenv(opts.tokenEnv)))
 	if opts.mode != "sessions" {
-		fmt.Fprintf(w, "  trigger:     %s, $%s (%s)\n", opts.webhookTrigger, opts.webhookSecretEnv, setState(getenv(opts.webhookSecretEnv)))
+		_, _ = fmt.Fprintf(w, "  trigger:     %s, $%s (%s)\n", opts.webhookTrigger, opts.webhookSecretEnv, setState(getenv(opts.webhookSecretEnv)))
 	}
-	fmt.Fprintf(w, "  metrics:     %s\n", orDefault(opts.metricsURL, "target /metrics"))
-	fmt.Fprintf(w, "  prompt:      %q, ttl %s\n", opts.prompt, opts.ttl)
+	_, _ = fmt.Fprintf(w, "  metrics:     %s\n", orDefault(opts.metricsURL, "target /metrics"))
+	_, _ = fmt.Fprintf(w, "  prompt:      %q, ttl %s\n", opts.prompt, opts.ttl)
 }
 
 func orCurrent(s string) string {

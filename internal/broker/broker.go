@@ -125,7 +125,7 @@ func (b *Broker) ServeLLM(w http.ResponseWriter, r *http.Request, sessionModel s
 		writeError(w, http.StatusBadGateway, "model backend unavailable")
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	copyHeaders(w.Header(), resp.Header, "Content-Type", "Cache-Control")
 	w.WriteHeader(resp.StatusCode)
 	streamCopy(w, resp.Body)
@@ -176,7 +176,7 @@ func (b *Broker) ServeMCP(w http.ResponseWriter, r *http.Request, def config.MCP
 		writeError(w, http.StatusBadGateway, "MCP server unavailable")
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	copyHeaders(w.Header(), resp.Header, "Content-Type", "Cache-Control", "Mcp-Session-Id", "MCP-Protocol-Version")
 	w.WriteHeader(resp.StatusCode)
 	streamCopy(w, resp.Body)

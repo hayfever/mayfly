@@ -620,7 +620,7 @@ func (t *toolset) listFiles(args json.RawMessage) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	entries, err := f.ReadDir(maxListedEntries + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", false, err

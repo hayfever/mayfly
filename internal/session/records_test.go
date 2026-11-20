@@ -418,7 +418,7 @@ func TestDeleteDropsStoredSession(t *testing.T) {
 	if stored, _ := records.List(ctx); len(stored) != 0 {
 		t.Fatalf("stored records = %+v", stored)
 	}
-	if err := m.Delete("gone"); err != ErrNotFound {
+	if err := m.Delete("gone"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second delete = %v, want ErrNotFound", err)
 	}
 }

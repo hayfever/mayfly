@@ -47,7 +47,7 @@ func readBundle(r io.Reader) (bundle, error) {
 	if err != nil {
 		return bundle{}, fmt.Errorf("read bundle: %w", err)
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 	var out bundle
 	found := false
 	seen := map[string]bool{}
@@ -143,7 +143,7 @@ func renderTranscript(out io.Writer, b bundle) error {
 	if strings.TrimSpace(b.session.System) != "" {
 		// The runtime builds the system message from this prompt, the
 		// environment, and the skills. Only the prompt is in the bundle.
-		fmt.Fprintf(w, "\nsystem prompt (agent prompt only; the environment block and skill bodies are not recorded)\n%s\n%s\n", rule(), strings.TrimRight(b.session.System, "\n"))
+		_, _ = fmt.Fprintf(w, "\nsystem prompt (agent prompt only; the environment block and skill bodies are not recorded)\n%s\n%s\n", rule(), strings.TrimRight(b.session.System, "\n"))
 	}
 	names := map[string]string{}
 	for _, m := range b.conversation {
@@ -160,14 +160,14 @@ func renderTranscript(out io.Writer, b bundle) error {
 			}
 			label = "tool (" + name + ")"
 		}
-		fmt.Fprintf(w, "\n[%d] %s\n", i+1, label)
+		_, _ = fmt.Fprintf(w, "\n[%d] %s\n", i+1, label)
 		if content := strings.TrimRight(m.Content, "\n"); content != "" {
-			fmt.Fprint(w, prettyJSON(content)+"\n")
+			_, _ = fmt.Fprint(w, prettyJSON(content)+"\n")
 		}
 		for _, call := range m.ToolCalls {
-			fmt.Fprintf(w, "calls %s\n", call.Function.Name)
+			_, _ = fmt.Fprintf(w, "calls %s\n", call.Function.Name)
 			if args := strings.TrimSpace(call.Function.Arguments); args != "" {
-				fmt.Fprint(w, prettyJSON(args)+"\n")
+				_, _ = fmt.Fprint(w, prettyJSON(args)+"\n")
 			}
 		}
 	}
@@ -251,7 +251,7 @@ func cmdTranscript(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(body, 64<<20))
 	if err != nil {
 		return fmt.Errorf("read bundle: %w", err)

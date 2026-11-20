@@ -816,7 +816,7 @@ func waitGone(socket string, pid int) error {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("child did not stop: socket=%v process=%v", socketErr, processErr)
+			return fmt.Errorf("child did not stop: socket=%w process=%w", socketErr, processErr)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}

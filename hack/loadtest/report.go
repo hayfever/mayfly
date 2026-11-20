@@ -161,22 +161,22 @@ func (s *Summary) growth() runtimeGrowth {
 // printSummary writes the human report.
 func printSummary(w io.Writer, s *Summary) {
 	if s == nil {
-		fmt.Fprintln(w, "loadtest: no summary")
+		_, _ = fmt.Fprintln(w, "loadtest: no summary")
 		return
 	}
-	fmt.Fprintf(w, "loadtest: mode %s, %d workers, window %s\n\n", s.Mode, s.Workers, roundDuration(s.Window))
+	_, _ = fmt.Fprintf(w, "loadtest: mode %s, %d workers, window %s\n\n", s.Mode, s.Workers, roundDuration(s.Window))
 
-	fmt.Fprintln(w, "requests")
+	_, _ = fmt.Fprintln(w, "requests")
 	if s.Requests() == 0 {
-		fmt.Fprintln(w, "  none")
+		_, _ = fmt.Fprintln(w, "  none")
 	} else {
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "  operation\trequests\terrors\tp50\tp95\tp99\tmax")
+		_, _ = fmt.Fprintln(tw, "  operation\trequests\terrors\tp50\tp95\tp99\tmax")
 		for _, name := range sortedOps(s.Ops) {
 			stats := s.Ops[name]
 			latencies := append([]time.Duration(nil), stats.Latencies...)
 			sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
-			fmt.Fprintf(tw, "  %s\t%d\t%d\t%s\t%s\t%s\t%s\n",
+			_, _ = fmt.Fprintf(tw, "  %s\t%d\t%d\t%s\t%s\t%s\t%s\n",
 				name,
 				len(stats.Latencies)+len(stats.Failures),
 				len(stats.Failures),
@@ -188,25 +188,25 @@ func printSummary(w io.Writer, s *Summary) {
 		}
 		_ = tw.Flush()
 	}
-	fmt.Fprintf(w, "error rate: %.2f%% (%d of %d)\n", s.ErrorRate()*100, s.Errors(), s.Requests())
+	_, _ = fmt.Fprintf(w, "error rate: %.2f%% (%d of %d)\n", s.ErrorRate()*100, s.Errors(), s.Requests())
 	if labels := failureLabels(s); len(labels) > 0 {
-		fmt.Fprintf(w, "errors: %s\n", strings.Join(labels, "; "))
+		_, _ = fmt.Fprintf(w, "errors: %s\n", strings.Join(labels, "; "))
 	}
 
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "sessions")
-	fmt.Fprintf(w, "  created %d, finalized %d, throughput %.2f/s\n",
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "sessions")
+	_, _ = fmt.Fprintf(w, "  created %d, finalized %d, throughput %.2f/s\n",
 		s.SessionsCreated, s.SessionsFinalized, s.Throughput())
-	fmt.Fprintf(w, "  outcomes: completed %d, failed %d, expired %d\n",
+	_, _ = fmt.Fprintf(w, "  outcomes: completed %d, failed %d, expired %d\n",
 		s.SessionCompleted, s.SessionFailed, s.SessionExpired)
 	if len(s.Lifecycle) > 0 {
-		fmt.Fprintf(w, "  lifecycle: p50 %s, p95 %s, p99 %s\n",
+		_, _ = fmt.Fprintf(w, "  lifecycle: p50 %s, p95 %s, p99 %s\n",
 			roundDuration(Percentile(s.Lifecycle, 0.50)),
 			roundDuration(Percentile(s.Lifecycle, 0.95)),
 			roundDuration(Percentile(s.Lifecycle, 0.99)))
 	}
 	if s.LateSessionsCleaned > 0 || s.LateSessionsLeft > 0 {
-		fmt.Fprintf(w, "  late sessions cleaned up: %d, left behind: %d\n",
+		_, _ = fmt.Fprintf(w, "  late sessions cleaned up: %d, left behind: %d\n",
 			s.LateSessionsCleaned, s.LateSessionsLeft)
 	}
 
@@ -214,7 +214,7 @@ func printSummary(w io.Writer, s *Summary) {
 	printFailures(w, "job failures", s.JobFailures)
 	printFailures(w, "cleanup failures", s.CleanupFailures)
 
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 	printRuntime(w, s)
 }
 
@@ -228,16 +228,16 @@ func printRuntime(w io.Writer, s *Summary) {
 				break
 			}
 		}
-		fmt.Fprintf(w, "control plane runtime: unavailable (%s)\n", reason)
+		_, _ = fmt.Fprintf(w, "control plane runtime: unavailable (%s)\n", reason)
 		return
 	}
-	fmt.Fprintf(w, "control plane runtime (%d samples)\n", len(s.Runtime))
+	_, _ = fmt.Fprintf(w, "control plane runtime (%d samples)\n", len(s.Runtime))
 	if g.GoroutineSamples > 0 {
-		fmt.Fprintf(w, "  go_goroutines: start %d, end %d, peak %d, change %+d\n",
+		_, _ = fmt.Fprintf(w, "  go_goroutines: start %d, end %d, peak %d, change %+d\n",
 			g.GoroutinesStart, g.GoroutinesEnd, g.GoroutinesPeak, g.GoroutinesEnd-g.GoroutinesStart)
 	}
 	if g.RSSSamples > 0 {
-		fmt.Fprintf(w, "  resident memory: start %s, end %s, peak %s, change %+.1f MiB\n",
+		_, _ = fmt.Fprintf(w, "  resident memory: start %s, end %s, peak %s, change %+.1f MiB\n",
 			mib(g.RSSStart), mib(g.RSSEnd), mib(g.RSSPeak), float64(g.RSSEnd-g.RSSStart)/(1<<20))
 	}
 	failed := 0
@@ -247,7 +247,7 @@ func printRuntime(w io.Writer, s *Summary) {
 		}
 	}
 	if failed > 0 {
-		fmt.Fprintf(w, "  %d of %d scrapes failed; the last error was: %s\n", failed, len(s.Runtime), lastRuntimeError(s.Runtime))
+		_, _ = fmt.Fprintf(w, "  %d of %d scrapes failed; the last error was: %s\n", failed, len(s.Runtime), lastRuntimeError(s.Runtime))
 	}
 }
 
@@ -290,7 +290,7 @@ func printFailures(w io.Writer, name string, failures []string) {
 	for _, failure := range failures {
 		counts[short(failure, 120)]++
 	}
-	fmt.Fprintf(w, "  %s: %d (%s)\n", name, len(failures), strings.Join(topCounts(counts, 3), "; "))
+	_, _ = fmt.Fprintf(w, "  %s: %d (%s)\n", name, len(failures), strings.Join(topCounts(counts, 3), "; "))
 }
 
 func topCounts(counts map[string]int, limit int) []string {

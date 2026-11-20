@@ -200,7 +200,7 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, codeNotFound, "artifact not available")
 		return
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", "mayfly-"+id+".tar.gz"))
 	if size > 0 {

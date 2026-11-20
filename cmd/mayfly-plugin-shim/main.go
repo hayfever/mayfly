@@ -40,7 +40,7 @@ func run(args []string, stderr io.Writer) int {
 			return 2
 		}
 		if err := installSelf(args[1]); err != nil {
-			fmt.Fprintf(stderr, "mayfly-plugin-shim: install-self: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "mayfly-plugin-shim: install-self: %v\n", err)
 			return 1
 		}
 		return 0
@@ -50,7 +50,7 @@ func run(args []string, stderr io.Writer) int {
 			return 2
 		}
 		if err := copyTree(args[1], args[2]); err != nil {
-			fmt.Fprintf(stderr, "mayfly-plugin-shim: copy: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "mayfly-plugin-shim: copy: %v\n", err)
 			return 1
 		}
 		return 0
@@ -65,7 +65,7 @@ func run(args []string, stderr io.Writer) int {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, "usage: mayfly-plugin-shim install-self <dst>\n"+
+	_, _ = fmt.Fprint(w, "usage: mayfly-plugin-shim install-self <dst>\n"+
 		"       mayfly-plugin-shim copy <src> <dst>\n"+
 		"       mayfly-plugin-shim serve --listen unix:PATH|tcp:ADDR --key-file FILE [--session ID] [--max-concurrency N] [--init-timeout D] -- COMMAND [ARG...]\n"+
 		"       mayfly-plugin-shim probe --listen unix:PATH|tcp:ADDR [--timeout D]\n")
@@ -242,18 +242,18 @@ func copyFile(src, dst string, mode fs.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+		_ = out.Close()
 		return err
 	}
 	if err := out.Chmod(mode); err != nil {
-		out.Close()
+		_ = out.Close()
 		return err
 	}
 	return out.Close()

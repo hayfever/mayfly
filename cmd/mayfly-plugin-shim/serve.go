@@ -95,12 +95,12 @@ type serveOptions struct {
 func runServe(args []string, stderr io.Writer) int {
 	opts, err := parseServe(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "mayfly-plugin-shim: serve: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "mayfly-plugin-shim: serve: %v\n", err)
 		return 2
 	}
 	key, err := readKey(opts.keyFile)
 	if err != nil {
-		fmt.Fprintf(stderr, "mayfly-plugin-shim: serve: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "mayfly-plugin-shim: serve: %v\n", err)
 		return 1
 	}
 	server := newServeServer(opts, key)
@@ -108,7 +108,7 @@ func runServe(args []string, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := server.run(ctx); err != nil {
-		fmt.Fprintf(stderr, "mayfly-plugin-shim: serve: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "mayfly-plugin-shim: serve: %v\n", err)
 		return 1
 	}
 	return 0
@@ -160,23 +160,23 @@ func runProbe(args []string, stderr io.Writer) int {
 	flags.StringVar(&listen, "listen", "", "unix:PATH or tcp:ADDR of a running serve")
 	flags.DurationVar(&timeout, "timeout", defaultProbeTimeout, "deadline for the probe")
 	if err := flags.Parse(args); err != nil {
-		fmt.Fprintf(stderr, "mayfly-plugin-shim: probe: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "mayfly-plugin-shim: probe: %v\n", err)
 		return 2
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintf(stderr, "mayfly-plugin-shim: probe: unexpected argument %q\n", flags.Arg(0))
+		_, _ = fmt.Fprintf(stderr, "mayfly-plugin-shim: probe: unexpected argument %q\n", flags.Arg(0))
 		return 2
 	}
 	if _, _, err := parseListen(listen); err != nil {
-		fmt.Fprintf(stderr, "mayfly-plugin-shim: probe: --listen: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "mayfly-plugin-shim: probe: --listen: %v\n", err)
 		return 2
 	}
 	if timeout <= 0 {
-		fmt.Fprint(stderr, "mayfly-plugin-shim: probe: --timeout must be positive\n")
+		_, _ = fmt.Fprint(stderr, "mayfly-plugin-shim: probe: --timeout must be positive\n")
 		return 2
 	}
 	if err := probe(context.Background(), listen, timeout); err != nil {
-		fmt.Fprintf(stderr, "mayfly-plugin-shim: probe: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "mayfly-plugin-shim: probe: %v\n", err)
 		return 1
 	}
 	return 0
@@ -208,7 +208,7 @@ func probe(ctx context.Context, listen string, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", listen, err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("%s: %s: %s", listen, response.Status, strings.TrimSpace(string(body)))
@@ -662,7 +662,7 @@ func (s *serveServer) logf(format string, args ...any) {
 	}
 	s.logMu.Lock()
 	defer s.logMu.Unlock()
-	fmt.Fprintf(s.opts.stderr, "mayfly-plugin-shim: serve: "+format+"\n", args...)
+	_, _ = fmt.Fprintf(s.opts.stderr, "mayfly-plugin-shim: serve: "+format+"\n", args...)
 }
 
 // supervise keeps one initialized child running. A child that fails to start
@@ -1255,7 +1255,7 @@ func listen(network, addr string) (net.Listener, error) {
 		return nil, err
 	}
 	if err := os.Chmod(addr, 0o660); err != nil {
-		listener.Close()
+		_ = listener.Close()
 		return nil, fmt.Errorf("set socket mode: %w", err)
 	}
 	return listener, nil
