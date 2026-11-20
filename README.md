@@ -41,6 +41,7 @@ Mayfly is a self-hosted control plane for **short-lived, interactive AI agent se
 - Queue, journal, and session records in `bbolt` or memory; the queue can also use any Redis-protocol server.
 - Prometheus metrics and one structured log line per request with a request ID. See [docs/observability.md](docs/observability.md).
 - Queue admin API: depth, job status, and dead jobs with retry and delete. Schedules API to list schedules and run one now.
+- Versioned queue job envelope ([api/job.v1.schema.json](api/job.v1.schema.json)): your own systems can write `session.create` jobs straight to the queue backend instead of calling a webhook. See [docs/queue-jobs.md](docs/queue-jobs.md).
 - `mayflyd -check` validates the config and project bundle without starting servers.
 - OpenAPI spec with a generated reference in [docs/api-reference.md](docs/api-reference.md); tests fail when routes, scopes, docs, or the spec drift.
 - CLI with `--json` on every data command and `mayfly transcript` for a finished session.
@@ -52,20 +53,24 @@ Mayfly is a self-hosted control plane for **short-lived, interactive AI agent se
 
 ## Architecture
 
-Mayfly puts a durable job queue in front of a session lifecycle manager. A verified webhook becomes a job, a worker turns each job into a short-lived session (a pod, or a local process in development), and every session ends with teardown and an artifact bundle. The API and CLI skip the queue and create sessions directly.
+Mayfly puts a durable job queue in front of a session lifecycle manager. Verified webhooks, schedule slots, and jobs that your own systems write in the versioned envelope ([docs/queue-jobs.md](docs/queue-jobs.md)) all land in the queue; a worker turns each job into a short-lived session (a pod, or a local process in development), and every session ends with teardown and an artifact bundle. The API, CLI, and web UI skip the queue and create sessions directly. The queue admin API reports depth and job status and retries or deletes dead jobs.
 
 ```mermaid
 flowchart LR
   Hook["Webhook<br/>POST /hooks/{name}"] -->|"verify, rate limit, Accept"| Q[("queue.Store<br/>memory, bbolt, redis")]
-  API["API / CLI<br/>POST /api/v1/sessions"] --> M
+  Producer["Your producer<br/>job.v1 envelope"] -->|"write job"| Q
   Cron["Schedule<br/>cron or POST /api/v1/schedules/{name}/run"] -->|"source job"| Q
+  API["API / CLI / web UI<br/>POST /api/v1/sessions"] --> M
+  Admin["Queue admin API<br/>/api/v1/queue"] -->|"depth, job status"| Q
+  Admin -->|"list, retry, delete"| Dead
   Q -->|"Claim lease"| W["queue.Worker"]
   W -->|"SessionHandler"| M["session.Manager<br/>Create"]
   W -->|"source job"| WF["workflow.Runner<br/>source chain, run artifact"]
   WF -->|"material change"| M
   W -->|"Release on ErrCapacity"| Q
   W -->|"Ack: job id to session id"| Done[("done tombstones<br/>tombstone_ttl")]
-  W -->|"Nack at max_attempts"| Dead[("dead jobs<br/>retry or delete")]
+  W -->|"Nack at max_attempts"| Dead[("dead jobs")]
+  Dead -->|"retry"| Q
   M -->|"runner.Start"| R["Kubernetes pod<br/>or local process"]
   R --> A["mayfly-harness<br/>mayfly-agent"]
   A -->|"events, inbox, LLM and MCP via broker"| M
