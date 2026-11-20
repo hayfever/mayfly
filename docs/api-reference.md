@@ -30,7 +30,7 @@ Responses:
 | 201 | The session record exists and the runtime start was requested. | `SessionResponse` |
 | 400 | The request is not valid. | `Error` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 429 | A rate limit or capacity limit is reached. `Retry-After` is set. | `Error` |
 | 500 | The runtime did not start. If the session record already exists, `error.details.session_id` names it. | `Error` |
 
@@ -54,7 +54,7 @@ Responses:
 | 200 | One page of sessions. | `SessionPage` |
 | 400 | The request is not valid. | `Error` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 
 ### getSession
 
@@ -72,7 +72,7 @@ Responses:
 | --- | --- | --- |
 | 200 | The session and its web UI URL. | `SessionResponse` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
 
 ### deleteSession
@@ -96,7 +96,7 @@ Responses:
 | --- | --- | --- |
 | 204 | The session was removed. | - |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
 | 500 | An internal failure. The message never carries internals. | `Error` |
 
@@ -120,7 +120,7 @@ Responses:
 | --- | --- | --- |
 | 200 | Retained events. | `object` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
 
 ### postSessionMessage
@@ -144,7 +144,7 @@ Responses:
 | 202 | The message event was appended. | `object` |
 | 400 | The request is not valid. | `Error` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
 | 409 | The request conflicts with the current state. | `Error` |
 | 500 | An internal failure. The message never carries internals. | `Error` |
@@ -167,7 +167,7 @@ Responses:
 | --- | --- | --- |
 | 202 | The close is in progress. | `object` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
 | 409 | The request conflicts with the current state. | `Error` |
 | 500 | An internal failure. The message never carries internals. | `Error` |
@@ -190,7 +190,7 @@ Responses:
 | --- | --- | --- |
 | 200 | The ticket and the WebSocket URL that consumes it. | `object` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
 | 500 | An internal failure. The message never carries internals. | `Error` |
 
@@ -213,7 +213,7 @@ Responses:
 | --- | --- | --- |
 | 200 | The bundle archive. | `string` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
 
 ### attachSessionWebSocket
@@ -263,7 +263,7 @@ Responses:
 | --- | --- | --- |
 | 200 | Queue counters. | `object` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 503 | A dependency is not available. | `Error` |
 
 ### getQueueJob
@@ -286,7 +286,7 @@ Responses:
 | --- | --- | --- |
 | 200 | The job record. | `JobResponse` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
 | 409 | The request conflicts with the current state. | `Error` |
 | 503 | A dependency is not available. | `Error` |
@@ -311,7 +311,7 @@ Responses:
 | 200 | One page of buried jobs. | `JobPage` |
 | 400 | The request is not valid. | `Error` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 503 | A dependency is not available. | `Error` |
 
 ### retryDeadJob
@@ -332,7 +332,7 @@ Responses:
 | --- | --- | --- |
 | 202 | The job is back on the queue. | `Accepted` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
 | 503 | A dependency is not available. | `Error` |
 
@@ -352,7 +352,7 @@ Responses:
 | --- | --- | --- |
 | 204 | The job was removed. | - |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
 | 503 | A dependency is not available. | `Error` |
 
@@ -383,7 +383,7 @@ Responses:
 | 200 | One page of schedules. | `SchedulePage` |
 | 400 | The request is not valid. | `Error` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 
 ### runSchedule
 
@@ -403,7 +403,7 @@ Responses:
 | --- | --- | --- |
 | 202 | The run was queued. | `Accepted` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
 | 500 | An internal failure. The message never carries internals. | `Error` |
 | 503 | A dependency is not available. | `Error` |
@@ -424,7 +424,76 @@ Responses:
 | --- | --- | --- |
 | 200 | Defaults, allowed models, agents, skills, MCP servers, triggers, and schedules. | `Config` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
-| 403 | The token does not carry the scope the operation requires. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
+
+## auth
+
+| Method | Path | Operation | Scope | Summary |
+| --- | --- | --- | --- | --- |
+| `POST` | `/api/v1/auth/session` | `createWebSession` | none | Exchange an API token for a browser session |
+| `GET` | `/api/v1/auth/session` | `getWebSession` | none | Read the current browser session |
+| `DELETE` | `/api/v1/auth/session` | `deleteWebSession` | none | End the current browser session |
+
+### createWebSession
+
+`POST /api/v1/auth/session`
+
+The web UI sends its API token once and receives two cookies. The session cookie is
+HttpOnly and SameSite=Strict; the CSRF cookie is readable by the page, and its value
+must be echoed in `X-Mayfly-CSRF` on every mutating request.
+
+The session lasts 12 hours, or less when the token's `expires_at` is earlier. Sessions
+live in memory, so a control-plane restart signs every browser out. A second login
+replaces the previous session.
+
+The token secret is not stored in the browser.
+
+Request body: `WebSessionRequest` (required). Content types: `application/json`.
+
+Responses:
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| 201 | The session exists and both cookies are set. | `WebSession` |
+| 400 | The request is not valid. | `Error` |
+| 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
+
+### getWebSession
+
+`GET /api/v1/auth/session`
+
+Resolves the `mayfly_session` cookie. A bearer token does not authenticate this
+operation.
+
+Responses:
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| 200 | The current session. | `WebSession` |
+| 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
+
+### deleteWebSession
+
+`DELETE /api/v1/auth/session`
+
+Requires the session cookie and `X-Mayfly-CSRF` set to the value of the `mayfly_csrf`
+cookie. When the request carries an `Origin` header, it must match the deployment. Both
+cookies are expired.
+
+Parameters:
+
+| Name | In | Required | Type |
+| --- | --- | --- | --- |
+| X-Mayfly-CSRF | header | yes | `string` |
+
+Responses:
+
+| Status | Description | Schema |
+| --- | --- | --- |
+| 204 | The session ended and both cookies are expired. | - |
+| 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
+| 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 
 ## webhooks
 

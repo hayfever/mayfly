@@ -13,6 +13,7 @@
 make build     # bin/mayflyd, mayfly-agent, mayfly, llmstub, mcpstub
 make test      # unit and integration tests
 make vet
+go run ./hack/apidoc     # regenerate docs/api-reference.md from api/openapi.yaml
 ./hack/surface-diff.sh  # CLI surface gate (docs/deprecation.md)
 make image     # four Docker targets
 make run-local # control plane + stubs, token dev-token
@@ -20,6 +21,8 @@ make cluster-up   # k3d cluster, images, manifests
 make e2e       # end-to-end suite on k3d (docs/testing.md)
 make cluster-down
 ```
+
+`go run ./hack/apidoc -check` exits 1 when `docs/api-reference.md` is stale, and `go test ./...` fails the same way.
 
 ## Test layers
 
