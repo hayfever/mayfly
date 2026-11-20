@@ -20,6 +20,21 @@ Deprecation is not a breaking change. Removal is, and it needs the major version
 
 The webhook receiver contract includes the trigger types (`generic`, `github`, `slack`, `datadog`) and their signature checks.
 
+## CLI
+
+The `mayfly` command is a public surface from 1.0.0, with one exception: its text output is not.
+
+| Frozen | Detail |
+|---|---|
+| Command names | `run`, `agents`, `ls`, `get`, `events`, `attach`, `send`, `close`, `delete`, `artifact`, `transcript`, `version`, `plugin init`, `plugin check`, `plugin test`, and `help` |
+| Flag names and forms | Every flag that `mayfly help` lists. A short form (`-o`) and its long form (`--output`) freeze together |
+| Environment variables | `MAYFLY_URL` and `MAYFLY_API_TOKEN` |
+| `--json` output | The top-level shape and the field names of every object. A new optional field is additive |
+
+A command with `--json` writes one JSON document to stdout and nothing else. The document is the API object, or the array of API objects, that the command shows, so the HTTP API schema also describes it. `version --json` returns `{"version","commit","date"}`. A consumer ignores a field it does not know, because a minor release can add one.
+
+The promise does not cover the text output. Wording, columns, alignment, ordering, and progress lines change without notice. Parse `--json`, not the text. The promise also does not cover error `message` text; match on the error `code`, as the HTTP API section says.
+
 ## What the promise does not cover
 
 - `/internal/v1`, the session runtime protocol. It is versioned with the runtime image, and both ends ship together.
