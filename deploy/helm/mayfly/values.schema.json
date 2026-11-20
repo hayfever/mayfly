@@ -226,6 +226,7 @@
             },
             "attach_ticket_ttl": { "type": "string" },
             "max_body_bytes": { "type": "integer", "minimum": 0 },
+            "webhook_max_body_bytes": { "type": "integer", "minimum": 1 },
             "shutdown_budget": { "type": "string" }
           }
         },
@@ -563,6 +564,11 @@
               "mcp_servers": {
                 "type": "array",
                 "items": { "type": "string" }
+              },
+              "max_body_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Webhook body limit for this trigger. Zero uses server.webhook_max_body_bytes."
               },
               "rate_limit": {
                 "type": "object",

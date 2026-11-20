@@ -8,6 +8,8 @@ Mayfly has three test layers. The first two run in seconds without a cluster; th
 | Integration | `go test ./test/integration` | Webhook → queue → worker → real `mayfly-agent` process → MCP → WebSocket → close → artifact, in one process; plus a SIGKILL/resume test on the local backend |
 | End-to-end | `make e2e` | The released images and Helm chart on a real Kubernetes cluster with an enforcing CNI |
 
+`go test ./test/compat` checks that the current build reads each committed persisted-format fixture set: queue jobs on bbolt and redis, journal steps, the schedule watermark, session records, and the artifact index. [development.md](development.md#persisted-formats-and-migrations) describes the fixture sets and the migration path.
+
 Plugin behavior is covered in the first two layers:
 
 - `internal/plugin` checks every manifest in [plugins.md](plugins.md), the defaults, the placement blocks, the names, and the loader paths.

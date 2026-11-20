@@ -100,6 +100,11 @@ paths:
         second job. A Slack URL verification request returns the challenge. A
         Slack trigger returns Slack's acknowledgement body rather than the job
         record.
+
+        A body over the trigger limit (`server.webhook_max_body_bytes`, or
+        `triggers[].max_body_bytes` when set) returns `413 payload_too_large`.
+        The check runs before signature verification, so an oversize delivery
+        does not spend a rate-limit token.
       security: []
       tags: [webhooks]
       parameters:
@@ -775,7 +780,10 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     PayloadTooLarge:
-      description: The body is over the configured limit.
+      description: |
+        The body or artifact is over the configured limit. On
+        `POST /hooks/{name}`, the limit is `server.webhook_max_body_bytes` or
+        the trigger's `max_body_bytes`.
       content:
         application/json:
           schema:
@@ -1017,7 +1025,10 @@ components:
       properties:
         kind:
           type: string
-          description: "Trigger kind: api, generic, github, slack, or datadog."
+          description: >
+            Trigger kind. Known values are `api`, `generic`, `github`,
+            `slack`, and `datadog`. Treat the field as open: ignore a value
+            that this build does not know.
         name:
           type: string
         event:
