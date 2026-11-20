@@ -13,6 +13,7 @@
 make build     # bin/mayflyd, mayfly-agent, mayfly, llmstub, mcpstub
 make test      # unit and integration tests
 make vet
+./hack/surface-diff.sh  # CLI surface gate (docs/deprecation.md)
 make image     # four Docker targets
 make run-local # control plane + stubs, token dev-token
 make cluster-up   # k3d cluster, images, manifests
@@ -24,6 +25,7 @@ make cluster-down
 
 | Layer | What it proves |
 |---|---|
+| `cmd/mayfly` | `--json` output, flag parsing, and the CLI surface golden file; `hack/surface-diff.sh` fails a change that removes or renames a command, flag, or environment variable without a recorded break |
 | `internal/config` | defaults, duration parsing, allowlist |
 | `internal/agents` | manifest parsing, prompt files, duplicates, harness, protocol |
 | `internal/harness` | in-image harness resolution and Mayfly fallback |
