@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/hayfever/mayfly/internal/config"
 )
@@ -71,11 +70,48 @@ func setAuditTarget(r *http.Request, id string) {
 	}
 }
 
-// authenticate resolves the bearer token against the configured set. Every
-// token is compared in constant time, and the loop never stops early, so the
-// position of a match does not change the work done.
+// How a request authenticated. An audit line records it in the via field.
+const (
+	authViaBearer = "bearer"
+	authViaWeb    = "web"
+)
+
+// authInfo is the resolved caller of one request.
+type authInfo struct {
+	token config.APITokenConfig
+	// via is authViaBearer or authViaWeb.
+	via string
+	// csrf is the session token that a mutating cookie request must echo.
+	csrf string
+}
+
+// authenticate resolves the request credential. A Bearer header always decides
+// on its own: a wrong bearer token is never rescued by a valid cookie.
+// Otherwise a web session cookie resolves to the API token it was created for.
 func (s *Server) authenticate(r *http.Request) (config.APITokenConfig, bool) {
-	presented := bearerToken(r)
+	info, ok := s.authenticateRequest(r)
+	return info.token, ok
+}
+
+func (s *Server) authenticateRequest(r *http.Request) (authInfo, bool) {
+	if presented := bearerToken(r); presented != "" {
+		token, ok := s.matchToken(presented)
+		if !ok || token.Expired(s.now()) {
+			return authInfo{}, false
+		}
+		return authInfo{token: token, via: authViaBearer}, true
+	}
+	_, token, session, ok := s.webSession(r)
+	if !ok {
+		return authInfo{}, false
+	}
+	return authInfo{token: token, via: authViaWeb, csrf: session.csrf}, true
+}
+
+// matchToken returns the token whose secret equals presented. Every token is
+// compared in constant time, and the loop never stops early, so the position
+// of a match does not change the work done.
+func (s *Server) matchToken(presented string) (config.APITokenConfig, bool) {
 	if presented == "" {
 		return config.APITokenConfig{}, false
 	}
@@ -87,10 +123,18 @@ func (s *Server) authenticate(r *http.Request) (config.APITokenConfig, bool) {
 			found = 1
 		}
 	}
-	if found == 0 || match.Expired(time.Now()) {
-		return config.APITokenConfig{}, false
+	return match, found == 1
+}
+
+// tokenByName finds the configured token a web session refers to. A missing
+// token ends the session.
+func (s *Server) tokenByName(name string) (config.APITokenConfig, bool) {
+	for _, token := range s.tokens {
+		if token.Name == name {
+			return token, true
+		}
 	}
-	return match, true
+	return config.APITokenConfig{}, false
 }
 
 // authorizedRoute registers one /api/v1 route. A route without a scope is
@@ -104,14 +148,20 @@ func (s *Server) authorizedRoute(route apiRoute) http.HandlerFunc {
 			route.handler(w, r)
 			return
 		}
-		token, ok := s.authenticate(r)
+		info, ok := s.authenticateRequest(r)
 		if !ok {
 			writeError(w, http.StatusUnauthorized, codeUnauthenticated, "missing or invalid bearer token")
 			return
 		}
+		token := info.token
+		if info.via == authViaWeb && isMutating(r.Method) && !s.csrfValid(r, info.csrf) {
+			s.writeAudit(r, token.Name, info.via, path, auditTarget(r), http.StatusForbidden)
+			writeError(w, http.StatusForbidden, codeForbidden, "csrf check failed")
+			return
+		}
 		if !token.HasScope(route.scope) {
 			if isMutating(r.Method) {
-				s.writeAudit(r, token.Name, path, auditTarget(r), http.StatusForbidden)
+				s.writeAudit(r, token.Name, info.via, path, auditTarget(r), http.StatusForbidden)
 			}
 			writeError(w, http.StatusForbidden, codeForbidden, "token lacks the required scope: "+route.scope)
 			return
@@ -136,7 +186,7 @@ func (s *Server) authorizedRoute(route apiRoute) http.HandlerFunc {
 			if target == "" {
 				target = auditTarget(r)
 			}
-			s.writeAudit(r, token.Name, path, target, status)
+			s.writeAudit(r, token.Name, info.via, path, target, status)
 		}()
 		route.handler(recorder, r)
 		done = true
@@ -169,10 +219,12 @@ func auditTarget(r *http.Request) string {
 }
 
 // writeAudit writes one audit line. The token name identifies the caller; the
-// token secret never appears in a log line.
-func (s *Server) writeAudit(r *http.Request, tokenName, route, target string, status int) {
+// token secret never appears in a log line. via records whether the caller used
+// a bearer header or the web session cookie.
+func (s *Server) writeAudit(r *http.Request, tokenName, via, route, target string, status int) {
 	s.logger.Info("audit",
 		"token_name", tokenName,
+		"via", via,
 		"method", r.Method,
 		"route", route,
 		"target", target,
