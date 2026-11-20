@@ -74,7 +74,8 @@ jobs:
           # sha256 of k3d-linux-amd64 from the release's checksums.txt.
           echo "06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0  /tmp/k3d" | sha256sum -c -
           sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
-      # The chart and images of the last release are private GHCR packages.
+      # The chart and images of the last release are public GHCR packages. The
+      # login only avoids the anonymous pull rate limit.
       - name: log in to ghcr.io
         run: echo "${{ github.token }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: previous release

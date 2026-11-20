@@ -12,6 +12,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 - `POST /api/v1/auth/session` exchanges an API token for an `HttpOnly`, `SameSite=Strict` session cookie plus a CSRF cookie. `GET` reads the session and `DELETE` signs out. A mutating cookie request must send `X-Mayfly-CSRF`, and an `Origin` header must match the deployment.
 - The web UI restores its session from the cookie on load and has a Sign out control.
 - Stability gate for 1.0. `.github/workflows/e2e-stability.yml` runs the e2e suite 20 times, splitting the runs across the bbolt and redis queues, plus `hack/stress.sh 20`; the `gate` job fails unless every run passes and writes one pass or fail row per run to the run summary. Trigger it with `gh workflow run e2e-stability.yml -f runs=20 -f ref=main` before a release tag. Run the repeated unit tests locally with `hack/stress.sh` or `make stress`.
+- [docs/migrating-to-1.0.md](docs/migrating-to-1.0.md) lists the operator changes from 0.3.0 to 1.0.0-rc.1.
 
 ### Security
 
@@ -20,6 +21,11 @@ All notable changes are recorded here. The project follows semantic versioning o
 ### Fixed
 
 - A plugin call no longer waits out its full tool timeout when the plugin answers and exits. The stdio client closed the response stream only when its reader reached end of file, so a server that exited right after its answer could lose that answer and leave the call blocked. The stream now closes on every exit path.
+
+### Changed
+
+- The Helm chart and `api/openapi.yaml` report version `1.0.0-rc.1`.
+- golangci-lint runs in CI (`.golangci.yml`).
 
 ## [0.3.0] - 2026-11-19
 

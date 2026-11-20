@@ -70,7 +70,7 @@ Each command must print the workflow identity and the tag. The OIDC issuer is th
 
 ## Pre-release checklist
 
-1. Update `CHANGELOG.md` and the chart `version` and `appVersion` if they differ from the tag.
+1. Update `CHANGELOG.md` and the chart `version` and `appVersion` if they differ from the tag. Replace `Unreleased` in the release heading with the tag date, for example `## [1.0.0-rc.1] - 2026-11-20`, in the commit you tag. Do this for an RC too.
 2. Run the full test path:
 
 ```bash
@@ -97,7 +97,14 @@ go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
 
 3. Build both images locally. Check that `mayfly version`, `mayflyd --version`, and `mayfly-agent --version` show the release version, commit, and date.
 4. Verify the chart with a real install, including ingress/TLS or port-forward, secret mount, and a complete session.
-5. Review the security notes and known limitations for accuracy.
+5. Run the e2e stability gate on the release commit, before you tag an RC or a final release. The gate needs 20 of 20 e2e runs green and the unit stress green:
+
+```bash
+gh workflow run e2e-stability.yml -f runs=20 -f ref=<sha>
+```
+
+The gate and its failure modes are in [testing.md](testing.md#stability-gate). A green run on another commit does not cover this one.
+6. Review the security notes and known limitations for accuracy.
 
 ## Tag
 
@@ -122,7 +129,7 @@ git tag -a vX.Y.Z-rc.1 -m "Mayfly vX.Y.Z-rc.1"
 git push origin vX.Y.Z-rc.1
 ```
 
-The same workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`). Images get the candidate version and no `latest` tag, and the chart is pushed as the same version. Install it with `--version X.Y.Z-rc.1`. When the candidate passes, tag `vX.Y.Z` on the same commit.
+The same workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`). The image tags come from the semver patterns in `release.yml`: an RC tag like `v1.0.0-rc.1` publishes only `1.0.0-rc.1`. `docker/metadata-action` skips the `{{major}}.{{minor}}` pattern for a pre-release, and `latest` is enabled only for a tag with no `-`. The chart is pushed as `1.0.0-rc.1`. Install it with `--version 1.0.0-rc.1`. When the candidate passes, tag `v1.0.0` on the same commit; that tag publishes `1.0.0`, `1.0`, and `latest`.
 
 ## Post-release verification
 

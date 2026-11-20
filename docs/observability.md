@@ -57,6 +57,10 @@ The control plane accepts an incoming `X-Request-Id` header when it holds 1 to 6
 {"time":"2026-01-02T03:04:05Z","level":"INFO","msg":"http request","request_id":"7f3c9a1b2d4e5f60","method":"POST","route":"/api/v1/sessions","status":201,"duration_ms":12,"bytes":348}
 ```
 
+## Audit lines
+
+A mutating, authenticated `/api/v1` request writes one line with the message `audit` in addition to its request line. The audit line records the token name, the `via` value (`bearer` or `web`), the method, route, target, status, and request id. [security.md](security.md#audit-log) lists every field and the cases that are not audited.
+
 ## Helm
 
 | Value | Default | Meaning |
