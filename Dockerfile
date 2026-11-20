@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
+# 1.27.4 or later: GO-2026-6859 (net/http).
+FROM --platform=$BUILDPLATFORM golang:1.27.4-bookworm AS build
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
