@@ -1,0 +1,55 @@
+command agents
+command agents flag json type bool default "false"
+command artifact
+command artifact flag o alias output
+command artifact flag o type string default ""
+command artifact flag output type string default ""
+command attach
+command attach flag after type int64 default "0"
+command attach flag exit-on-eof type bool default "false"
+command attach flag name type string default "cli"
+command attach flag once type bool default "false"
+command close
+command close flag reason type string default "closed"
+command delete
+command delete flag yes type bool default "false"
+command events
+command events flag after type int64 default "0"
+command events flag json type bool default "false"
+command get
+command get flag json type bool default "false"
+command help
+command help alias-command --help
+command help alias-command -h
+command ls
+command ls flag json type bool default "false"
+command plugin
+command plugin check
+command plugin init
+command plugin init flag lang type string default "go"
+command plugin subcommand check
+command plugin subcommand init
+command plugin subcommand test
+command plugin test
+command plugin test flag key type string default ""
+command plugin test flag timeout type duration default "2m0s"
+command plugin test flag workspace type string default ""
+command run
+command run flag agent type string default ""
+command run flag json type bool default "false"
+command run flag mcp type stringList default ""
+command run flag model type string default ""
+command run flag prompt type string default ""
+command run flag skill type stringList default ""
+command run flag title type string default ""
+command run flag ttl type string default ""
+command send
+command send flag json type bool default "false"
+command transcript
+command version
+command version alias-command --version
+command version alias-command -v
+command version flag json type bool default "false"
+env MAYFLY_API_TOKEN
+env MAYFLY_TOKEN deprecated-by MAYFLY_API_TOKEN
+env MAYFLY_URL default "http://localhost:8080"

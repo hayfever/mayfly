@@ -75,6 +75,15 @@ func (r *localRun) close() {
 	}
 }
 
+// pluginCommands maps each mayfly plugin subcommand word to its handler.
+// surface.go lists the same words, and the surface test fails when the two
+// disagree.
+var pluginCommands = map[string]func([]string) error{
+	"init":  cmdPluginInit,
+	"check": cmdPluginCheck,
+	"test":  cmdPluginTest,
+}
+
 // cmdPlugin runs the offline plugin commands. None of them reads MAYFLY_URL or
 // a token: placement does not change what the plugin process sees, so a
 // plugin that passes here behaves the same in every placement.
@@ -83,18 +92,15 @@ func cmdPlugin(args []string) error {
 		return fmt.Errorf("usage: mayfly plugin init|check|test ...")
 	}
 	switch args[0] {
-	case "init":
-		return cmdPluginInit(args[1:])
-	case "check":
-		return cmdPluginCheck(args[1:])
-	case "test":
-		return cmdPluginTest(args[1:])
 	case "help", "-h", "--help":
 		pluginUsage()
 		return nil
-	default:
+	}
+	run, ok := pluginCommands[args[0]]
+	if !ok {
 		return fmt.Errorf("unknown plugin command %q", args[0])
 	}
+	return run(args[1:])
 }
 
 // pluginUsage prints the subcommands of mayfly plugin.
@@ -109,20 +115,31 @@ Commands:
 `)
 }
 
+// pluginInitFlags holds the flags of mayfly plugin init.
+type pluginInitFlags struct {
+	*flag.FlagSet
+	lang *string
+}
+
+// newPluginInitFlags builds the flag set that mayfly plugin init parses.
+func newPluginInitFlags() *pluginInitFlags {
+	flags := flag.NewFlagSet("plugin init", flag.ContinueOnError)
+	return &pluginInitFlags{FlagSet: flags, lang: flags.String("lang", "go", "go, python, or ts")}
+}
+
 // cmdPluginInit writes a scaffold. The plugin name defaults to the directory
 // name, and the manifest is validated before anything reaches the disk.
 func cmdPluginInit(args []string) error {
-	flags := flag.NewFlagSet("plugin init", flag.ContinueOnError)
-	lang := flags.String("lang", "go", "go, python, or ts")
-	positional, err := parseArgs(flags, args, "lang")
+	f := newPluginInitFlags()
+	positional, err := parseArgs(f.FlagSet, args, "lang")
 	if err != nil {
 		return err
 	}
 	if len(positional) != 1 {
 		return fmt.Errorf("usage: mayfly plugin init --lang go|python|ts DIR")
 	}
-	if !pluginLangs[*lang] {
-		return fmt.Errorf("unknown language %q (use go, python, or ts)", *lang)
+	if !pluginLangs[*f.lang] {
+		return fmt.Errorf("unknown language %q (use go, python, or ts)", *f.lang)
 	}
 	dir, err := filepath.Abs(positional[0])
 	if err != nil {
@@ -137,7 +154,7 @@ func cmdPluginInit(args []string) error {
 		Version: "0.1.0",
 		Image:   "ghcr.io/example/mayfly-plugin-" + name + ":0.1.0",
 	}
-	files, err := renderScaffold(*lang, data)
+	files, err := renderScaffold(*f.lang, data)
 	if err != nil {
 		return err
 	}
@@ -246,10 +263,22 @@ func checkScaffoldDir(dir string) error {
 	return nil
 }
 
+// pluginCheckFlags holds the flags of mayfly plugin check. The command reads
+// one directory, so the flag set is empty.
+type pluginCheckFlags struct {
+	*flag.FlagSet
+}
+
+// newPluginCheckFlags builds the flag set that mayfly plugin check parses.
+func newPluginCheckFlags() *pluginCheckFlags {
+	return &pluginCheckFlags{FlagSet: flag.NewFlagSet("plugin check", flag.ContinueOnError)}
+}
+
 // cmdPluginCheck validates the manifest, starts the plugin with its local
 // command, and compares the reported tools with the declared ones.
 func cmdPluginCheck(args []string) error {
-	positional, err := parseArgs(flag.NewFlagSet("plugin check", flag.ContinueOnError), args)
+	f := newPluginCheckFlags()
+	positional, err := parseArgs(f.FlagSet, args)
 	if err != nil {
 		return err
 	}
@@ -270,14 +299,29 @@ func cmdPluginCheck(args []string) error {
 	return nil
 }
 
+// pluginTestFlags holds the flags of mayfly plugin test.
+type pluginTestFlags struct {
+	*flag.FlagSet
+	workspace *string
+	key       *string
+	timeout   *time.Duration
+}
+
+// newPluginTestFlags builds the flag set that mayfly plugin test parses.
+func newPluginTestFlags() *pluginTestFlags {
+	flags := flag.NewFlagSet("plugin test", flag.ContinueOnError)
+	f := &pluginTestFlags{FlagSet: flags}
+	f.workspace = flags.String("workspace", "", "workspace directory (default: a temporary directory)")
+	f.key = flags.String("key", "", "idempotency key passed to the tool")
+	f.timeout = flags.Duration("timeout", 2*time.Minute, "call timeout")
+	return f
+}
+
 // cmdPluginTest checks the plugin like check does, then calls one tool and
 // prints its result. An error result exits non-zero.
 func cmdPluginTest(args []string) error {
-	flags := flag.NewFlagSet("plugin test", flag.ContinueOnError)
-	workspace := flags.String("workspace", "", "workspace directory (default: a temporary directory)")
-	key := flags.String("key", "", "idempotency key passed to the tool")
-	timeout := flags.Duration("timeout", 2*time.Minute, "call timeout")
-	positional, err := parseArgs(flags, args, "workspace", "key", "timeout")
+	f := newPluginTestFlags()
+	positional, err := parseArgs(f.FlagSet, args, "workspace", "key", "timeout")
 	if err != nil {
 		return err
 	}
@@ -296,15 +340,15 @@ func cmdPluginTest(args []string) error {
 	if err := json.Unmarshal([]byte(positional[2]), &arguments); err != nil {
 		return fmt.Errorf("arguments must be a JSON object: %w", err)
 	}
-	run, err := startLocal(manifest, *workspace)
+	run, err := startLocal(manifest, *f.workspace)
 	if err != nil {
 		return err
 	}
 	defer run.close()
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), *f.timeout)
 	defer cancel()
 	name := plugin.ToolName(manifest.Name, tool.Name)
-	content, isErr, err := run.host.Call(ctx, name, []byte(positional[2]), *key, "")
+	content, isErr, err := run.host.Call(ctx, name, []byte(positional[2]), *f.key, "")
 	if err != nil {
 		return err
 	}

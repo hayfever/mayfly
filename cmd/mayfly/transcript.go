@@ -227,8 +227,20 @@ func orDash(s string) string {
 	return s
 }
 
+// transcriptFlags holds the flags of mayfly transcript. The command reads one
+// ID and prints text, so the flag set is empty.
+type transcriptFlags struct {
+	*flag.FlagSet
+}
+
+// newTranscriptFlags builds the flag set that mayfly transcript parses.
+func newTranscriptFlags() *transcriptFlags {
+	return &transcriptFlags{FlagSet: flag.NewFlagSet("transcript", flag.ContinueOnError)}
+}
+
 func cmdTranscript(args []string) error {
-	positional, err := parseArgs(flag.NewFlagSet("transcript", flag.ContinueOnError), args)
+	f := newTranscriptFlags()
+	positional, err := parseArgs(f.FlagSet, args)
 	if err != nil {
 		return err
 	}
