@@ -7,6 +7,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 ### Added
 
 - `docs/api-reference.md`, generated from `api/openapi.yaml` by `go run ./hack/apidoc`. The `-check` flag exits 1 with a diff when the committed file is stale.
+- Drift tests that compare the `bearerAuth` scope of every route with the spec, the scope table in [docs/security.md](docs/security.md) with the route table, and the error codes in `internal/httpapi/errors.go` with the spec and [docs/api.md](docs/api.md).
 
 ## [0.3.0] - 2026-11-19
 
