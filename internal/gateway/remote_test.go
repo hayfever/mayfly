@@ -161,7 +161,7 @@ func writeMCPResult(w http.ResponseWriter, id json.RawMessage, result any) {
 	w.Header().Set("Content-Type", "application/json")
 	response := map[string]any{"jsonrpc": "2.0", "result": result}
 	if len(id) > 0 {
-		response["id"] = json.RawMessage(id)
+		response["id"] = id
 	}
 	_ = json.NewEncoder(w).Encode(response)
 }

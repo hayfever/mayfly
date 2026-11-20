@@ -505,7 +505,7 @@ func retryGateway[T any](ctx context.Context, logger *slog.Logger, op string, at
 		}
 		// One attempt can time out while the budget still has room, which is
 		// exactly the case a retry is for.
-		if !retryableGatewayError(err) && !(errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil) {
+		if !retryableGatewayError(err) && (!errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil) {
 			var zero T
 			return zero, err
 		}

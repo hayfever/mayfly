@@ -136,7 +136,7 @@ func renderTranscript(out io.Writer, b bundle) error {
 	if !b.session.CreatedAt.IsZero() {
 		head.WriteString("created " + b.session.CreatedAt.UTC().Format(time.RFC3339) + "\n")
 	}
-	head.WriteString(fmt.Sprintf("messages %d\n", len(b.conversation)))
+	_, _ = fmt.Fprintf(&head, "messages %d\n", len(b.conversation))
 	if _, err := io.WriteString(w, head.String()); err != nil {
 		return err
 	}

@@ -92,12 +92,11 @@ func checkRecordsFormat(tx *bolt.Tx) error {
 }
 
 // migrateRecordsFormat moves a database written by an older build to
-// recordsFormatVersion. Each case rewrites one version's difference. Version 1
-// is the first stamped layout, so there is nothing to rewrite yet; a later
-// version adds its case before raising recordsFormatVersion.
+// recordsFormatVersion. Each branch rewrites one version's difference. Version
+// 1 is the first stamped layout, so there is nothing to rewrite yet; a later
+// version adds its branch before raising recordsFormatVersion.
 func migrateRecordsFormat(from int) error {
-	switch from {
-	case 1:
+	if from == 1 {
 		return nil
 	}
 	return fmt.Errorf("session record format version %d has no migration path", from)

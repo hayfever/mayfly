@@ -475,7 +475,8 @@ func renderDeployment(manifest plugin.Manifest, cfg RenderConfig, key []byte) (*
 			"--init-timeout", manifest.InitTimeout().String(),
 			"--", manifest.Command,
 		}
-		container.Command = append(command, manifest.Args...)
+		command = append(command, manifest.Args...)
+		container.Command = command
 		container.StartupProbe = shimProbe(port, 30)
 		container.ReadinessProbe = shimProbe(port, 0)
 		mounts = append(mounts,

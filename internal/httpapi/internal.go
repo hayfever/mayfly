@@ -234,7 +234,6 @@ func (s *Server) internalInbox(w http.ResponseWriter, r *http.Request) {
 	} else if after > last {
 		// The control plane restarted and sequence numbering restarted. Tell
 		// the runtime to reconnect from zero instead of silently missing events.
-		after = 0
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(http.StatusOK)

@@ -68,7 +68,7 @@ func main() {
 
 	if err := runtime.Run(ctx); err != nil {
 		logger.Error("session failed", "error", err)
-		os.Exit(1)
+		os.Exit(1) //nolint:gocritic // the process exits here, so the deferred signal reset is moot.
 	}
 	logger.Info("session finished")
 }

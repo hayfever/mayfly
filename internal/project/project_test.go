@@ -654,7 +654,7 @@ connections:
     baseURL: https://api.test
 ` + conn})
 		_, err := Load([]string{dir}, Options{Concurrency: 1, Timeout: time.Second, DeniedEnv: []string{"OPENAI_API_KEY"}})
-		if err == nil || !(strings.Contains(err.Error(), "control-plane secret") || strings.Contains(err.Error(), "reserved")) {
+		if err == nil || (!strings.Contains(err.Error(), "control-plane secret") && !strings.Contains(err.Error(), "reserved")) {
 			t.Fatalf("%q: err = %v", conn, err)
 		}
 	}

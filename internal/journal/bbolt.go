@@ -12,6 +12,7 @@ import (
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+	bolterrors "go.etcd.io/bbolt/errors"
 )
 
 // formatVersion is the on-disk layout this build reads and writes. Version 1
@@ -96,12 +97,11 @@ func checkFormat(tx *bolt.Tx) error {
 }
 
 // migrateFormat moves a store written by an older build to formatVersion. Each
-// case rewrites one version's difference. Version 1 is the first stamped
-// layout, so there is nothing to rewrite yet; a later version adds its case
+// branch rewrites one version's difference. Version 1 is the first stamped
+// layout, so there is nothing to rewrite yet; a later version adds its branch
 // before raising formatVersion.
 func migrateFormat(_ *bolt.Tx, from int) error {
-	switch from {
-	case 1:
+	if from == 1 {
 		return nil
 	}
 	return fmt.Errorf("journal format version %d has no migration path", from)
@@ -232,13 +232,13 @@ func (s *Bolt) Reserve(_ context.Context, session string, floor int64) error {
 // Delete removes a session's steps, sequence reservation, and tool calls.
 func (s *Bolt) Delete(_ context.Context, session string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		if err := tx.Bucket(bucketJournal).DeleteBucket([]byte(session)); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
+		if err := tx.Bucket(bucketJournal).DeleteBucket([]byte(session)); err != nil && !errors.Is(err, bolterrors.ErrBucketNotFound) {
 			return err
 		}
 		if err := tx.Bucket(bucketSeq).Delete([]byte(session)); err != nil {
 			return err
 		}
-		if err := tx.Bucket(bucketCalls).DeleteBucket([]byte(session)); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
+		if err := tx.Bucket(bucketCalls).DeleteBucket([]byte(session)); err != nil && !errors.Is(err, bolterrors.ErrBucketNotFound) {
 			return err
 		}
 		return tx.Bucket(bucketLast).Delete([]byte(session))

@@ -161,7 +161,7 @@ func (l *skillLoader) extractArchive(source Source, archive []byte) error {
 		if err != nil {
 			return fmt.Errorf("skill source %q: tar: %w", source.Name, err)
 		}
-		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA { //nolint:staticcheck // old tar writers use the deprecated regular-file typeflag.
 			continue
 		}
 		name := path.Clean(strings.TrimPrefix(header.Name, "./"))

@@ -17,8 +17,6 @@ const (
 	// maxCopyBytes backstops one plugin tree. The pod volume limit stops a
 	// pod that fills the disk; this stops a copy that would never fit.
 	maxCopyBytes = 1 << 30
-	// pluginImageDir is the directory every plugin image must contain.
-	pluginImageDir = "/mayfly-plugin"
 	// installMode is the mode of an installed executable.
 	installMode fs.FileMode = 0o755
 )

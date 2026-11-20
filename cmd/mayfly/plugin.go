@@ -89,7 +89,7 @@ var pluginCommands = map[string]func([]string) error{
 // plugin that passes here behaves the same in every placement.
 func cmdPlugin(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: mayfly plugin init|check|test ...")
+		return fmt.Errorf("usage: mayfly plugin init|check|test ...") //nolint:staticcheck // usage text ends with the ellipsis shown in help output.
 	}
 	switch args[0] {
 	case "help", "-h", "--help":

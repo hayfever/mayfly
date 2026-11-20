@@ -33,7 +33,7 @@ import (
 func testRecordStores(t *testing.T) map[string]func() RecordStore {
 	t.Helper()
 	return map[string]func() RecordStore{
-		"memory": func() RecordStore { return NewMemoryRecords() },
+		"memory": NewMemoryRecords,
 		"bbolt": func() RecordStore {
 			store, err := OpenRecords(config.RecordConfig{Backend: "bbolt", Path: filepath.Join(t.TempDir(), "sessions.db")})
 			if err != nil {

@@ -60,7 +60,7 @@ func newHTTPClient(conn Connection) (*http.Client, error) {
 		if len(via) >= 3 {
 			return errors.New("too many redirects")
 		}
-		if req.URL.Scheme != "https" && !(conn.AllowHTTP && req.URL.Scheme == "http") {
+		if req.URL.Scheme != "https" && (!conn.AllowHTTP || req.URL.Scheme != "http") {
 			return errors.New("redirect must use https")
 		}
 		return nil
