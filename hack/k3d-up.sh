@@ -67,7 +67,7 @@ Mayfly is running.
 
 Use it:
   export MAYFLY_URL=http://localhost:8080
-  export MAYFLY_TOKEN=$TOKEN
+  export MAYFLY_API_TOKEN=$TOKEN
   ./bin/mayfly run --prompt "Investigate the latest deploy failure"
 
 EOF
