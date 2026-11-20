@@ -8,6 +8,165 @@
 4. **Plugin workload** — trusted operator code, but not trusted with the agent's data: an inline plugin shares the agent container, a sidecar shares the session pod, and a service is its own Deployment.
 5. **Artifact store** — receives bundles from the control plane only.
 
+## Threat model
+
+This model covers one deployment in one namespace. Kubernetes RBAC and the
+namespace are the administrative boundary: a subject that can read Secrets or
+exec into pods there is outside every control below. Accepted risks are marked
+**Accepted**.
+
+### Assets
+
+| Asset | Where it lives | Impact if disclosed |
+|---|---|---|
+| API tokens | Secrets read into `server.tokens` at startup | Use of the token's scopes on every session |
+| Session tokens | Per-session Secret, mounted only into the session container | Control of one session: events, inbox, artifact upload, granted tools, model, MCP calls |
+| LLM and MCP credentials | Control-plane environment; LiteLLM holds provider keys | Provider spend and data access, and MCP tool access |
+| Plugin gateway keys | Per-session Secret for a sidecar; `mayfly-gateway-<name>` for a service | Calls the plugin accepts as gateway calls |
+| Workspace data | Session PVC or EmptyDir, shared with attach clients | Session files, including tool output |
+| Artifacts | Bundle in the local volume or S3 bucket | Conversation, events, traces, files, and any secret a tool returned |
+| Control-plane state | `queue.db`, `journal.db`, `sessions.db`, `schedule.db` on the state volume | Prompts, options, event history, call records, session metadata |
+
+### Attackers
+
+| Attacker | Entry point |
+|---|---|
+| External webhook sender | `POST /hooks/{name}`, with a trigger secret or without one |
+| Holder of a scoped API token | `Authorization: Bearer` on `/api/v1` |
+| Compromised or malicious agent session | Code in the session container, including a prompt that turns the agent |
+| Malicious plugin | Operator-declared plugin code in any placement |
+| Cluster user with namespace access | Secret read, pod exec, or Deployment patch in the namespace |
+| Network attacker inside the cluster | Packets to Services and traffic that policy does not block |
+
+### External webhook sender
+
+A verified delivery becomes one queue job. A repeated delivery key is deduped.
+The sender cannot address a session, artifact, or Secret.
+
+| Asset | Control today | Residual risk |
+|---|---|---|
+| API tokens | Webhook routes do not accept or return API tokens (`internal/httpapi/server.go`). | None beyond a compromised control plane. |
+| Session tokens | Created when the job runs and kept in a per-session Secret. The accepted response is `{accepted, duplicate, job_id, delivery, status}`. | A sender who can read the queue or state volume gets the prompt and options, not the token. |
+| LLM and MCP credentials | Not in the webhook path. The broker injects them. | None. |
+| Plugin gateway keys | Created with the session. | None. |
+| Workspace and artifacts | Not addressable by the webhook. | A verified delivery starts real work with an arbitrary prompt. Prompt injection is not a webhook defect. |
+| Control-plane state | Body capped by `server.webhook_max_body_bytes` (default 1 MiB) or the trigger's `max_body_bytes`, checked before verification; the rate limit spends only after verification; `queue.max_jobs` rejects a full queue (`internal/httpapi/webhook.go`). | Each accepted job uses queue space and a session slot. `sessions.max_concurrent` bounds live sessions. |
+
+- The generic receiver accepts `agent`, `model`, `ttl`, `skills`, and
+  `mcp_servers` from the body. Values must resolve against configured agents,
+  models, skills, and MCP servers, and `ttl` is clamped to `sessions.max_ttl`
+  (`internal/triggers/triggers.go`, `internal/session/manager.go`). A generic
+  trigger secret therefore starts work with any configured combination, not
+  only the trigger defaults. **Accepted**: the trigger secret is the
+  credential.
+- Generic and Datadog signatures cover the body, not a timestamp. A captured
+  request creates another session unless the sender sets `Idempotency-Key`.
+  GitHub replay is deduped by `X-GitHub-Delivery`, and Slack rejects a request
+  older than five minutes (`internal/triggers/triggers.go`). Use TLS at the
+  ingress.
+- `allow_unsigned: true` disables verification. The chart ships no trigger,
+  and the local overlay uses the flag on localhost only.
+
+### Holder of a scoped API token
+
+A token acts on every session its scopes reach. There is no user identity.
+
+| Asset | Control today | Residual risk |
+|---|---|---|
+| API tokens | Each route requires one scope (`internal/httpapi/server.go`). Secrets compare in constant time, and an expired token is refused (`internal/httpapi/auth.go`, `internal/config/tokens.go`). A mutating call writes one audit line with the token name. | No revocation API. Change the Secret and restart the control plane. `expires_at` is optional. Reads are not audited. |
+| Session tokens | Not in any API response. Attach uses a one-time ticket that expires after `server.attach_ticket_ttl` (60s default) (`internal/httpapi/server.go`). | A `sessions:write` token mints a ticket for any session. |
+| LLM and MCP credentials | Not in any API response. A token can create a session with a configured model and MCP server. | No per-token budget or quota. A `sessions:write` token spends the deployment LLM budget. |
+| Plugin gateway keys | Not exposed. | None. |
+| Workspace and artifacts | `sessions:read` downloads any bundle. `sessions:write` plus a ticket joins any session and can drive its workspace. | Scopes apply across sessions; there is no per-session ACL. **Accepted** for a single tenant. |
+| Control-plane state | `queue:read` returns a job prompt on a single lookup. `queue:write` retries or deletes dead jobs. `schedules:write` starts a schedule. | Scope, not identity, decides access. |
+
+- The `admin` scope grants every scope. The legacy `server.token_env` token is
+  admin. Prefer named tokens with narrow scopes and `expires_at`.
+- The web UI stores the token in browser localStorage. An XSS or a shared
+  browser profile exposes it.
+
+### Compromised or malicious agent session
+
+The container is untrusted. Its token is scoped to its own session.
+
+| Asset | Control today | Residual risk |
+|---|---|---|
+| API tokens | `/api/v1` authenticates only configured API tokens, so a session token is not accepted there (`internal/httpapi/auth.go`). | None, unless an operator puts an API token in `runtime.env`. Do not do that. |
+| Session tokens | 32 random bytes, indexed by SHA-256, mapped to one session, and removed on finalize or delete (`internal/session/manager.go`). Each internal handler that names a session compares it with the path id. | It can write false events, upload an arbitrary artifact, and finalize early for its own session. |
+| LLM and MCP credentials | Not in the container. The broker pins the model and injects the key. The MCP proxy checks that the server is assigned (`internal/broker/broker.go`, `internal/httpapi/internal.go`). | It spends its assigned model and uses its assigned MCP servers, and reads every tool result. |
+| Plugin gateway keys | No gateway key in the agent container. A sidecar key is mounted only into its own sidecar. An inline plugin secret is a file in the agent container. | Any code in the agent container reads inline plugin secrets. `allowShell` with an inline plugin that declares secrets is refused (`internal/session/agents.go`). |
+| Workspace and artifacts | It owns its workspace and can upload one artifact for its own session. Artifact reads are scoped to the session (`internal/session/manager.go`). | It can send anything it reads to the control plane and the `runtime.egress` CIDRs, and can put secrets in the bundle. |
+| Control-plane state | It writes events and journal entries for its own session. | The control plane cannot tell a compromised session's events from honest ones. |
+
+- The pod runs non-root with a read-only root filesystem, no service account
+  token, no capabilities, and `RuntimeDefault` seccomp. When
+  `runtime.network_policy` is on, the NetworkPolicy denies ingress and permits
+  egress to the control plane, cluster DNS, and `runtime.egress` only
+  (`internal/k8s/spec.go`). Enforcement depends on the CNI.
+- `run_command` is off unless `sessions.allow_shell` or an agent `allowShell`
+  enables it. The container is the boundary, not the tool.
+- There is no sandbox beyond the Kubernetes security context and seccomp. A
+  kernel or container runtime escape is out of scope.
+- Attach clients share the workspace with the agent. A compromised session can
+  influence them, and they can influence it.
+
+### Malicious plugin
+
+A plugin is trusted operator code. Its placement decides what it can reach.
+
+| Asset | Control today | Residual risk |
+|---|---|---|
+| API tokens | Not in scope. | None. |
+| Session tokens | Not passed to a plugin process. Inline plugins share the UID, but the runtime clears its dumpable flag, so a plugin cannot read `/proc/<pid>/environ` or ptrace the runtime (`cmd/mayfly-agent/main.go`). Sidecar and service plugins run in their own containers. | Inline code reads any file the runtime reads. The token is in the environment, not a file. |
+| LLM and MCP credentials | Only the plugin's declared secrets: sidecar and service environment from `secretKeyRef`, inline files under `/var/run/mayfly/plugin-secrets/<name>/` with mode 0400. | An inline plugin reads a sibling inline plugin's secret files. Use `placement: sidecar` to separate secrets. |
+| Plugin gateway keys | One derived key per sidecar, mounted only into that sidecar. One Secret per service. A call token names the session, plugin, tool, argument hash, and expiry (`internal/gateway/token.go`). | A service key is created once and not rotated. |
+| Workspace and artifacts | An inline plugin runs in the agent container. A sidecar mounts the workspace only when the manifest sets `sidecar.workspace`; a service never mounts it. | An inline plugin has full access to the session data. |
+| Control-plane state | Not mounted. | None. |
+
+- Mayfly does not sandbox plugin code or verify image signatures. It can
+  enforce `agents.allowed_images`; pin plugin images by digest.
+- A service plugin has its own credentials and egress network. The gateway
+  applies the grant and ledger, but the plugin runs outside the session pod.
+- An alternate harness bypasses the tool gateway, so its MCP calls have no
+  ledger record and no resume protection.
+
+### Cluster user with namespace access
+
+Kubernetes RBAC is the boundary. Mayfly has no control above it.
+
+| Asset | Control today | Residual risk |
+|---|---|---|
+| All assets above | The control-plane Role grants only the namespace objects it manages (`deploy/k8s/base/rbac.yaml`). The session ServiceAccount has no bindings and no mounted token. | A subject that can read Secrets, read the state PVC, or exec into a control-plane pod has every asset: API tokens and webhook secrets, LLM and MCP keys, session tokens, and workspace or artifact data. Exec into a session pod gives that session's token and workspace. |
+| Configuration and images | `agents.allowed_images` limits agent and plugin images. | A subject that can patch the control-plane Deployment can change the image, the config, and which Secrets the pod mounts. |
+
+- A subject that can read a session Secret can act as that session.
+- **Accepted**: cluster administrators and every permission the cluster grants
+  them are trusted. Run one control plane per namespace and per trust
+  boundary. Do not colocate unrelated tenants in that namespace.
+
+### Network attacker inside the cluster
+
+Bearer tokens cross the internal listener without TLS by default.
+
+| Asset | Control today | Residual risk |
+|---|---|---|
+| API tokens, session tokens | Token authentication on every route. When `runtime.network_policy` is on, session pods have default-deny ingress. | Mayfly does not terminate TLS. A network attacker that can observe the internal listener captures any bearer token in it. |
+| Plugin gateway keys | A gateway key stays in the control plane or the plugin workload. The gateway sends a signed call token, not the key. | A captured call token is bound to one plugin, tool, argument hash, and expiry. The shim rejects a second use while the first call is in flight, and replays the stored result for a completed key. |
+| LLM and MCP credentials | Held in the control plane. Model calls go to `llm.base_url` (HTTPS in the base config). HTTP MCP headers are resolved in the control plane. | If `llm.base_url` or an `mcp.servers` URL is plain HTTP, an in-cluster attacker can capture the credential the control plane sends to it. |
+| Workspace and artifacts | Session egress is limited to the control plane, DNS, and `runtime.egress` (`internal/k8s/spec.go`). | Artifact upload crosses the internal listener. A network attacker can read artifact bytes and tool traffic in flight. |
+| Service plugin calls | The service NetworkPolicy admits only control-plane pods on the plugin port. | A captured call token is bound to one plugin, tool, argument hash, and expiry. It cannot call another tool or another plugin. |
+
+- Neither the base manifests nor the chart define a NetworkPolicy for
+  `mayflyd`. No cluster policy restricts the Service, so any pod that the
+  cluster network allows can reach the API and must present a token. Add a
+  policy that admits only session pods, the ingress controller, and your
+  operators.
+- Session pods have default-deny ingress and restricted egress, but the CNI
+  must enforce the policy. Verify it with the end-to-end isolation test
+  ([testing.md](testing.md#against-a-real-cluster)).
+- Use TLS at the ingress for external clients. Inside the cluster, run on a
+  network you trust or add mTLS or a service mesh. Mayfly does not provide it.
+
 ## Session isolation defaults
 
 The pod and container set:
