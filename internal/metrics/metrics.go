@@ -211,8 +211,21 @@ func (m *Metrics) HTTPRequest(route, method string, code int, duration time.Dura
 	if m == nil {
 		return
 	}
+	method = methodLabel(method)
 	m.httpRequests.WithLabelValues(route, method, strconv.Itoa(code)).Inc()
 	m.httpDuration.WithLabelValues(route, method).Observe(duration.Seconds())
+}
+
+// methodLabel bounds the method label. Every request is recorded, including
+// unauthenticated ones, and a client chooses the method token freely, so a
+// method outside the standard set is recorded as OTHER.
+func methodLabel(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodOptions, http.MethodConnect, http.MethodTrace:
+		return method
+	}
+	return "OTHER"
 }
 
 // LLMRequest records one proxied model call.

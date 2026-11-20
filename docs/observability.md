@@ -25,11 +25,11 @@ On the main port, `/metrics` is part of the public API listener, so it requires 
 | `mayfly_sessions_finished_total` | counter | `result` | Sessions that reached a terminal state: `completed`, `failed`, `expired` |
 | `mayfly_queue_jobs` | gauge | `state` | Queued jobs by state: `pending`, `leased`, `dead`. Read from the queue store at scrape time; a failed read leaves the gauge unset |
 | `mayfly_queue_job_attempts_total` | counter | `result` | Job attempts this process ran: `succeeded`, `failed`, `retry_later` |
-| `mayfly_http_requests_total` | counter | `route`, `method`, `code` | Requests served |
+| `mayfly_http_requests_total` | counter | `route`, `method`, `code` | Requests served. `method` is a standard HTTP method or `OTHER` |
 | `mayfly_http_request_duration_seconds` | histogram | `route`, `method` | Request duration |
 | `mayfly_llm_requests_total` | counter | `model`, `result` | Model calls the broker proxied upstream: `ok`, `error` |
 | `mayfly_llm_request_duration_seconds` | histogram | `model` | Model call duration, from the request to the last response byte |
-| `mayfly_gateway_calls_total` | counter | `tool`, `result` | Tool calls the gateway finished or refused: `ok`, `error`, `interrupted`, `denied`, `rate_limited`, `busy` |
+| `mayfly_gateway_calls_total` | counter | `tool`, `result` | Tool calls the gateway finished or refused: `ok`, `error`, `interrupted`, `denied`, `rate_limited`, `busy`. A denied call to a tool the session does not have is labeled `tool="unknown"` |
 | `mayfly_build_info` | gauge | `version`, `commit`, `date`, `go_version` | Build identity; the value is always 1 |
 
 The `route` label is the registered route template, such as `/api/v1/sessions/{id}`. A request that matches no route uses `unmatched`. No metric carries a session id, a job id, or a raw request path, so label cardinality stays bounded.
