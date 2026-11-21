@@ -136,8 +136,11 @@ prevents.
 - A sequence block is the constant `Block`, and one `PostMessage` performs one
   reservation. The real control plane also reserves for non-turn events.
 - The model keeps an unstarted inbox message across a control-plane restart.
-  The real hub is in memory, so a message the runtime never read can be lost.
-  The model does not cover that loss.
+  The real hub is in memory, so a message the runtime never read, including
+  the initial prompt of a session whose pod has not connected, can be lost.
+  The model does not cover that loss; it is tracked in
+  [#59](https://github.com/hayfever/mayfly/issues/59), whose fix must also drop
+  this assumption from the model.
 - The DELETE tombstone is treated as durable. The real tombstone is in memory;
   the record deletion and synchronous object cleanup make the removal stick.
 - The `deleted` terminal state is `failed` with reason `deleted`, as in the
