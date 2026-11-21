@@ -6,7 +6,8 @@ script and a CI job.
 
 | Check | Script | CI job |
 |---|---|---|
-| TLC on the session model | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml) |
+| TLC on the session model | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
+| TLC with two sessions | `hack/tlc.sh --deep` | `tlc-deep` in verify.yml, nightly and on demand |
 | Every fuzz target | `hack/fuzz.sh` | `fuzz-nightly` in verify.yml |
 
 `hack/tlc.sh` needs a JDK 17 or newer (`java` on `PATH`, or `JAVA`). It
@@ -38,6 +39,12 @@ one session, two turns, one control-plane restart, one pod kill, and one
 replacement pod. Sessions do not share mutable state, so one session covers
 every property; a second session only multiplies the liveness state space.
 The bounds keep a full run under three minutes on a desktop.
+
+`deep/SessionResume_two_sessions.cfg` runs nightly. It checks the safety
+invariants with two sessions, one turn each, and one control-plane restart
+that hits both at once, without pod kills or replacements: about 4.4 million
+distinct states and 20 minutes on a 6-core desktop. Liveness with two sessions
+is out of reach at any useful bound.
 
 `SessionResume_buggy.cfg` and `SessionResume_interrupt_buggy.cfg` are the negative checks: they must fail. See
 [spec/tla/README.md](../spec/tla/README.md) for the cfg convention.

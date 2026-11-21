@@ -13,7 +13,10 @@ hack/tlc.sh
 
 The script downloads the pinned `tla2tools.jar` into
 `${XDG_CACHE_HOME:-$HOME/.cache}/mayfly/tla` (override with `TLA_CACHE_DIR`),
-checks its SHA-256, and runs TLC on every `.cfg` in this directory. It needs
+checks its SHA-256, and runs TLC on every `.cfg` directly in this directory.
+`hack/tlc.sh --deep` runs the larger-bound cfgs in `deep/` instead, and
+`hack/tlc.sh <cfg>...` runs the named ones. `TLC_JAVA_OPTS` passes extra JVM
+options, such as `-Xmx8g` for a deep run. It needs
 `java` on `PATH`, `JAVA`, or `JAVA_HOME`. TLC state directories go under a
 temporary directory, never into the repository.
 
@@ -42,7 +45,8 @@ bounds are small on purpose: TLC runs on every pull request that touches the
 session, journal, queue, gateway, or runner packages. One session covers every
 property because sessions share no mutable state; a second session multiplies
 the liveness state space without adding a behavior. Keep a new cfg inside the
-same envelope unless it proves something the small one cannot.
+same envelope unless it proves something the small one cannot; put a cfg that
+needs more time in `deep/`, which runs only in the nightly `tlc-deep` job.
 
 ## Configurations
 
@@ -51,6 +55,7 @@ same envelope unless it proves something the small one cannot.
 | `SessionResume.cfg` | All invariants and liveness, positive |
 | `SessionResume_buggy.cfg` | `LedgerBeforeDispatch = FALSE`: a lost pending record re-runs a non-idempotent tool |
 | `SessionResume_interrupt_buggy.cfg` | `InterruptOnResume = FALSE`: a pending non-idempotent call is dispatched again |
+| `deep/SessionResume_two_sessions.cfg` | Nightly only: two sessions, one turn each, one shared control-plane restart; safety invariants (about 4.4 million distinct states, 20 minutes on a 6-core desktop) |
 
 ## Terminal states
 
