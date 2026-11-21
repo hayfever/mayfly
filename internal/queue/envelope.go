@@ -267,8 +267,11 @@ func triggerSpec(j Job) TriggerSpec {
 		}
 		return TriggerSpec{Kind: string(KindSession), Name: j.Trigger}
 	}
+	// Decoding fills the job trigger from the kind when the envelope carries
+	// no name, so writing that derived value back as a name would change the
+	// payload on every rewrite of the same job.
 	name := t.Name
-	if name == "" {
+	if name == "" && j.Trigger != t.Kind {
 		name = j.Trigger
 	}
 	return TriggerSpec{Kind: t.Kind, Name: name, Event: t.Event, Actor: t.Actor}
