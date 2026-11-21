@@ -125,13 +125,14 @@ func FuzzBoltStoredRecords(f *testing.F) {
 		}
 
 		artifacts, err := records.ListArtifacts(ctx)
-		if err != nil {
+		switch {
+		case err != nil:
 			if len(artifacts) != 0 {
 				t.Fatalf("ListArtifacts returned %d entries with an error", len(artifacts))
 			}
-		} else if len(artifacts) != 1 {
+		case len(artifacts) != 1:
 			t.Fatalf("ListArtifacts returned %d entries, want 1", len(artifacts))
-		} else if artifacts[0].SessionID != "key" {
+		case artifacts[0].SessionID != "key":
 			t.Fatalf("artifact session id = %q, want key", artifacts[0].SessionID)
 		}
 	})
