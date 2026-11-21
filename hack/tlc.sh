@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Run TLC on the session resume model.
 #
+#   hack/tlc.sh                 every *.cfg directly under spec/tla (the PR set)
+#   hack/tlc.sh --deep          every *.cfg under spec/tla/deep (nightly bounds)
+#   hack/tlc.sh CFG...          the named cfgs: a path, or a file name under
+#                               spec/tla or spec/tla/deep
+#
 # The jar is pinned by version and SHA-256. It is cached outside the repo; the
 # TLC state directory goes under a temporary directory, also outside the repo.
 # Every *.cfg under spec/tla runs. A positive cfg must pass. A cfg whose name
@@ -23,20 +28,51 @@ WORK_ROOT="${TMPDIR:-$HOME/tmp}"
 
 usage() {
 	cat <<EOF
-usage: hack/tlc.sh
+usage: hack/tlc.sh [--deep | CFG...]
+
+With no argument, runs every *.cfg directly under spec/tla. --deep runs the
+larger-bound cfgs under spec/tla/deep. Named cfgs may be paths or file names
+under spec/tla or spec/tla/deep.
 
 Environment:
   JAVA           java binary to use (default: java on PATH, then \$JAVA_HOME/bin/java)
   TLA_CACHE_DIR  cache for tla2tools.jar (default: \${XDG_CACHE_HOME:-\$HOME/.cache}/mayfly/tla)
+  TLC_JAVA_OPTS  extra JVM options, e.g. -Xmx8g for the deep cfgs
 EOF
 }
 
-case "${1:-}" in
--h | --help)
-	usage
-	exit 0
-	;;
-esac
+deep=0
+requested=()
+for arg in "$@"; do
+	case "$arg" in
+	-h | --help)
+		usage
+		exit 0
+		;;
+	--deep)
+		deep=1
+		;;
+	-*)
+		echo "hack/tlc.sh: unknown option $arg" >&2
+		usage >&2
+		exit 2
+		;;
+	*)
+		requested+=("$arg")
+		;;
+	esac
+done
+mode=default
+if [ ${#requested[@]} -gt 0 ]; then
+	mode=named
+fi
+if [ "$deep" -eq 1 ]; then
+	if [ "$mode" = named ]; then
+		echo "hack/tlc.sh: pass either --deep or cfg names, not both" >&2
+		exit 2
+	fi
+	mode=deep
+fi
 
 find_java() {
 	if [ -n "${JAVA:-}" ]; then
@@ -94,11 +130,35 @@ mkdir -p "$WORK_ROOT"
 WORK="$(mktemp -d "${WORK_ROOT}/mayfly-tlc.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-shopt -s nullglob
-cfgs=("$SPEC_DIR"/*.cfg)
-shopt -u nullglob
+cfgs=()
+case "$mode" in
+default)
+	shopt -s nullglob
+	cfgs=("$SPEC_DIR"/*.cfg)
+	shopt -u nullglob
+	;;
+deep)
+	shopt -s nullglob
+	cfgs=("$SPEC_DIR"/deep/*.cfg)
+	shopt -u nullglob
+	;;
+named)
+	for want in "${requested[@]}"; do
+		if [ -f "$want" ]; then
+			cfgs+=("$(cd "$(dirname "$want")" && pwd)/$(basename "$want")")
+		elif [ -f "$SPEC_DIR/$want" ]; then
+			cfgs+=("$SPEC_DIR/$want")
+		elif [ -f "$SPEC_DIR/deep/$want" ]; then
+			cfgs+=("$SPEC_DIR/deep/$want")
+		else
+			echo "hack/tlc.sh: cfg not found: $want" >&2
+			exit 1
+		fi
+	done
+	;;
+esac
 if [ ${#cfgs[@]} -eq 0 ]; then
-	echo "hack/tlc.sh: no .cfg files in $SPEC_DIR" >&2
+	echo "hack/tlc.sh: no .cfg files selected ($mode) under $SPEC_DIR" >&2
 	exit 1
 fi
 
@@ -120,7 +180,8 @@ for cfg in "${cfgs[@]}"; do
 	status=0
 	(
 		cd "$SPEC_DIR"
-		"$JAVA_BIN" -XX:+UseParallelGC -cp "$JAR" tlc2.TLC \
+		# shellcheck disable=SC2086 # TLC_JAVA_OPTS is a list of options.
+		"$JAVA_BIN" -XX:+UseParallelGC ${TLC_JAVA_OPTS:-} -cp "$JAR" tlc2.TLC \
 			-workers auto -config "$cfg" -metadir "$WORK/meta-${name}" \
 			SessionResume.tla
 	) >"$log" 2>&1 || status=$?
