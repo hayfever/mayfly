@@ -2,6 +2,17 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
+## [1.0.0-rc.2] - 2026-11-20
+
+No code, API, configuration, or persisted-format changes since 1.0.0-rc.1.
+
+### Changed
+
+- The README describes the current release: a new banner, a grouped feature list, current known limitations, and a diagram that shows the direct queue interface. The non-goals and project layout moved to [docs/architecture.md](docs/architecture.md).
+- [docs/architecture.md](docs/architecture.md) describes the 1.0 system: the credential broker, gateway rate limits and audit, queue producers and the admin API, schedules and sources, skills, web UI authentication, storage and runtime backends, and metrics.
+- Every Markdown file was checked against the code and corrected where it had drifted, including the `sources.concurrency` default, the trigger burst default, the supported versions in [SECURITY.md](SECURITY.md), and the deprecated `MAYFLY_TOKEN` in [docs/deprecation.md](docs/deprecation.md).
+- The Helm chart and `api/openapi.yaml` report version `1.0.0-rc.2`.
+
 ## [1.0.0-rc.1] - 2026-11-20
 
 ### Added
@@ -210,6 +221,7 @@ Historical: these describe 0.1.0, and many no longer apply. See the README for c
 - Sidecar calls carry a short-lived token signed with the session's `gateway-key`, which is mounted only into sidecars. Service calls carry a token signed with the per-plugin key in `mayfly-gateway-<name>`.
 - The default NetworkPolicy requires a CNI that enforces it. The e2e suite verifies enforcement.
 
+[1.0.0-rc.2]: https://github.com/hayfever/mayfly/releases/tag/v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/hayfever/mayfly/releases/tag/v1.0.0-rc.1
 [0.3.0]: https://github.com/hayfever/mayfly/releases/tag/v0.3.0
 [0.2.0]: https://github.com/hayfever/mayfly/releases/tag/v0.2.0
