@@ -1,6 +1,6 @@
 # Architecture
 
-This page describes the system as of 1.0.0-rc.1: one control plane (`mayflyd`) that queues work, starts one short-lived runtime per session, brokers every credential the runtime needs, and keeps the state that lets a session survive a container or control-plane restart. Configuration keys are in [configuration.md](configuration.md); the HTTP surface is in [api.md](api.md).
+This page describes the system as of 1.0.0-rc.2: one control plane (`mayflyd`) that queues work, starts one short-lived runtime per session, brokers every credential the runtime needs, and keeps the state that lets a session survive a container or control-plane restart. Configuration keys are in [configuration.md](configuration.md); the HTTP surface is in [api.md](api.md).
 
 ## Components
 

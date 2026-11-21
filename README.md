@@ -87,7 +87,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the code map and invariants, and [doc
 
 ## Install with Helm
 
-`1.0.0-rc.1` is the current release. Each tagged release publishes `ghcr.io/hayfever/mayflyd`, `ghcr.io/hayfever/mayfly-agent`, and the chart at `oci://ghcr.io/hayfever/charts/mayfly`. The packages are public, so Helm and Docker pull them anonymously. The k3d quickstart below builds the images locally instead. Install `1.0.0-rc.1` with:
+`1.0.0-rc.2` is the current release. Each tagged release publishes `ghcr.io/hayfever/mayflyd`, `ghcr.io/hayfever/mayfly-agent`, and the chart at `oci://ghcr.io/hayfever/charts/mayfly`. The packages are public, so Helm and Docker pull them anonymously. The k3d quickstart below builds the images locally instead. Install `1.0.0-rc.2` with:
 
 ```bash
 kubectl create namespace mayfly
@@ -98,7 +98,7 @@ kubectl -n mayfly create secret generic mayfly-secrets \
   --from-literal=OPENAI_API_KEY="sk-..."
 
 helm install mayfly oci://ghcr.io/hayfever/charts/mayfly \
-  --version 1.0.0-rc.1 \
+  --version 1.0.0-rc.2 \
   --namespace mayfly \
   --set existingSecret=mayfly-secrets \
   --set config.server.public_url=https://mayfly.example.com
@@ -111,21 +111,21 @@ For LiteLLM, set `litellm.enabled=true` and provide the provider keys in `litell
 All three artifacts are signed by digest with the release workflow identity. Resolve the tag first, then verify; a tag can move and a digest cannot:
 
 ```bash
-digest="$(crane digest ghcr.io/hayfever/mayflyd:1.0.0-rc.1)"
+digest="$(crane digest ghcr.io/hayfever/mayflyd:1.0.0-rc.2)"
 cosign verify \
-  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v1.0.0-rc.1 \
+  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v1.0.0-rc.2 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   "ghcr.io/hayfever/mayflyd@${digest}"
 
-digest="$(crane digest ghcr.io/hayfever/mayfly-agent:1.0.0-rc.1)"
+digest="$(crane digest ghcr.io/hayfever/mayfly-agent:1.0.0-rc.2)"
 cosign verify \
-  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v1.0.0-rc.1 \
+  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v1.0.0-rc.2 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   "ghcr.io/hayfever/mayfly-agent@${digest}"
 
-digest="$(crane digest ghcr.io/hayfever/charts/mayfly:1.0.0-rc.1)"
+digest="$(crane digest ghcr.io/hayfever/charts/mayfly:1.0.0-rc.2)"
 cosign verify \
-  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v1.0.0-rc.1 \
+  --certificate-identity https://github.com/hayfever/mayfly/.github/workflows/release.yml@refs/tags/v1.0.0-rc.2 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   "ghcr.io/hayfever/charts/mayfly@${digest}"
 ```
@@ -276,7 +276,7 @@ skills:
 
 ## Status
 
-Mayfly is `1.0.0-rc.1` and single-tenant. The public surface freezes at 1.0.0, and the policy in [docs/deprecation.md](docs/deprecation.md) applies from that release. Read [docs/deployment.md](docs/deployment.md) and the known limitations below before exposing it. Upgrade from 0.3.0 with [docs/migrating-to-1.0.md](docs/migrating-to-1.0.md); upgrade from 0.1.x with [docs/migrating-to-0.2.md](docs/migrating-to-0.2.md).
+Mayfly is `1.0.0-rc.2` and single-tenant. The public surface freezes at 1.0.0, and the policy in [docs/deprecation.md](docs/deprecation.md) applies from that release. Read [docs/deployment.md](docs/deployment.md) and the known limitations below before exposing it. Upgrade from 0.3.0 with [docs/migrating-to-1.0.md](docs/migrating-to-1.0.md); upgrade from 0.1.x with [docs/migrating-to-0.2.md](docs/migrating-to-0.2.md).
 
 ### Known limitations
 
