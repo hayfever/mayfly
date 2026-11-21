@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"id\":\"job-legacy-0001\",\"kind\":\"session\",\"delivery\":\"legacy-delivery\",\"trigger\":\"github\",\"options\":{\"Prompt\":\"Legacy job from v0.1.0\",\"Title\":\"Legacy build\",\"Model\":\"gpt-test\",\"TTL\":3600000000000,\"Skills\":[\"repo\"],\"Agent\":\"default\",\"Trigger\":{\"kind\":\"github\",\"name\":\"github\",\"event\":\"push\",\"delivery\":\"legacy-delivery\",\"job_id\":\"job-legacy-0001\"}},\"accepted_at\":\"2026-11-01T08:30:00Z\",\"attempts\":2}")

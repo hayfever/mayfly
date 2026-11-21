@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"job\":{\"version\":1,\"kind\":\"session.create\",\"id\":\"job-dead-0001\",\"idempotency_key\":\"dead-delivery\",\"created_at\":\"2026-11-19T12:00:00Z\",\"attempts\":1,\"prompt\":\"Summarize the failing build\",\"session\":{\"title\":\"Build failure\",\"model\":\"gpt-test\",\"ttl\":\"1h0m0s\",\"skills\":[\"repo\"]},\"trigger\":{\"kind\":\"github\",\"name\":\"github\",\"event\":\"push\",\"actor\":\"octocat\"}},\"error\":\"image pull failed\",\"failed_at\":\"2026-11-19T12:05:00Z\"}")
