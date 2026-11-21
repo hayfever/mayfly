@@ -2,6 +2,19 @@
 
 All notable changes are recorded here. The project follows semantic versioning once it reaches 1.0.0. Before that, minor versions may contain breaking changes; patch versions should not.
 
+## [Unreleased]
+
+### Added
+
+- A TLA+ model of the session lifecycle and resume protocol in `spec/tla`, checked by `hack/tlc.sh` and the `tlc` job in `.github/workflows/verify.yml`. See [docs/formal-verification.md](docs/formal-verification.md).
+- Native Go fuzz targets for webhook verification and parsing, persisted queue jobs, journal steps, session records, runtime events, HTTP request bodies, the hub, and bundles. `hack/fuzz.sh` runs every target, and the `fuzz-nightly` job runs them on a schedule.
+
+### Fixed
+
+- Retrying a buried queue job whose trigger has no name no longer rewrites its stored payload with a derived name.
+- A pre-0.2 legacy queue job missing fields the envelope reader requires is rejected when read, instead of being rewritten on retry into a payload that can never be claimed.
+- An artifact bundle entry whose name is not valid UTF-8 is written with the same name the manifest lists.
+
 ## [1.0.0-rc.2] - 2026-11-20
 
 No code, API, configuration, or persisted-format changes since 1.0.0-rc.1.
