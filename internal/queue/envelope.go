@@ -208,6 +208,30 @@ func (j *Job) fromLegacy(data []byte) error {
 	if legacy.ID == "" {
 		return errors.New("job payload has no id")
 	}
+	// A stored job is encoded again when it is retried, so the payload must
+	// satisfy the fields the envelope reader requires for its kind. A legacy
+	// job without them would be rewritten into a payload that no longer
+	// decodes, and the job could never be claimed again.
+	switch kind {
+	case KindSession:
+		if legacy.Options.Prompt == "" {
+			return errors.New("job payload has no prompt")
+		}
+	case KindSource:
+		if legacy.Source == nil {
+			return errors.New("job payload has no source")
+		}
+		if legacy.Source.Schedule == "" || legacy.Source.Source == "" || legacy.Source.Slot.IsZero() {
+			return errors.New("job payload source requires schedule, source, and slot")
+		}
+	}
+	// An envelope trigger needs a kind. Decoding synthesizes one when the whole
+	// trigger is empty, so only a partial trigger without a kind breaks the
+	// rewrite.
+	trigger := legacy.Options.Trigger
+	if trigger.Kind == "" && (trigger.Name != "" || trigger.Event != "" || trigger.Actor != "") {
+		return errors.New("job payload trigger has no kind")
+	}
 	j.ID = legacy.ID
 	j.Kind = kind
 	j.IdempotencyKey = legacy.Delivery
