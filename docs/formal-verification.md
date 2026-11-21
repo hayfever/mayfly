@@ -39,7 +39,7 @@ replacement pod. Sessions do not share mutable state, so one session covers
 every property; a second session only multiplies the liveness state space.
 The bounds keep a full run under three minutes on a desktop.
 
-`SessionResume_buggy.cfg` is the negative check: it must fail. See
+`SessionResume_buggy.cfg` and `SessionResume_interrupt_buggy.cfg` are the negative checks: they must fail. See
 [spec/tla/README.md](../spec/tla/README.md) for the cfg convention.
 
 ## Action to Go map
