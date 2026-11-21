@@ -253,7 +253,7 @@ sources:
 |---|---|
 | `state_path` | bbolt file that records the last accepted slot for each schedule. Empty keeps it in memory |
 | `max_artifact_bytes` | Cap for one run artifact. Default 16 MiB |
-| `concurrency` | Parallel fanout requests per source. Default `1`; the shipped configs set `4` |
+| `concurrency` | Parallel fanout requests per source. Default `4`. Must be positive |
 | `timeout` | Deadline for one source step, every page and fanout request included. Default `15m` |
 | `job_timeout` | Deadline for one schedule job: every source step plus session creation. Default `30m`. Must be at least `timeout` |
 
@@ -365,7 +365,7 @@ triggers:
 | `max_body_bytes` | Webhook body limit for this trigger. `0` or an omitted key uses `server.webhook_max_body_bytes`. Must be at most `16777216` |
 | `rate_limit.requests` | Sessions admitted per `interval`. Default `30`. `0` disables the limit |
 | `rate_limit.interval` | Refill period. Default `1m` |
-| `rate_limit.burst` | Requests admitted at once before the rate applies. Default `10` |
+| `rate_limit.burst` | Requests admitted at once before the rate applies. Default `10` when `rate_limit` is omitted; a `rate_limit` block without `burst` uses `requests` |
 
 A body over the limit returns `413` with `code: payload_too_large`. The control plane checks the limit before signature verification, so an oversize delivery does not spend a rate-limit token.
 
@@ -378,14 +378,15 @@ Signature behavior:
 - `generic`: `X-Mayfly-Signature-256` HMAC-SHA256 hex, optional `sha256=` prefix, or `X-Mayfly-Token`.
 - `github`: `X-Hub-Signature-256` only. The static `X-Mayfly-Token` header is not accepted, because GitHub signs each delivery and a static token can be replayed.
 - `slack`: `X-Slack-Signature` with a 5-minute timestamp window; also answers `url_verification`.
-- `datadog`: `X-Mayfly-Token`.
+- `datadog`: same as `generic`.
 
 ## Environment variables
 
 | Variable | Used by | Meaning |
 |---|---|---|
-| `MAYFLY_API_TOKEN` | control plane | Default `server.token_env`: one admin-scoped token named `default` |
-| `MAYFLY_CONFIG` | all binaries | Default config path |
+| `MAYFLY_API_TOKEN` | control plane, CLI | Default `server.token_env`: one admin-scoped token named `default`. The CLI sends it as the bearer token |
+| `MAYFLY_URL` | CLI | Control-plane URL. Default `http://localhost:8080` |
+| `MAYFLY_CONFIG` | control plane, runtime, harness | Default config path: `config.yaml` for `mayflyd`, the session config for the runtime |
 | `MAYFLY_LOG_LEVEL` | control plane, runtime | `debug`, `info`, `warn`, `error` |
 | `MAYFLY_TOKEN` | CLI | Deprecated alias for `MAYFLY_API_TOKEN`. The CLI prints one warning when it uses the alias |
 | `MAYFLY_SESSION_TOKEN` | runtime | Injected per session; do not set manually |

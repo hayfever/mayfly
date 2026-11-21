@@ -23,7 +23,7 @@ Plugin behavior is covered in the first two layers:
 
 `make e2e` runs [hack/e2e.sh](../hack/e2e.sh), which:
 
-1. builds the four images from the working tree,
+1. builds the four release images from the working tree, plus the plugin fixture images in `e2e/plugins`,
 2. creates a k3d cluster (`mayfly-e2e`) on k3s, whose built-in kube-router controller enforces NetworkPolicy,
 3. loads the images, deploys the deterministic LLM and MCP stubs, and installs the local chart with [e2e/values.yaml](../e2e/values.yaml),
 4. runs the Go tests in [e2e/](../e2e) (build tag `e2e`) against the release over a port-forward,
@@ -53,6 +53,15 @@ No API keys are needed: `llmstub` answers every model call. A full run takes abo
 | `TestSlackWebhook` | Slack signing, the URL verification challenge, rejection of requests older than 5 minutes, and a slash command that starts a session |
 | `TestDatadogWebhook` | A signed Datadog alert starts a titled session |
 | `TestWebhookRateLimit` | Only verified requests spend a trigger's budget; over the limit answers 429 with `Retry-After` |
+| `TestPluginInlineSession` | An inline plugin runs end to end; the pod has the shim and copy init containers and a read-only plugin tree in the agent container |
+| `TestPluginEnvIsolated` | An inline plugin receives its manifest `env` and the Mayfly identity, but not the session token or the control-plane config |
+| `TestPluginMissingDirFailsSession` | An image without `/mayfly-plugin` fails the copy init container, and the session ends `failed` |
+| `TestPluginSidecarSession` | A sidecar plugin reads its secret; the agent container cannot |
+| `TestPluginSidecarSocketRequiresToken` | A call to the sidecar socket without a call token, as `run_command` could make, is refused |
+| `TestPluginServiceShared` | The reconciler creates the service objects with one replica, and two sessions reach the same process state |
+| `TestPluginServiceNetworkPolicy` | Only the control plane reaches a service plugin, and the service reaches only its egress CIDRs |
+| `TestPluginResumeAfterPodDelete` | Deleting the pod during a non-idempotent inline call does not repeat the call: the gateway returns the interrupted result |
+| `TestMCPServerIdempotencyKey` | An HTTP `mcp.servers` call goes through the gateway and carries the ledger key |
 | `TestUpgradeFromLastRelease` | The last released chart and images are upgraded to the chart and images built from HEAD; the old sessions stay readable and listed, a queued job survives, and the upgraded control plane runs it |
 
 After the tests pass, the suite checks that no session pods, Secrets, ConfigMaps, or NetworkPolicies are left in the namespace.
@@ -86,19 +95,22 @@ Requirements: Docker, k3d, kubectl, Helm 3, Go, and openssl. The k3d cluster use
 2. the queued job record is still present,
 3. the upgraded control plane runs that job when a slot frees.
 
-The test skips unless `MAYFLY_E2E_UPGRADE_FROM` names a released chart version. The release packages are private, so Helm and the cluster need credentials:
+The test skips unless `MAYFLY_E2E_UPGRADE_FROM` names a released chart version. CI uses the newest published `v*` release. The packages are public from 0.2.0 on, so no credentials are needed:
+
+```bash
+make e2e-up
+MAYFLY_E2E_UPGRADE_FROM=0.3.0 \
+  E2E_GO_TEST_FLAGS="-run TestUpgradeFromLastRelease" make e2e-test
+make e2e-down
+```
+
+For a private package, such as a 0.1.0 release candidate or your own fork, log Helm in to the registry, create a pull secret in the upgrade namespace, and name it in `MAYFLY_E2E_PULL_SECRET`:
 
 ```bash
 helm registry login ghcr.io -u <github-user>
-
 kubectl create namespace mayfly-upgrade
 kubectl -n mayfly-upgrade create secret docker-registry ghcr-pull \
   --docker-server=ghcr.io --docker-username=<github-user> --docker-password=<token>
-
-make e2e-up
-MAYFLY_E2E_UPGRADE_FROM=0.1.0-rc.2 MAYFLY_E2E_PULL_SECRET=ghcr-pull \
-  E2E_GO_TEST_FLAGS="-run TestUpgradeFromLastRelease" make e2e-test
-make e2e-down
 ```
 
 `MAYFLY_E2E_CHART_REPOSITORY` and `MAYFLY_E2E_IMAGE_PREFIX` override the default `ghcr.io/hayfever` package locations. `MAYFLY_E2E_UPGRADE_NAMESPACE` overrides the namespace. The test deletes the namespace when it passes and keeps it for inspection when it fails. The test installs both releases with the bbolt queue from [e2e/upgrade-values.yaml](../e2e/upgrade-values.yaml) and the single-agent [e2e/upgrade-agents.yaml](../e2e/upgrade-agents.yaml); both files must stay valid for every release under test. The Redis e2e variant does not run it. A run takes a few minutes because the released images are pulled from the registry.

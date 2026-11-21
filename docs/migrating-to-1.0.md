@@ -4,9 +4,11 @@ This guide moves an install from 0.3.0 to 1.0.0-rc.1. The release is additive
 for the documented surfaces. No persisted format changed, so the control plane
 reads the 0.3.0 state files without a migration step.
 
-1.0.0 freezes the public surface. From this release, the HTTP API, CLI, config
-keys, Helm values, environment variables, and persisted formats follow
-[deprecation.md](deprecation.md). A removal needs a major version.
+1.0.0 freezes the public surface. From this release, the HTTP API, webhook
+receivers, CLI (including its environment variables), config keys, and Helm
+values follow [deprecation.md](deprecation.md). A removal needs a major version.
+Persisted stores carry their own format versions; see
+[Persisted formats](configuration.md#persisted-formats).
 
 ## Before you upgrade
 

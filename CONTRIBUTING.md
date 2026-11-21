@@ -21,7 +21,7 @@ make e2e
 ## What to run before a pull request
 
 ```bash
-gofmt -w cmd internal test
+gofmt -w cmd internal test e2e
 go vet ./...
 go test ./...
 helm lint deploy/helm/mayfly --set existingSecret=mayfly-secrets
@@ -45,7 +45,7 @@ hack/api-diff.sh
 - Every list route returns `items` and an optional `next_cursor`.
 - `/internal/v1` is the session runtime protocol. It is not in the spec and keeps its own shapes.
 
-`hack/api-diff.sh` compares the spec with the latest `v*` tag and fails a breaking change. A deliberate break before 1.0.0 still needs a changelog entry.
+`hack/api-diff.sh` compares the spec with the latest `v*` tag and fails a breaking change. From 1.0.0 a break needs a major version and a changelog entry under "Breaking changes"; see [docs/deprecation.md](docs/deprecation.md). `hack/surface-diff.sh` applies the same rule to the CLI surface in `cmd/mayfly/testdata/cli-surface.txt`.
 
 ## Architecture rules
 
@@ -53,7 +53,7 @@ hack/api-diff.sh
 - Credentials stay in the control plane. Do not add provider or object-store keys to session pods.
 - Keep isolation defaults intact. Document and justify any exception.
 - Lifecycle transitions must be idempotent; runtime and control plane races are expected.
-- Prefer standard library APIs. Current external dependencies are client-go, gorilla/websocket, yaml.v3, and the AWS SDK only if a provider adapter needs it.
+- Prefer standard library APIs. Current direct dependencies are client-go and the Kubernetes API packages, gorilla/websocket, yaml.v3, the AWS SDK (S3 store), bbolt, go-redis, robfig/cron, and the Prometheus client. miniredis and the JSON Schema validator are used only by tests. Justify a new one in the pull request.
 
 ## Commits
 

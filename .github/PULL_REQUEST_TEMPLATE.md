@@ -4,7 +4,7 @@ What behavior changes, and why?
 
 ## Verification
 
-- [ ] `gofmt -l cmd internal test`
+- [ ] `gofmt -l cmd internal test e2e`
 - [ ] `go vet ./...`
 - [ ] `go test ./...`
 - [ ] `helm lint deploy/helm/mayfly --set existingSecret=mayfly-secrets`

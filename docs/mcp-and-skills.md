@@ -17,7 +17,7 @@ description: Triage a production incident with evidence.
 2. Separate facts from assumptions.
 ```
 
-The control plane reads `skills.dirs` at startup. The file basename becomes the skill name when `name` is absent. Duplicate names are an error. The description and body are appended to the system prompt under `## Skill: <name>`.
+The control plane reads `skills.dirs` and the pinned `skills.sources` archives at startup. The file basename becomes the skill name when `name` is absent. Duplicate names are an error. The description and body are appended to the system prompt under `## Skill: <name>`.
 
 Selection:
 
@@ -71,7 +71,7 @@ Headers forwarded: `Content-Type`, `Accept`, `Mcp-Session-Id`,
 `MCP-Protocol-Version`, `Last-Event-ID`. Response headers forwarded:
 `Content-Type`, `Cache-Control`, `Mcp-Session-Id`, `MCP-Protocol-Version`.
 
-MCP servers that require OAuth are not supported in 0.x. The HTTP transport
+MCP servers that require OAuth are not supported. The HTTP transport
 sends only the static headers from the configuration: there is no
 authorization flow, token refresh, or browser callback. Use a server that
 accepts a static token or API key, and rotate the token at the control plane.
@@ -127,7 +127,7 @@ Tool names are sanitized and namespaced:
 mcp_<server>_<tool>
 ```
 
-Example: server `github`, tool `search_issues` becomes `mcp_github_search_issues`. Collisions receive a numeric suffix. Built-in tools are `read_file`, `write_file`, `list_files`, and `run_command` (when enabled).
+Example: server `github`, tool `search_issues` becomes `mcp_github_search_issues`. Collisions receive a numeric suffix. Built-in tools are `read_file`, `write_file`, `list_files`, `run_command` (when enabled), and `read_artifact` (when the session has input artifacts).
 
 Plugin tools use the same scheme with a different prefix: `plugin_<plugin>_<tool>`. A plugin is declared in the bundle, not under `mcp.servers`; see [plugins.md](plugins.md).
 
@@ -184,6 +184,7 @@ and keep the old behavior.
 | `write_file` | Writes up to 4 MiB; creates parent directories |
 | `list_files` | Lists up to 500 entries in one directory |
 | `run_command` | Runs `/bin/sh -c` with the workspace as cwd and a timeout; output is capped; off unless `sessions.allow_shell` or an agent `allowShell` enables it |
+| `read_artifact` | Reads a read-only input artifact, such as a schedule run artifact, in windows of up to 24 KiB through the control plane; offered only when the session has input artifacts |
 
 `run_command` is not a sandbox. The container is the boundary.
 

@@ -23,8 +23,8 @@ rejects unknown top-level values. Two replicas cannot share the ReadWriteOnce
 state volume.
 
 Set `shutdown.gracePeriodSeconds` higher than `shutdown.budgetSeconds`.
-`helm template` fails when the budget does not fit. The defaults are 25 and 30
-seconds.
+`helm template` fails when the budget does not fit. The defaults are 30 seconds
+for the grace period and 25 for the budget.
 
 If you use `server.tokens`, put the token secrets in the Secret that
 `controlPlane.tokensSecret` names. The legacy `server.token_env` remains one

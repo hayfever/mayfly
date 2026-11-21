@@ -4,8 +4,10 @@
 
 | Version | Supported |
 |---|---|
+| 0.3.x | Security fixes |
 | 0.2.x | Security fixes |
-| 0.1.x | Security fixes |
+
+0.1.0 was never released; it shipped only as release candidates.
 
 ## Reporting a vulnerability
 
@@ -36,10 +38,10 @@ When `server.tokens` is empty, `server.token_env` supplies one token named `defa
 
 Every authenticated, mutating `/api/v1` request writes one audit line with the token name, method, route, target, status, and request id. A mutating request that the token is not allowed to make is audited with status `403`. Read requests and requests with an unknown token are not audited.
 
-The control plane holds LLM, MCP, and object-store credentials. Sessions receive only a scoped session token. The token authorizes that session's inbox, events, artifact upload, finalize, LLM proxy, and assigned MCP servers.
+The control plane holds LLM, MCP, and object-store credentials. Sessions receive only a scoped session token. The token authorizes that session's inbox, events, turn journal, mounted input artifacts, artifact upload, finalize, LLM proxy, granted tool calls through the tool gateway, and assigned MCP servers.
 
 Session pods run as non-root with a read-only root filesystem, no added capabilities, no service-account token, and a NetworkPolicy that denies ingress. Verify that your CNI enforces NetworkPolicy.
 
-Remote skills, agent manifests, harness images, and MCP servers are trusted operator configuration. Review them before use. Mayfly does not install harness packages or run plugin code at session start.
+Remote skills, agent manifests, harness images, plugin images, and MCP servers are trusted operator configuration. Review them before use. Mayfly does not install harness packages at session start; plugin code comes only from the images that plugin manifests declare.
 
 Known gaps are documented in [docs/security.md](docs/security.md) and [CHANGELOG.md](CHANGELOG.md).

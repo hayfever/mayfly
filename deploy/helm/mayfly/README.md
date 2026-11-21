@@ -27,7 +27,7 @@ helm install mayfly deploy/helm/mayfly \
   --set config.server.public_url=https://mayfly.example.com
 ```
 
-The default images are `ghcr.io/hayfever/mayflyd:0.1.0` and `ghcr.io/hayfever/mayfly-agent:0.1.0`. Override `image` and `agentImage` for your registry.
+The default images are `ghcr.io/hayfever/mayflyd` and `ghcr.io/hayfever/mayfly-agent`, tagged with the chart's `appVersion` (`1.0.0-rc.1` for this chart) when `image.tag` and `agentImage.tag` are empty. Override `image` and `agentImage` for your registry.
 
 Check the token:
 
@@ -63,7 +63,7 @@ controlPlane:
   tokensSecret: mayfly-tokens
 ```
 
-The chart passes that Secret to the control plane as environment variables. A missing variable stops startup. The token name appears in the audit log. See [security.md](../../docs/security.md#api-authentication) for the scope of each route.
+The chart passes that Secret to the control plane as environment variables. A missing variable stops startup. The token name appears in the audit log. See [security.md](../../../docs/security.md#api-authentication) for the scope of each route.
 
 ## Agents and skills
 
@@ -135,7 +135,7 @@ For Bedrock on EKS, annotate `litellm.serviceAccount.annotations` with your IRSA
 | `config.llm.base_url` | empty | OpenAI by default; LiteLLM URL when enabled |
 | `config.agents.allowed_images` | empty | Image allowlist for manifests |
 | `config.queue.backend` | `bbolt` | `memory`, `bbolt`, or `redis`; see [docs/configuration.md](../../../docs/configuration.md#queue) |
-| `persistence.enabled` | true | Put `/var/lib/mayfly` (queue database, turn journal, local artifacts) on a PersistentVolume; disabling loses accepted work and in-flight turns across a control-plane restart |
+| `persistence.enabled` | true | Put `/var/lib/mayfly` (queue database, turn journal, session records, schedule watermark, skill cache, local artifacts) on a PersistentVolume; disabling loses accepted work, in-flight turns, and the session list across a control-plane restart |
 | `persistence.size` | `2Gi` | Volume size |
 | `metrics.enabled` | true | Serve Prometheus metrics; see [docs/observability.md](../../../docs/observability.md) |
 | `metrics.address` | empty | Separate metrics listen address, such as `:9090`; empty serves `/metrics` on the main port |
@@ -146,6 +146,6 @@ For Bedrock on EKS, annotate `litellm.serviceAccount.annotations` with your IRSA
 | `litellm.enabled` | false | Deploy LiteLLM |
 | `litellm.image.tag` | `v1.110.0` | LiteLLM release tag. The chart rejects a rolling tag such as `main-stable` |
 
-The control plane runs one replica. Session history is in memory; accepted webhook work, the turn journal, and artifacts are durable with `bbolt` plus persistence, or with `redis` for the queue. See [docs/deployment.md](../../../docs/deployment.md).
+The control plane runs one replica. The live event thread is in memory; accepted work, the turn journal, session records, and artifacts are durable with `bbolt` plus persistence, or with `redis` for the queue. See [docs/deployment.md](../../../docs/deployment.md).
 
 `values.schema.json` validates every value. `helm install` and `helm upgrade` reject a value that is not in the schema, an unknown value, and a value outside its allowed set. There is no replica count to set: the chart pins one replica, because the control plane keeps its state on one `ReadWriteOnce` volume.

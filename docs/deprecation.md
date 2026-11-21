@@ -58,4 +58,6 @@ Do not add a removal date that a later release cannot honor. The only fixed date
 
 ## Current deprecations
 
-None. Nothing in this release is deprecated.
+| Element | Deprecated in | Replacement | Removal |
+|---|---|---|---|
+| `MAYFLY_TOKEN` CLI environment variable | 0.2.0 | `MAYFLY_API_TOKEN`. The CLI prints one warning when it reads the alias | 2.0.0 at the earliest |

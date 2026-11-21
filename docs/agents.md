@@ -173,7 +173,7 @@ The prompt is a Go `text/template` with these fields:
 .SessionID  .Title  .Agent  .Harness  .Model  .Trigger  .Now
 ```
 
-`.Trigger` has `Kind`, `Name`, `Event`, `Delivery`, and `Actor`.
+`.Trigger` has `Kind`, `Name`, `Event`, `Delivery`, `JobID`, and `Actor`.
 
 A custom prompt replaces the built-in persona. The runtime appends the standard environment and rules block, then every selected skill.
 
@@ -232,9 +232,9 @@ Do not run arbitrary agent code in `mayflyd`.
 
 - Unknown agent name: session creation fails with HTTP 400.
 - Image not in `agents.allowed_images`: control-plane startup fails.
-- Selected harness missing or not executable: the dispatcher exits 127; after a 20-second grace the session is marked failed with the container reason, an error event is recorded, and a partial artifact is exported.
-- Image cannot be pulled or the container cannot start: after 30 seconds the session is marked failed with the container reason.
-- Container exits without finalizing: after a 20-second grace the session is marked failed with the terminated reason.
+- Selected harness missing or not executable: the dispatcher exits 127 and the pod fails. The control plane starts a replacement up to `sessions.max_restarts`; after the last one it marks the session failed with the container reason, records an error event, and exports a partial artifact.
+- Image cannot be pulled: the pull gets 30 seconds to recover. Invalid or unreadable container configuration is replaced at once. Either way, replacements stop at `sessions.max_restarts` and the session then fails with the container reason.
+- Container exits without finalizing: a pod that exits successfully falls back after a 20-second grace and the session is marked failed. A failed pod is replaced while attempts remain. See [architecture.md](architecture.md#failure-handling).
 
 Mayfly does not install harness packages or build images during a session. Kubernetes pulls the referenced image automatically. If the image is absent, not allowlisted, or the command inside it is missing, the session fails with the container reason. Build and publish the harness image once, then reference it by digest. Installing packages at session start would require mutable egress, a writable root filesystem, and trust in the package source; the session contract deliberately avoids that.
 

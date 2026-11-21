@@ -27,7 +27,7 @@ Every failed request to `/api/v1` or `/hooks/{name}` returns one envelope:
 | `forbidden` | 403 | The credential does not carry the scope of the route, a cookie-authenticated mutation failed the CSRF check, a web sign-in came from another origin, or the session may not use the requested tool |
 | `not_found` | 404 | Unknown route, session, trigger, artifact, job, dead job, or schedule; a tool route for a non-built-in harness |
 | `method_not_allowed` | 405 | The route exists with another method; `Allow` names the method |
-| `conflict` | 409 | The session is closed, or a tool call key was reused with another tool or other arguments |
+| `conflict` | 409 | The session is closed, a stored queue job cannot be decoded by this build, or a tool call key was reused with another tool or other arguments |
 | `payload_too_large` | 413 | Body or artifact over the configured limit |
 | `rate_limited` | 429 | Trigger rate limit, `queue.max_jobs` reached, `sessions.max_concurrent` reached on the admin API, or a plugin rate limit; `Retry-After` is set |
 | `unavailable` | 503 | A dependency is not available: the queue rejected the write, the queue store is down, or schedules are not configured |
@@ -198,6 +198,7 @@ Client messages:
 
 ```json
 {"type":"user_message","text":"message text"}
+{"type":"ping"}
 ```
 
 The actor name comes from the ticket. Multiple clients share the thread. The
@@ -261,7 +262,7 @@ The schedules compiled from agent files at startup, sorted by name.
 
 ### `POST /api/v1/schedules/{name}/run`
 
-Enqueues one manual run of the named schedule and returns `202` with the accepted-job object: `{"accepted":true,"duplicate":false,"job_id":"s-...","delivery":"manual:...","status":"queued"}`. The run writes its artifact and creates a session when the change totals match the schedule trigger, the same as a cron slot. Manual runs use a random delivery key, so they do not consume or block a cron slot. Unknown schedule: `404 not_found`. Scheduler not started: `503 unavailable`.
+Enqueues one manual run of the named schedule and returns `202` with the accepted-job object: `{"accepted":true,"duplicate":false,"job_id":"s-...","delivery":"manual:...","status":"queued"}`. The run writes its artifact and creates a session when the change totals match the schedule trigger, the same as a cron slot. Manual runs use a random delivery key, so they do not consume or block a cron slot. Unknown schedule: `404 not_found`. Scheduler not started, or the queue is full: `503 unavailable`.
 
 ### `POST /api/v1/auth/session`
 
@@ -290,6 +291,7 @@ These endpoints accept the scoped session token, never an API token. They keep t
 | `POST /internal/v1/sessions/{id}/journal` | Append one completed turn step (`session_id`, `turn`, `step`, `name`, `input`, `output`, `err`, `conv_len`, `time`) |
 | `GET /internal/v1/sessions/{id}/journal?turn=<n>` | Steps for one turn. Omit `turn` for the last turn, which also returns its number |
 | `POST /internal/v1/sessions/{id}/artifacts` | Upload a tar.gz bundle. Requires `Content-Length` and `X-Mayfly-SHA256`. Optional `X-Mayfly-Partial: true` |
+| `GET /internal/v1/sessions/{id}/artifacts?key=<key>&offset=<n>&limit=<n>` | Read a window of an input artifact mounted on the session (default limit 24 KiB). Backs `read_artifact` |
 | `POST /internal/v1/sessions/{id}/finalize` | `{"status":"completed"\|"failed","reason":"...","error":"..."}` |
 | `POST /internal/v1/llm/chat/completions` | OpenAI-compatible proxy. The model must be the one assigned to the session; an empty model field is filled with it |
 | `GET /internal/v1/sessions/{id}/tools` | The session's tool grant, sidecar discovery tokens, and unavailable owners |

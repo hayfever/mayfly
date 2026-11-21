@@ -1,10 +1,12 @@
 # Architecture
 
+This page describes the system as of 1.0.0-rc.1: one control plane (`mayflyd`) that queues work, starts one short-lived runtime per session, brokers every credential the runtime needs, and keeps the state that lets a session survive a container or control-plane restart. Configuration keys are in [configuration.md](configuration.md); the HTTP surface is in [api.md](api.md).
+
 ## Components
 
 | Component | Responsibility |
 |---|---|
-| `mayflyd` | API, webhooks, session registry, thread bus, artifact storage, credential proxy, tool gateway, Kubernetes/local orchestration, timeouts, adoption |
+| `mayflyd` | Admin API and web UI, webhooks, queue and worker, scheduler, session registry, thread bus, turn journal, session record store, artifact storage, credential broker, tool gateway, skills loading, Kubernetes or local orchestration, timeouts, adoption, metrics |
 | `mayfly-harness` | Image entrypoint: selects the named in-image harness or falls back to `mayfly-agent` |
 | `mayfly-agent` | Built-in agent loop, MCP clients, plugin host, built-in tools, conversation and trace logs, bundle assembly and upload |
 | `mayfly-plugin-shim` | Copies inline plugin trees into the pod, and serves a stdio plugin over streamable HTTP on a Unix socket or TCP for sidecar and service plugins |
@@ -12,7 +14,10 @@
 | Plugin workload | `inline` child in the agent container, `sidecar` container in the session pod, or reconciled `service` Deployment |
 | Agent manifest | Declarative agent name, prompt, model, skills, MCP servers, plugins, limits, optional runtime image |
 | Web UI / CLI | Human attach over WebSocket, message send, close, artifact download |
-| Kubernetes | Runs one pod per session with a per-session Secret and ConfigMap |
+| Queue | Durable job store (`memory`, `bbolt`, or `redis`) in front of session creation. Webhooks, schedules, and your own producers write `job.v1` envelopes to it |
+| Scheduler and sources | Cron slots that run a declarative source chain and start a session only on a material change |
+| Turn journal and record store | Completed turn steps and the tool ledger for resume; session records and the artifact index for the list and downloads after a restart |
+| Runtime backend | `kubernetes`: one pod per session with a Secret, ConfigMap, NetworkPolicy, and workspace PersistentVolumeClaim. `local`: one child process per session, for development |
 | Artifact store | Local filesystem or S3-compatible object storage |
 
 The control plane and runtime communicate over HTTP. The runtime initiates every connection:
@@ -22,12 +27,13 @@ The control plane and runtime communicate over HTTP. The runtime initiates every
 - `POST /internal/v1/sessions/{id}/journal` — one completed turn step.
 - `GET /internal/v1/sessions/{id}/journal?turn=N` — the steps of one turn; without `turn`, the last turn.
 - `POST /internal/v1/sessions/{id}/artifacts` — final bundle.
+- `GET /internal/v1/sessions/{id}/artifacts?key=...&offset=...&limit=...` — a window of an input artifact mounted on the session, such as a schedule run artifact. Backs the `read_artifact` tool.
 - `POST /internal/v1/sessions/{id}/finalize` — terminal status.
 - `POST /internal/v1/llm/chat/completions` — model calls through the broker.
 - `GET /internal/v1/sessions/{id}/tools` — the session's tool grant, sidecar discovery tokens, and unavailable owners.
 - `POST /internal/v1/sessions/{id}/tools/calls` — authorize one tool call. The answer is a recorded result or a dispatch with an idempotency key, a timeout, and for a sidecar a call token.
 - `POST /internal/v1/sessions/{id}/tools/calls/complete` — the result of a locally dispatched call.
-- `* /internal/v1/mcp/{server}` — MCP HTTP calls through the broker. The built-in harness uses it to list a server's tools; alternate harnesses also call tools through it.
+- `* /internal/v1/mcp/{server}` — HTTP MCP proxy for alternate harnesses. The built-in harness does not use it: the tool gateway discovers and calls HTTP servers.
 
 No inbound path to a session pod is required. The NetworkPolicy drops all ingress.
 
@@ -51,7 +57,7 @@ sequenceDiagram
   W->>Q: Claim(n) where n = free capacity
   Q-->>W: lease
   W->>CP: Create(session options)
-  CP->>K8s: Secret + ConfigMap + NetworkPolicy + Pod
+  CP->>K8s: Secret + ConfigMap + NetworkPolicy + PVC + Pod
   W->>Q: Ack, Nack, or Release
 ```
 
@@ -59,12 +65,44 @@ Properties:
 
 - Delivery key: `X-GitHub-Delivery`, Slack `trigger_id`, or an `Idempotency-Key` header. The same key accepted twice stores one job; the second response reports `duplicate: true`.
 - Capacity: a worker claims only when `sessions.max_concurrent` has a free slot. A race returns `ErrCapacity`, which releases the job without counting an attempt.
-- Retry: failures back off from `queue.retry_base`, doubling to ten minutes. A job that reaches `queue.max_attempts` is buried and appears in `queue.dead`.
+- Retry: failures back off from `queue.retry_base`, doubling to ten minutes. A job that reaches `queue.max_attempts` is buried in the dead set.
 - Visibility: a worker that dies mid-job loses its lease after `queue.visibility_timeout`; the job becomes claimable again. Delivery is at least once: if a worker creates the session and stops before acknowledging the job, the job runs again after the timeout. A lease that expired cannot reschedule a job another worker now holds.
 - Correlation: the job id is stored on the session (`trigger.job_id`), and the queue keeps a completed record for `queue.tombstone_ttl`, so either side can be found from the other.
 - Dead letters: a job that exhausts `queue.max_attempts` is buried with its last error. `GET /api/v1/queue/dead` lists buried jobs; the admin API can retry or delete them.
 - Crash safety: `bbolt` and `redis` survive a control-plane restart. The `memory` backend does not.
 - Lease renewal: while a handler runs, the worker extends its lease every third of `queue.visibility_timeout` (`Store.Extend`), so `visibility_timeout` detects a crashed worker instead of bounding job length. Each handler has its own deadline: `sources.job_timeout` for schedule jobs, 5 minutes for other kinds. A renewal that fails leaves the old lease to expire, and settling with a lease another worker now holds is rejected.
+
+## Queue producers and the admin API
+
+The queue has three producers. All of them write the same versioned envelope, `job.v1` ([queue-jobs.md](queue-jobs.md), schema in `api/job.v1.schema.json`), and the same worker runs every job:
+
+| Producer | Kind | Idempotency key |
+|---|---|---|
+| Webhook intake (`POST /hooks/{name}`) | `session.create` | The sender's delivery key |
+| Scheduler, on a cron slot or `POST /api/v1/schedules/{name}/run` | `source.run` | `schedule:<name>:<slot>` for a slot; random for a manual run |
+| Your own system, writing to the queue backend directly (`redis` while `mayflyd` runs, because `bbolt` locks its file) | `session.create` | The envelope's `idempotency_key`, if set |
+
+The API, CLI, and web UI do not use the queue: `POST /api/v1/sessions` creates a session directly and gets `429` with `Retry-After` when `sessions.max_concurrent` is full.
+
+The worker decodes each envelope before it runs it. A payload that does not decode, an unknown major version, or an unknown kind is buried with the reason, so one bad job cannot stop the queue. A job id is also the session idempotency key, so a job that runs twice after a crash starts one session.
+
+The queue admin API reads and repairs the queue without access to the backend:
+
+| Route | Scope | Purpose |
+|---|---|---|
+| `GET /api/v1/queue` | `queue:read` | Pending, leased, and dead counts, and the oldest pending job |
+| `GET /api/v1/queue/jobs/{id}` | `queue:read` | One job, including a completed job and its `session_id` for `queue.tombstone_ttl` |
+| `GET /api/v1/queue/dead` | `queue:read` | Buried jobs with their last error, newest first |
+| `POST /api/v1/queue/dead/{id}/retry` | `queue:write` | Requeue a buried job with its attempt count reset |
+| `DELETE /api/v1/queue/dead/{id}` | `queue:write` | Drop a buried job |
+
+## Schedules and sources
+
+A schedule is a key of an agent manifest: a five-field UTC cron expression, a source, and a prompt template. A source chain is declared in the bundle (connections, sources, `extends`, fanout, extract, filter, change tracking), so provider knowledge lives in YAML, not Go. See [sources.md](sources.md).
+
+On each slot the scheduler writes one `source.run` job. The worker runs the source chain in the control plane with the connection's credentials, writes the run artifact `runs/<schedule>/<run id>.json` to the artifact store, and creates a session only when the change totals match the schedule's `triggerOn`. The session mounts the run artifact read-only, and the agent reads it with `read_artifact`. A retried job reads the stored artifact instead of calling the providers again, because a provider's change tracking reports a change only once.
+
+The scheduler keeps the last accepted slot of each schedule in a bbolt watermark (`sources.state_path`). Each slot is accepted once, so a restart cannot run the same slot twice. After downtime the scheduler catches up the most recent missed slot, up to seven days back. A schedule job has its own deadline, `sources.job_timeout`, and each source step `sources.timeout`.
 
 ## Lifecycle
 
@@ -79,14 +117,14 @@ sequenceDiagram
 
   Hook->>CP: queued job (webhook) or POST /api/v1/sessions
   CP->>CP: create id, scoped token, session.json
-  CP->>K8s: Secret + ConfigMap + NetworkPolicy + Pod
+  CP->>K8s: Secret + ConfigMap + NetworkPolicy + PVC + Pod
   CP-->>UI: session id + URL
   A->>CP: GET inbox (SSE)
   CP-->>A: initial prompt
   A->>CP: POST events (assistant, tools)
   UI->>CP: WebSocket attach + messages
   CP-->>A: messages over inbox
-  A->>CP: LLM and MCP requests (brokered)
+  A->>CP: LLM calls (broker), tool calls (gateway)
   UI->>CP: POST close
   CP-->>A: close control event
   A->>A: build tar.gz bundle
@@ -103,6 +141,16 @@ tool grant from the gateway, connects the session's sidecars with the discovery
 tokens the grant carries, and compares each plugin's `tools/list` with the
 manifest. A required plugin that is unavailable fails the session; an optional
 one records a `system` event and its tools are not offered.
+
+## Credential broker
+
+The runtime holds one credential: a random session token, stored in the session's Secret and indexed by SHA-256 in the control plane. Every upstream credential stays in `mayflyd`.
+
+- Model calls go to `POST /internal/v1/llm/chat/completions`. The broker sets the request's model to the session's assigned model, refuses any other model, injects `llm.api_key_env` and `llm.headers`, and streams the response. `llm.timeout` bounds the connection and the wait for response headers; a streamed body runs until the session disconnects. For several providers, point `llm.base_url` at LiteLLM ([providers.md](providers.md)).
+- HTTP MCP servers are called by the tool gateway with headers resolved from `env:` references at startup. `* /internal/v1/mcp/{server}` proxies the same servers for alternate harnesses, which bypass the gateway.
+- Object-store credentials are used only by the control plane, which uploads bundles and run artifacts.
+
+The session token is removed from the index when the session finalizes or is deleted. [security.md](security.md#credential-boundary) lists what it authorizes.
 
 ## Tool gateway
 
@@ -131,7 +179,9 @@ Service plugins are rendered from the bundle by `internal/pluginsvc`: a
 Deployment, a Service, a NetworkPolicy, and a gateway key Secret. Reconcile runs
 at startup and every `plugins.reconcile_interval`. Sidecar call tokens are
 signed with the session's `gateway-key`; service call tokens with the
-per-plugin key. The audit record carries neither arguments nor results.
+per-plugin key.
+
+Before a call is dispatched the gateway applies, in order: the grant (a tool outside it is refused and counted as `tool="unknown"` in `mayfly_gateway_calls_total`), the plugin's `limits.rate` token bucket per session (`rate_limited`, `429` with `Retry-After`), and the process-wide in-flight cap `plugins.max_inflight_calls` (`busy`, `503`; the runtime retries within its budget). A replayed ledger result is not counted. Each call writes one `call.begin` and one `call.done` audit record to the process log, and to `plugins.audit_path` when set. The audit record carries neither arguments nor results.
 
 If the gateway is unreachable, the runtime retries within a five-minute budget
 and exits without finalizing, so a replacement container resumes the turn.
@@ -211,7 +261,7 @@ A runtime can finalize straight from `running` without a close request. The buil
 
 `finalize` runs once per session; later reports are ignored. The manager maps a successful runtime finalize to `expired` when the close reason was `expired` or the reported reason is `ttl` or `expired`. A fallback export ends in `expired` when the close reason was `expired`, otherwise `failed`.
 
-If `runner.Start` fails, `Create` marks the session `failed` immediately and returns the error; a queued webhook job is then retried (`Nack`). A `pending` session moves to `running` only when its runtime authenticates to the control plane. If the runtime has not connected within `sessions.connect_timeout` (default `2m`, measured from when the pod reaches `Running`, or from launch on the local backend), the manager exports a partial artifact, stops the container, and marks the session `failed`, which releases its capacity slot.
+If `runner.Start` fails, `Create` marks the session `failed` immediately and returns the error; a queued webhook job is then retried (`Nack`). A `pending` session moves to `running` only when its runtime authenticates to the control plane. If the runtime has not connected within `sessions.connect_timeout` (default `2m`, measured from launch, so time the pod spends `Pending` counts), the manager exports a partial artifact, stops the container, and marks the session `failed`, which releases its capacity slot.
 
 The manager writes each transition to the session record store (`sessions.records`: `bbolt` at `sessions.db` beside the journal, or `memory`). A record holds the fields `List` and `Get` serve, including the artifact metadata, and no token: an adopted session reads its token back from its Secret, and a finalized session does not accept one. At startup the manager adopts pods first and then loads the store. A finished record becomes a list entry. A record for a session that adoption did not rebuild is marked `failed`, because no runtime can continue its turn. Records leave the store after `sessions.retention`; artifact metadata leaves after `artifacts.index_retention`. A record this build cannot read stops startup rather than serving a partial list.
 
@@ -227,7 +277,7 @@ The runtime receives only `user_message` and `control` events on its inbox. This
 
 An event may carry a per-event `step_key`. The hub drops a repeat of the same key within a session, so a step that executed but did not reach the journal before a crash cannot post its assistant or tool message twice. Restore uses the same keys, so a retried journal append cannot duplicate an event that adoption already showed. Streaming `assistant_delta` events have no key and may repeat for the interrupted step. The internal events endpoint has no batch-level key.
 
-Retention is bounded per session (`sessions.event_buffer`, default 5000 events). Finalized sessions are dropped from memory after `sessions.retention` (default `30m`); live session records and thread buffers are lost on restart. On adoption, the last journaled turn's events are replayed into the new thread (without entering the inbox), so a control-plane restart does not lose the in-flight turn from the UI. Durable history is the artifact bundle plus the journal.
+Retention is bounded per session (`sessions.event_buffer`, default 5000 events). Finalized sessions are dropped from memory after `sessions.retention` (default `30m`). Thread buffers are lost on restart; session records survive it in the record store (see [State model](#state-model)). On adoption, the last journaled turn's events are replayed into the new thread (without entering the inbox), so a control-plane restart does not lose the in-flight turn from the UI. Durable history is the artifact bundle plus the journal.
 
 ## Artifact format
 
@@ -260,7 +310,53 @@ Retention is bounded per session (`sessions.event_buffer`, default 5000 events).
 | TTL elapses | Close with reason `expired`; runtime finalizes; status becomes `expired` |
 | SIGTERM or SIGINT | A drain, eviction, preemption, or `kubectl delete` is not a close. The runtime stops the turn, closes its logs, and exits non-zero without finalizing, so the control plane starts a replacement. It finalizes when a close control event was received, or with its full bundle when the session cannot resume (`sessions.max_restarts: 0`, or a Kubernetes session without a persistent workspace) |
 
-The local backend uses a child process, a per-session state directory, and the same HTTP protocol. It provides no isolation and is for development and tests only. The state directory, including `conversation.jsonl`, survives a child restart, so a replacement resumes the journaled turn.
+## Runtime backends
+
+`runtime.backend` selects how a session runs. Both backends speak the same `/internal/v1` protocol, so the control plane, journal, and gateway behave the same.
+
+| | `kubernetes` (default) | `local` |
+|---|---|---|
+| Unit | One pod per session in `sessions.namespace`, from `runtime.image` or the agent manifest's image (checked against `agents.allowed_images`) | One child process of `mayflyd` per session, from `runtime.agent_binary` |
+| Per-session objects | Secret (session token and gateway signing keys), ConfigMap (`session.json`), NetworkPolicy (`runtime.network_policy`), and a workspace PersistentVolumeClaim when `sessions.persistent_workspace` is on | A state directory under `runtime.state_dir` |
+| Isolation | Non-root container, no service-account token, ingress denied, egress limited to DNS, the control plane, and `runtime.egress` CIDRs | None. The child gets a minimal environment, but shares the host's network and filesystem |
+| Plugins | `inline` copied in by an init container, `sidecar` as a native sidecar, `service` as a reconciled Deployment | `inline` and `sidecar` as children of the runtime; `service` as a child of `mayflyd` on a Unix socket |
+| Restart | A replacement pod with the same objects and claim, up to `sessions.max_restarts` | A replacement process in the same state directory |
+| Adoption | Pods labeled `mayfly.io/managed=true` are adopted after a control-plane restart | Not supported |
+
+The local backend is for development and tests only. The state directory, including `conversation.jsonl`, survives a child restart, so a replacement resumes the journaled turn.
+
+## Storage
+
+Every store the control plane writes carries a format version ([configuration.md](configuration.md#persisted-formats)). The chart puts every file on one control-plane PersistentVolume at `/var/lib/mayfly`.
+
+| Store | Backends | Holds | Lifetime |
+|---|---|---|---|
+| Queue (`queue`) | `memory`, `bbolt`, `redis` | Pending, leased, and dead jobs, dedupe keys, completed-job tombstones | Dedupe keys for `queue.dedupe_ttl`, tombstones for `queue.tombstone_ttl`, dead jobs until retried or deleted |
+| Turn journal (`journal`) | `memory`, `bbolt` | Completed turn steps, the sequence floor, the tool ledger | Deleted when the session finalizes |
+| Session records (`sessions.records`) | `memory`, `bbolt` (`sessions.db` beside the journal by default) | Session list entries and the artifact index | Records for `sessions.retention`; the artifact index for `artifacts.index_retention` |
+| Schedule watermark (`sources.state_path`) | bbolt file, or memory when empty | Last accepted slot per schedule | Kept |
+| Artifacts (`artifacts`) | `local`, `s3` (any S3-compatible store) | Session bundles and schedule run artifacts | Managed by you |
+| Skill cache (`skills.cache_dir`) | Directory of `<sha256>.tar.gz` files | Verified skill source archives | Entries no configured source names are deleted at startup |
+
+`bbolt` locks its file, so one control-plane replica owns each file. Run one replica.
+
+## API authentication and the web UI
+
+Every `/api/v1` route requires one scope: `sessions:read`, `sessions:write`, `queue:read`, `queue:write`, `schedules:read`, or `schedules:write`. `admin` grants all of them and is also required for `/metrics` on the main port. Tokens are named in `server.tokens`, each with its scopes, a `secret_env`, and an optional `expires_at`. With no `server.tokens`, the secret in `server.token_env` (`MAYFLY_API_TOKEN`) is one `admin` token named `default`. Tokens are compared in constant time and never logged.
+
+The web UI sends a token once to `POST /api/v1/auth/session` and gets two cookies: `mayfly_session` (HttpOnly) and `mayfly_csrf`, both `SameSite=Strict` and `Secure` over https. The session lives in control-plane memory for up to 12 hours, capped by the token's expiry, and carries the token's scopes. A cookie-authenticated mutating request must send `X-Mayfly-CSRF` with the `mayfly_csrf` value and pass an `Origin` check. A request with a bearer header is authenticated by that header alone. A restart signs every browser out.
+
+Every authenticated mutating request writes one `audit` log line with the token name, `via` (`bearer` or `web`), route, target, status, and request id. The attach WebSocket uses a one-time ticket from `POST /api/v1/sessions/{id}/attach-ticket`. See [security.md](security.md#api-authentication).
+
+## Skills
+
+Skills are Markdown files from `skills.dirs` and from pinned `skills.sources` tar.gz archives. The control plane fetches each archive at startup, checks it against the configured SHA-256, and stores it in `skills.cache_dir` under that digest, so a later start reads the cache and needs no network. The selected skills are written into the session's configuration and appended to the system prompt; sessions never contact the code host. See [mcp-and-skills.md](mcp-and-skills.md#skills).
+
+## Metrics and logs
+
+`/metrics` serves Prometheus metrics on `server.addr`, or on `server.metrics.address` as a listener of its own. The registry covers sessions, queue depth and attempts, HTTP requests, model calls, gateway calls, and build info, plus the Go and process collectors. Labels are bounded: `route` is the registered route template or `unmatched`, `method` is a standard HTTP method or `OTHER`, and a refused call to a tool the session does not have is `tool="unknown"`. No metric carries a session id, job id, or raw path.
+
+Each HTTP request writes one structured log line with its request id. The control plane accepts a well-formed `X-Request-Id` or generates one, and returns it in the response header and in `error.details.request_id`. `MAYFLY_LOG_LEVEL` sets the level. See [observability.md](observability.md).
 
 ## Concurrency
 
@@ -274,7 +370,7 @@ The local backend uses a child process, a per-session state directory, and the s
 ## Non-goals for this version
 
 - Multi-tenant SaaS with per-user isolation.
-- Persistent, long-running agent workspaces.
+- Long-running agent workspaces that outlive a session. `sessions.persistent_workspace` keeps a workspace across container restarts within one session only.
 - Replacing commercial SRE agents.
 - Workflow DAGs. A schedule runs one source chain and starts at most one session; there is no multi-step orchestration.
 - Native GCS/Artifact Registry artifact backends.

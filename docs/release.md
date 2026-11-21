@@ -113,7 +113,7 @@ git tag -a vX.Y.Z -m "Mayfly vX.Y.Z"
 git push origin main --tags
 ```
 
-The release workflow runs on `v*` tags:
+The release workflow runs on `v*` tags. It fails when its Go toolchain is older than 1.27.4 (GO-2026-6859):
 
 - GoReleaser builds CLI archives, checksums, and the GitHub release.
 - Docker Buildx builds multi-arch control-plane and agent images with SBOM and provenance, and pushes them by digest without tags.
