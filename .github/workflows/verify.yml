@@ -1,0 +1,97 @@
+name: verify
+
+# Formal verification of the session lifecycle. Two jobs:
+#
+#   tlc           TLC on spec/tla for pull requests and pushes that touch the
+#                 protocol, the journal, the gateway, or the model itself.
+#   fuzz-nightly  every native Go fuzz target, nightly and on demand, because
+#                 fuzzing for a minute on a PR is not worth the minutes.
+#
+# The model runs in hack/tlc.sh; the targets in hack/fuzz.sh.
+
+on:
+  push:
+    paths:
+      - "spec/**"
+      - "internal/session/**"
+      - "internal/journal/**"
+      - "internal/queue/**"
+      - "internal/gateway/**"
+      - "internal/runner/**"
+      - "hack/tlc.sh"
+      - ".github/workflows/verify.yml"
+  pull_request:
+    paths:
+      - "spec/**"
+      - "internal/session/**"
+      - "internal/journal/**"
+      - "internal/queue/**"
+      - "internal/gateway/**"
+      - "internal/runner/**"
+      - "hack/tlc.sh"
+      - ".github/workflows/verify.yml"
+  schedule:
+    # Daily at 04:17 UTC; e2e-stability runs on Sunday at 06:00.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: Duration for each fuzz target
+        required: false
+        default: "60s"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  tlc:
+    name: tlc
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/tla
+          key: tla2tools-v1.7.4
+      - name: TLC
+        env:
+          TLA_CACHE_DIR: ${{ runner.temp }}/tla
+        run: hack/tlc.sh
+
+  fuzz-nightly:
+    name: fuzz
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+      - name: locate the Go build cache
+        id: gocache
+        run: echo "path=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: ${{ steps.gocache.outputs.path }}/fuzz
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-
+      - name: fuzz
+        env:
+          FUZZTIME: ${{ github.event.inputs.fuzztime || '60s' }}
+        run: hack/fuzz.sh
+      - name: upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashers-${{ github.run_id }}
+          path: "**/testdata/fuzz/**"
+          if-no-files-found: ignore
