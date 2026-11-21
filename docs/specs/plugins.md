@@ -1,6 +1,6 @@
 # Plugins: implementation spec
 
-Status: Implemented; shipped in 0.1.0
+Status: Implemented; first released in 0.2.0 (0.1.0 shipped only as release candidates)
 Audience: Mayfly maintainers
 User docs: [../plugins.md](../plugins.md) describes the behavior users see.
 

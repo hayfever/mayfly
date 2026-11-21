@@ -9,11 +9,11 @@ Mayfly turns events into short-lived agent sessions. A session has one prompt, o
 The system has four layers, all in one control-plane process, `mayflyd`:
 
 1. **Trigger.** `POST /hooks/{name}` verifies a GitHub, Slack, Datadog, or generic webhook, spends one rate-limit token, and stores a job. The sender gets `202` (or Slack's in-channel reply) as soon as the job is committed. No pod exists yet. `POST /api/v1/sessions` (API, CLI, web UI) skips this layer and creates a session synchronously.
-2. **Queue.** `queue.Store` holds jobs durably (`memory`, `bbolt`, or any Redis-protocol server). `queue.Worker` leases jobs only when the session cap has room, and dispatches each job to its handler: `session.Manager.Create` for a webhook, or the workflow runner for a scheduled source run.
-3. **Schedule.** `internal/workflow` compiles each scheduled source plan at startup. A timer enqueues one `source` job per cron slot, and the worker runs the plan, writes a run artifact, and creates a session only when the change totals match `triggerOn`.
-4. **Session.** `session.Manager` resolves the agent, model, skills, and MCP servers, then starts the runtime through a `runner.Runner` (one Kubernetes pod with its own Secret, ConfigMap, and NetworkPolicy, or a child process). It tracks the session until a terminal state, stores the artifact bundle, and deletes the resources.
+2. **Queue.** `queue.Store` holds jobs durably (`memory`, `bbolt`, or any Redis-protocol server) as versioned `job.v1` envelopes ([docs/queue-jobs.md](docs/queue-jobs.md)). Webhooks, schedules, and your own producers write them. `queue.Worker` leases jobs only when the session cap has room, and dispatches each job to its handler: `session.Manager.Create` for a webhook, or the workflow runner for a scheduled source run.
+3. **Schedule.** `internal/workflow` compiles each scheduled source plan at startup. A timer enqueues one `source.run` job per cron slot, and the worker runs the plan, writes a run artifact, and creates a session only when the change totals match `triggerOn`.
+4. **Session.** `session.Manager` resolves the agent, model, skills, and MCP servers, then starts the runtime through a `runner.Runner` (one Kubernetes pod with its own Secret, ConfigMap, NetworkPolicy, and workspace claim, or a child process). It tracks the session until a terminal state, stores the artifact bundle, and deletes the resources.
 
-Inside the container, `mayfly-harness` reads `session.json` and execs either a named harness from `/opt/mayfly/harnesses` or the built-in `mayfly-agent`. The runtime only makes outbound calls to `/internal/v1/...` with a per-session token. It streams events, reads its inbox, calls the LLM and HTTP MCP servers through the control plane's credential broker, then uploads a bundle and reports finalize.
+Inside the container, `mayfly-harness` reads `session.json` and execs either a named harness from `/opt/mayfly/harnesses` or the built-in `mayfly-agent`. The runtime only makes outbound calls to `/internal/v1/...` with a per-session token. It streams events, reads its inbox, calls the LLM through the control plane's credential broker and every non-built-in tool through the tool gateway, then uploads a bundle and reports finalize.
 
 A turn is executed as ordered journaled steps. The journal lives in the control plane (bbolt by default) and records each completed `user`, `llm`, `tool:<name>`, and `assistant` step with the conversation length it produced. A replacement container resumes the interrupted turn: it truncates `conversation.jsonl` to the last recorded length, replays the turn's event from the journal, applies recorded steps, and executes only the missing ones.
 
@@ -25,7 +25,7 @@ A turn is executed as ordered journaled steps. The journal lives in the control 
 - `cmd/mayfly-harness`: image entrypoint. It is a thin wrapper over `internal/harness`. A failure is written to `/dev/termination-log` so the control plane can report it.
 - `cmd/mayfly-agent`: the built-in session runtime, a thin wrapper over `internal/agent`.
 - `cmd/mayfly-plugin-shim`: `install-self` and `copy` stage plugin trees into a pod; `serve` supervises a stdio plugin and serves streamable HTTP MCP on a Unix socket or TCP; `probe` is the startup and readiness probe.
-- `cmd/mayfly`: CLI (`run`, `ls`, `get`, `events`, `attach`, `send`, `close`, `delete`, `artifact`, `agents`). It only talks to the public API. `plugin init|check|test` works offline against `local.command`.
+- `cmd/mayfly`: CLI (`run`, `agents`, `ls`, `get`, `events`, `attach`, `send`, `close`, `delete`, `artifact`, `transcript`, `version`). `testdata/cli-surface.txt` records its frozen surface. It only talks to the public API. `plugin init|check|test` works offline against `local.command`.
 - `cmd/llmstub`, `cmd/mcpstub`: deterministic stub servers for k3d and local runs.
 
 ### Control plane
@@ -33,7 +33,10 @@ A turn is executed as ordered journaled steps. The journal lives in the control 
 - `internal/httpapi`: all HTTP routes, registered in `server.go`.
   - `webhook.go`: the trigger-to-queue path (`receiveWebhook`).
   - `api.go`: the public session API.
-  - `queueadmin.go`: job lookup and dead-letter retry and delete.
+  - `queueadmin.go`: queue stats, job lookup, and dead-letter list, retry, and delete.
+  - `schedules.go`: the schedule list and manual run.
+  - `auth.go`, `websession.go`: scoped bearer tokens, the web UI session cookie and CSRF check, and the audit line.
+  - `observe.go`: request ids, the request log line, and HTTP metrics.
   - `internal.go`: the runtime-facing endpoints, including the turn journal, the tool grant, and the tool call routes.
   - `ws.go`: WebSocket attach.
   - `web/`: the embedded UI.
@@ -42,6 +45,7 @@ A turn is executed as ordered journaled steps. The journal lives in the control 
 - `internal/gateway`: the tool choke point. `GrantFor` builds a session's tool table from `session.json` and `mcp.servers`; `Begin` and `Complete` implement the ledger resume table; `limits.go` holds the per-session plugin rate limiters and the in-flight cap; `token.go` signs and verifies call tokens; `audit.go` writes the call records; `remote.go` holds one upstream MCP client per session and server and calls service and HTTP `mcp.servers` tools.
 - `internal/triggers`: `Parse` verifies a webhook (HMAC or token per type, or `allow_unsigned`) and returns a `Result` with `session.CreateOptions`, an optional Slack URL-verification `Challenge`, and a `DeliveryKey`. The key is `X-GitHub-Delivery`, Slack `trigger_id`, or the `Idempotency-Key` header. Prompts are rendered from the trigger's `template` with `triggers.Data`.
 - `internal/ratelimit`: the token bucket behind per-trigger `rate_limit`. A nil `*Limiter` allows everything.
+- `internal/metrics`: the Prometheus registry, its collectors, and the label rules (`OTHER` for a non-standard method, `unmatched` for an unknown route).
 - `internal/queue`: the durable intake.
   - `queue.go`: `Job`, `Lease`, `Record`, `State`, the `Store` interface, `NewJob`, and `Backoff`.
   - Backends: `memory.go`, `bbolt.go` (buckets `jobs`, `ready`, `seen`, `dead`, `done`, expiry indexes, and a `meta` format stamp) and `redis.go` (Lua scripts for accept, claim, and settle, with keys hash-tagged by `key_prefix`, plus a `format_version` key). `format.go` reads and stamps the layout version.
@@ -66,6 +70,7 @@ A turn is executed as ordered journaled steps. The journal lives in the control 
 - `internal/artifact`: the `Store` interface (`Put`, `Get`), with `localStore` and an S3-compatible store in `s3.go`. `Key` names a bundle.
 - `internal/agents`: loads agent manifests (YAML or JSON) from `agents.dirs` into `Agent` values with a prompt template.
 - `internal/skills`: loads Markdown skills from directories and from pinned tar.gz sources that are checked against a SHA-256.
+- `internal/prompt`: Go template parsing for agent prompts and schedules.
 - `internal/config`: the `Config` tree, `Load`, defaults, validation, and `env:` secret resolution. `repo.go` turns a repo reference into an archive URL.
 
 ### Shared types
@@ -74,6 +79,7 @@ A turn is executed as ordered journaled steps. The journal lives in the control 
 - `internal/sessioncfg`: the `session.json` document (`Config`) passed from control plane to runtime, its `Validate`, and the reserved env vars `MAYFLY_CONFIG` and `MAYFLY_SESSION_TOKEN`.
 - `internal/bundle`: the tar.gz bundle writer. `manifest.json` is written last. The runtime and the control-plane fallback export both use it.
 - `internal/version`: build metadata set by ldflags.
+- `internal/textutil`: small string helpers.
 
 ### Session runtime
 
@@ -88,16 +94,16 @@ A turn is executed as ordered journaled steps. The journal lives in the control 
 - `internal/pluginhost`: inline and sidecar plugin members. `host.go` starts an inline plugin with an exact environment, verifies its `tools/list`, restarts it within the manifest budget, and calls a tool with `_meta`; `sidecar.go` connects to the shim over a Unix socket with discovery and call tokens; `env.go` builds the environment; `stderr.go` caps the stderr file.
 - `internal/platformclient`: the runtime's HTTP client for events, the SSE inbox, artifact upload, finalize, the turn journal, and the tool gateway (`Tools`, `BeginCall`, `CompleteCall`). Journal and gateway requests retry so a control-plane replacement delays a step rather than losing it.
 - `internal/llm`: the OpenAI-compatible chat completions client.
-- `internal/mcp`: MCP clients. `stdio.go` runs servers inside the container and supports an exact environment, `_meta`, cancellation, and an exit channel. `http.go` reaches servers through the broker, with an optional custom client and a Unix-socket dialer for the shim. `manager.go` starts them all and applies the `tools` allowlist.
+- `internal/mcp`: MCP clients. `stdio.go` runs servers inside the container and supports an exact environment, `_meta`, cancellation, and an exit channel. `http.go` is the streamable HTTP client: the gateway uses it for HTTP `mcp.servers` and service plugins with the broker's transport, and the runtime uses it with a Unix-socket dialer for sidecars. `manager.go` starts them all and applies the `tools` allowlist.
 - `internal/stub`: the LLM and MCP stubs used by tests and k3d. They are not on the production path.
 
 ### Everything else
 
 - `deploy/helm/mayfly`, `deploy/k8s`: Helm chart (optional LiteLLM) and kustomize base with a local overlay.
 - `deploy/terraform/civo`: example Terraform for a one-node Civo cluster with Cilium, sized for Mayfly and the e2e suite. It is an example, not a supported deployment target.
-- `hack/`: `run-local.sh`, `k3d-up.sh`, `e2e.sh`.
+- `hack/`: `run-local.sh`, `k3d-up.sh`, `e2e.sh`, `stress.sh`, the API, job schema, and CLI surface diff gates (`api-diff.sh`, `job-schema-diff`, `surface-diff.sh`), the `apidoc` generator for `docs/api-reference.md` (from `internal/apidoc`), and the `loadtest` driver.
 - `e2e/`: the end-to-end suite (build tag `e2e`), its Helm values, and fixtures. See `docs/testing.md`.
-- `test/integration`: an in-process end-to-end test, `TestWebhookToArtifact`.
+- `test/integration`: in-process end-to-end tests, such as `TestWebhookToArtifact`, the local resume tests, and plugin tests. `test/compat`: persisted-format compatibility fixtures ([docs/development.md](docs/development.md#compatibility-fixtures)).
 - `docs/`: user-facing docs. `docs/architecture.md` has the sequence diagrams.
 
 ## Job lifecycle
@@ -125,7 +131,7 @@ Queue:
 
 - A webhook is answered only after `Store.Accept` commits, and nothing on the request path talks to Kubernetes. `Manager.Validate` runs before accept so the sender hears about a bad request, and `Create` checks it again when the job runs.
 - A rate-limit token is spent only after `triggers.Parse` verifies the request.
-- A job with a delivery key has ID `d-` + the first 16 bytes of `sha256(trigger + "\x00" + delivery)` in hex. Dedupe is therefore per trigger. The dedupe key lives for `dedupe_ttl` (default 72h) regardless of what happens to the job afterwards. A job without a key gets a random ID and is never deduplicated.
+- A webhook job with a delivery key has ID `d-` + the first 16 bytes of `sha256(trigger + "\x00" + delivery)` in hex. Dedupe is therefore per trigger. A schedule job uses `s-` and the scope `schedule` instead of the trigger name. The dedupe key lives for `dedupe_ttl` (default 72h) regardless of what happens to the job afterwards. A job without a key gets a random ID and is never deduplicated.
 - `max_jobs` (default 1000) counts queued and leased jobs only. Done and dead jobs do not count.
 - Delivery is at least once. A lease is identified by its deadline. In bbolt that is the `ready` key, in Redis the sorted-set score, and in memory `readyAt`. `Nack` and `Release` succeed only while that deadline is still current, and otherwise return `ErrLeaseLost`. `Ack` does not check the lease. If a worker creates a session and then dies before `Ack`, the job runs again after `visibility_timeout` (default 5m, minimum 2m). While a handler runs, the worker renews its lease every third of `visibility_timeout`, so the timeout detects a crashed worker instead of bounding job length. Each job kind has its own deadline: `sources.job_timeout` for schedule jobs, 5 minutes for other kinds.
 - The worker never claims more than `min(concurrency, FreeSlots()) - inflight`. Hitting the session cap is not a failure: `ErrCapacity` becomes `ErrRetryLater`, and the job is released after `5 x poll_interval` without spending an attempt.
@@ -173,10 +179,10 @@ Process:
 
 **Configuration.** `config.Load` decodes YAML with unknown fields rejected, applies defaults, then validates. Secrets are referenced by env var name (`*_env` fields such as `token_env`, `secret_env`, `api_key_env`, `password_env`, or `env:NAME` header values) and resolved in the control plane only. `sessioncfg.Config` is the only configuration a runtime sees.
 
-**Storage.** There are three separate stores with separate lifetimes:
+**Storage.** Each store has its own lifetime:
 
 - The queue store (`queue.backend`). `memory` loses jobs on restart. `bbolt` and `redis` survive it.
-- The journal store (`journal.backend`). `memory` is for tests; `bbolt` survives a control-plane restart. It holds the completed steps of every turn of an active session so a replacement runtime can resume, and deletes them when the session finalizes. It also holds each session's reserved sequence floor.
+- The journal store (`journal.backend`). `memory` is for tests; `bbolt` survives a control-plane restart. It holds the completed steps of every turn of an active session so a replacement runtime can resume, and deletes them when the session finalizes. It also holds each session's reserved sequence floor and the tool ledger.
 - The schedule state store (`sources.state_path`), a bbolt file with one watermark per schedule. It must sit on the same PersistentVolume as the queue and journal. Without it a restart forgets the watermark and the catch-up window restarts.
 - The session record store (`sessions.records`, default `bbolt` beside the journal). It holds one record per session, with the fields `List` and `Get` serve, plus the artifact index. Finished sessions are dropped after `sessions.retention`, but artifact metadata outlives them so downloads keep working; `artifacts.index_retention` bounds that. A record holds no token.
 - The artifact store (`artifacts.store`), either local or S3-compatible. This is the durable history of a completed session and of every schedule run (`runs/`). A stored run records its format version.
@@ -191,4 +197,4 @@ Process:
 - `test/integration` drives a webhook through the queue, a real `mayfly-agent` process on the local runner, a WebSocket attach, close, and artifact inspection, all against the stubs. `TestLocalResumeAfterKill` kills the agent with SIGKILL after its first tool call, lets the manager start a replacement, and checks that the turn completes, the journal has one entry per step, and the completed tool ran once.
 - `e2e/` (`make e2e`) runs the chart and images on k3d, where k3s's built-in controller enforces NetworkPolicy, and checks webhooks, queue durability across a control plane restart, dead letters, network isolation, and the session lifecycle. `TestSessionResumesAfterPodDeletion` deletes a running pod mid-turn and `TestControlPlaneRestartContinuesTurn` replaces `mayflyd` mid-turn; both check the replacement, the single user message, and one completed tool call.
 
-**Observability.** JSON `slog` goes to stderr, with the level set by `MAYFLY_LOG_LEVEL`. `GET /api/v1/queue` reports queue depth, and `GET /readyz` checks only that the lifecycle engine is running, not the artifact store.
+**Observability.** JSON `slog` goes to stderr, with the level set by `MAYFLY_LOG_LEVEL`. Each HTTP request logs one line with its `X-Request-Id`, and each authenticated mutating request one `audit` line. `/metrics` serves the Prometheus registry ([docs/observability.md](docs/observability.md)). `GET /api/v1/queue` reports queue depth, and `GET /readyz` checks only that the lifecycle engine is running, not the artifact store.

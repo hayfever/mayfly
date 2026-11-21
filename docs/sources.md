@@ -459,7 +459,7 @@ sources:
 | --- | --- |
 | `state_path` | bbolt file with the last accepted slot for each schedule. Empty keeps it in memory, which loses catch-up state on restart |
 | `max_artifact_bytes` | Cap for one run artifact. Default 16 MiB |
-| `concurrency` | Parallel fanout requests per source. Default 1. The shipped configs set 4 |
+| `concurrency` | Parallel fanout requests per source. Default 4 |
 | `timeout` | Deadline for one source step, every page and fanout request included. Default 15m |
 | `job_timeout` | Deadline for one schedule job: every step plus session creation. Must be at least `timeout`. Default 30m. The worker renews the job lease while it runs |
 

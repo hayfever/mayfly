@@ -10,7 +10,7 @@
 ## Commands
 
 ```bash
-make build     # bin/mayflyd, mayfly-agent, mayfly, llmstub, mcpstub
+make build     # bin/: mayflyd, mayfly-agent, mayfly, mayfly-harness, mayfly-plugin-shim, llmstub, mcpstub
 make test      # unit and integration tests
 make vet
 golangci-lint run ./...  # lint; CI pins v2.15.0
@@ -40,7 +40,9 @@ make cluster-down
 | `internal/triggers` | GitHub, Slack, Datadog, generic verification and prompts |
 | `internal/mcp` | stdio helper process, HTTP transport, tool naming |
 | `internal/broker` | model allowlist, streaming passthrough, MCP header injection |
-| `examples/litellm` | LiteLLM gateway configuration and deployment example |
+| `internal/queue` | every store test against memory, bbolt, and Redis (miniredis, or `MAYFLY_REDIS_TEST_URL`); the job envelope against `api/job.v1.schema.json` |
+| `internal/gateway`, `internal/journal` | grant checks, ledger resume table, call tokens, rate limits; journal and ledger storage |
+| `test/compat` | stores and envelopes written by earlier releases still load |
 | `test/integration` | webhook → queue → worker → real agent process → MCP → WebSocket → close → artifact |
 | `e2e` (`make e2e`) | released images and chart on a real cluster: webhooks, queue durability, dead letters, isolation, lifecycle; see [testing.md](testing.md) |
 | `e2e` upgrade test | the last published release upgraded to HEAD; set `MAYFLY_E2E_UPGRADE_FROM` and see [testing.md](testing.md#upgrade-test) |
@@ -133,7 +135,7 @@ New tools or integrations must not put long-lived credentials in the session con
 ## Style
 
 - Keep the control plane and runtime separated by the HTTP protocol.
-- Prefer standard library APIs; dependencies are limited to client-go, gorilla/websocket, and yaml.v3.
+- Prefer standard library APIs. [CONTRIBUTING.md](../CONTRIBUTING.md) lists the current direct dependencies.
 - Log structured JSON with `log/slog`.
 - Make lifecycle transitions idempotent. The runtime and control plane can race on close, crash, and timeout.
 

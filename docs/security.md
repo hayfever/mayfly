@@ -207,6 +207,8 @@ The session token is a random 32-byte value. It is stored in a per-session Kuber
 
 - writing events for that session,
 - reading that session's inbox,
+- reading and appending that session's turn journal,
+- reading the artifacts mounted on that session,
 - uploading that session's artifact,
 - finalizing that session,
 - model calls,
@@ -349,7 +351,7 @@ A verified webhook becomes one queued job and is answered immediately. Replay pr
 - Single tenant. There is no user identity or per-user authorization. Tokens carry scopes, not users. The tool gateway logs one record per non-built-in tool call, without arguments or results. Built-in tool calls are not audited.
 - No TLS termination or authentication proxy. Put Mayfly behind an ingress with OIDC/SSO and TLS.
 - The token from `server.token_env` has the admin scope. Prefer named tokens with narrow scopes, rotate each secret, and mount the secrets from a Secret.
-- Session history is in memory and is dropped after `sessions.retention` (`30m` by default). The journal keeps the completed steps of every turn of an active session in the control-plane database for resume, and is deleted when the session finalizes; the artifact bundle is the durable history. Artifact metadata stays available until the control plane restarts; the live thread does not.
+- A finished session's record leaves the session list after `sessions.retention` (`30m` by default). With `sessions.records.backend: bbolt` the record and the artifact index survive a restart; with `memory` they do not. The live event thread is in memory and is not restored after a restart, except the last journaled turn of a session that is adopted. The journal keeps the completed steps of every turn of an active session for resume and is deleted when the session finalizes; the artifact bundle is the durable history.
 - No image signature verification, admission policy, or runtime sandbox beyond the Kubernetes security context.
 - No per-session egress allowlist beyond the configured static CIDRs and the control plane. Service plugins get their own NetworkPolicy, which also matches CIDRs only.
 - Plugins are trusted code. An inline plugin runs in the agent container, a sidecar shares the session pod's kernel, and a service runs with its own credentials.

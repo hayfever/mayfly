@@ -366,8 +366,9 @@ The plugin's code is not read from the bundle. It comes from `image`.
 
 ## Manifest reference
 
-The manifest format is not frozen. `schemaVersion: 1` may change during 0.x
-until outside users show it is stable. Report a compatibility problem or a
+The manifest format is not frozen, and [deprecation.md](deprecation.md) does
+not cover it. `schemaVersion: 1` may change in a minor release until outside
+users show it is stable. Report a compatibility problem or a
 missing field in a [GitHub issue](https://github.com/hayfever/mayfly/issues).
 
 ```yaml
@@ -567,8 +568,8 @@ finalizes, so a replacement container can get it back without calling the
 tool again. Audit records hold neither arguments nor results.
 
 `mcp.servers` tools use the same gateway with the built-in harness: names stay
-`mcp_<server>_<tool>`, and they get the same ledger, resume behavior, rate
-limiting, and audit records. See
+`mcp_<server>_<tool>`, and they get the same ledger, resume behavior, in-flight cap, and audit records.
+A declared rate limit (`limits.rate`) applies to plugins only. See
 [mcp-and-skills.md](mcp-and-skills.md) for `tools` and `idempotent_tools` on
 `mcp.servers` entries.
 
@@ -592,7 +593,7 @@ What the agent image provides to inline plugins:
 | Language | Inline image needs |
 |---|---|
 | Go, Rust, Zig | The static binary |
-| TypeScript, JavaScript | Compiled JavaScript and `node_modules`; `command: node`. The agent image has Node 22 |
+| TypeScript, JavaScript | Compiled JavaScript and `node_modules`; `command: node`. The agent image has Node 26 |
 | Python | A frozen build (PyInstaller) or a relocatable interpreter. The agent image has no Python |
 | Anything else | The binary and its libraries, built for Debian bookworm |
 
@@ -779,7 +780,7 @@ with the manifest directory as the plugin directory:
 - Only `tools` are used. Resources, prompts, sampling, roots, and
   server-initiated requests are not supported.
 - No per-agent tool subsets, hostname egress allowlists, hot reload, or plugin
-  registry in the first release.
+  registry.
 - Plugins load at control-plane startup. Restart `mayflyd` after changing a
   manifest. A new image tag is picked up by the next session, or by the next
   reconcile for a service.

@@ -209,3 +209,8 @@ Historical: these describe 0.1.0, and many no longer apply. See the README for c
 - Sidecar and service plugin secrets stay outside the agent container. An inline plugin's secrets are files in the agent container, so an agent with `allowShell` cannot select such a plugin.
 - Sidecar calls carry a short-lived token signed with the session's `gateway-key`, which is mounted only into sidecars. Service calls carry a token signed with the per-plugin key in `mayfly-gateway-<name>`.
 - The default NetworkPolicy requires a CNI that enforces it. The e2e suite verifies enforcement.
+
+[1.0.0-rc.1]: https://github.com/hayfever/mayfly/releases/tag/v1.0.0-rc.1
+[0.3.0]: https://github.com/hayfever/mayfly/releases/tag/v0.3.0
+[0.2.0]: https://github.com/hayfever/mayfly/releases/tag/v0.2.0
+[0.1.0]: https://github.com/hayfever/mayfly/releases/tag/v0.1.0-rc.2

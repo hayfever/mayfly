@@ -59,7 +59,7 @@ A human message or the trigger message that created the session.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `kind` | string | Trigger kind. Known values are `api`, `generic`, `github`, `slack`, and `datadog`. The field is open: a client must ignore a value this build does not know. |
+| `kind` | string | Trigger kind. Known values are `api`, `generic`, `github`, `slack`, `datadog`, and `schedule`; a direct queue producer sets its own `trigger.kind`. The field is open: a client must ignore a value this build does not know. |
 | `name` | string | Trigger name. |
 | `event` | string | Trigger event name. |
 

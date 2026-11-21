@@ -29,7 +29,7 @@ kubectl -n mayfly create configmap mayfly-bundles \
 kubectl -n mayfly rollout restart deployment/mayflyd
 ```
 
-Bundles load at startup, so restart mayflyd after you change the ConfigMap. With Helm, the ConfigMap is `<chart fullname>-bundles` by default (`<release>-mayfly-bundles`); set `agents.bundlesConfigMap` to use another name.
+Bundles load at startup, so restart mayflyd after you change the ConfigMap. With Helm, the ConfigMap is `<chart fullname>-bundles` by default: `mayfly-bundles` for a release named `mayfly`, or `<release>-mayfly-bundles` when the release name does not contain `mayfly`. Set `agents.bundlesConfigMap` to use another name.
 
 To add a harness, build it into the agent image at `/opt/mayfly/harnesses/<name>` and declare `harness: <name>` in the manifest. The image entrypoint is `/usr/local/bin/mayfly-harness`; it falls back to `/usr/local/bin/mayfly-agent` when no harness is selected. No per-agent image is required.
 
@@ -216,6 +216,8 @@ Webhooks are accepted into a queue before a pod exists. Choose the backend by wh
 
 The `memory` backend loses accepted work on restart. Use it only for development.
 
+A job that exhausts `queue.max_attempts` is buried. List it with `GET /api/v1/queue/dead`, inspect it with `GET /api/v1/queue/jobs/{id}`, then retry (`POST /api/v1/queue/dead/{id}/retry`) or delete it. Buried jobs are kept until you act; size the queue volume or cache for that. Completed jobs keep a session link for `queue.tombstone_ttl`.
+
 The turn journal (`journal.bbolt.path`, default `/var/lib/mayfly/journal.db`) shares the control-plane volume, so it survives a restart with the same default persistence. Session records and the artifact index use `sessions.records.path` (default `/var/lib/mayfly/sessions.db`) on the same volume: after a restart, `GET /api/v1/sessions` still lists finished sessions and `GET /api/v1/sessions/{id}/artifact` still downloads their bundles. Disabling `persistence` loses the journal and the session records on every control-plane restart. A bundle that an older build uploaded has no index entry: the object store still holds it, but the API cannot serve it until a session uploads again. A runtime that is mid-turn still finishes its turn, but the thread history from before the restart is gone, and the session's new messages are numbered from the restart time in microseconds so none reuses the in-flight turn's key. The kustomize base (`deploy/k8s/base`) mounts the same state directory from the `mayfly-state` claim.
 
 ## Shutdown
@@ -225,8 +227,6 @@ A SIGTERM starts one stop sequence with a single budget, `server.shutdown_budget
 The pod gets `terminationGracePeriodSeconds` before SIGKILL. The chart templates that value from `shutdown.gracePeriodSeconds` (default `30`) and writes `shutdown.budgetSeconds` (default `25`) into `server.shutdown_budget`. `helm template` fails when the budget is not smaller than the grace period. Keep a few seconds of margin: the process needs time to exit after its own budget ends.
 
 With your own manifest, set both values. A budget that reaches the grace period loses the last stage to SIGKILL.
-
-A job that exhausts `queue.max_attempts` is buried. List it with `GET /api/v1/queue/dead`, inspect it with `GET /api/v1/queue/jobs/{id}`, then retry (`POST /api/v1/queue/dead/{id}/retry`) or delete it. Buried jobs are kept until you act; size the queue volume or cache for that. Completed jobs keep a session link for `queue.tombstone_ttl`.
 
 ## Operating notes
 
@@ -239,7 +239,7 @@ The control plane needs RBAC for pods, pod logs, secrets, configmaps, networkpol
 - Session pods use a dedicated ServiceAccount with no bindings and token automount disabled.
 - Set `runtime.network_policy: true` and verify your CNI enforces NetworkPolicy.
 - Add ResourceQuota and LimitRange to cap concurrent sessions.
-- Each session creates one Secret, ConfigMap, NetworkPolicy, and Pod. Cleanup happens on finalize. If the control plane dies mid-close, the pod remains until its `activeDeadlineSeconds` backstop.
+- Each session creates one Secret, ConfigMap, NetworkPolicy, Pod, and, with `sessions.persistent_workspace`, a workspace PersistentVolumeClaim. Cleanup happens on finalize. If the control plane dies mid-close, the pod remains until its `activeDeadlineSeconds` backstop.
 - Local artifacts on an EmptyDir volume are lost when the control-plane pod restarts. Use S3 for durability.
 - Artifact bundles can contain sensitive data. Apply bucket encryption, retention, and access policy.
 - The web UI exchanges the token for an in-memory session cookie; the token is not stored in the browser. A control-plane restart signs every browser out.
