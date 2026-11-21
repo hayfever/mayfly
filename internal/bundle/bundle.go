@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -68,12 +69,19 @@ func New(w io.Writer, m Manifest, fileLimit int64) *Writer {
 	}
 }
 
+// cleanName normalizes an archive entry name: it drops the leading root and
+// replaces bytes that the JSON manifest cannot represent, so the manifest
+// lists the name the archive carries.
+func cleanName(name string) string {
+	return strings.ToValidUTF8(path.Clean("/" + name)[1:], "\uFFFD")
+}
+
 // AddBytes adds an in-memory entry.
 func (b *Writer) AddBytes(name string, data []byte) error {
 	if b.closed {
 		return fmt.Errorf("bundle already closed")
 	}
-	name = path.Clean("/" + name)[1:]
+	name = cleanName(name)
 	if err := b.tw.WriteHeader(&tar.Header{
 		Name:     name,
 		Mode:     0o644,
@@ -98,7 +106,7 @@ func (b *Writer) AddDir(prefix, dir string) error {
 	if b.closed {
 		return fmt.Errorf("bundle already closed")
 	}
-	prefix = path.Clean("/" + prefix)[1:]
+	prefix = cleanName(prefix)
 	var paths []string
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -139,7 +147,7 @@ func (b *Writer) AddDir(prefix, dir string) error {
 			_ = f.Close()
 			continue
 		}
-		name := path.Join(prefix, filepath.ToSlash(rel))
+		name := strings.ToValidUTF8(path.Join(prefix, filepath.ToSlash(rel)), "\uFFFD")
 		header := &tar.Header{
 			Name:     name,
 			Mode:     0o644,

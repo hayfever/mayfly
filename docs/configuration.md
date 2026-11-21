@@ -375,8 +375,8 @@ Template data fields: `.Trigger`, `.Type`, `.Event`, `.Delivery`, `.Actor`, `.Ag
 
 Signature behavior:
 
-- `generic`: `X-Mayfly-Signature-256` HMAC-SHA256 hex, optional `sha256=` prefix, or `X-Mayfly-Token`.
-- `github`: `X-Hub-Signature-256` only. The static `X-Mayfly-Token` header is not accepted, because GitHub signs each delivery and a static token can be replayed.
+- `generic`: an HMAC-SHA256 hex signature of the body in `X-Mayfly-Signature-256` or `X-Hub-Signature-256` (optional `sha256=` prefix), or the shared secret in `X-Mayfly-Token`.
+- `github`: the same HMAC-SHA256 signature in `X-Hub-Signature-256`, which GitHub sends, or in `X-Mayfly-Signature-256`, which a relay or the load-test harness can send. Both headers carry the same signature over the same body and secret. The static `X-Mayfly-Token` header is not accepted, because GitHub signs each delivery and a static token can be replayed.
 - `slack`: `X-Slack-Signature` with a 5-minute timestamp window; also answers `url_verification`.
 - `datadog`: same as `generic`.
 

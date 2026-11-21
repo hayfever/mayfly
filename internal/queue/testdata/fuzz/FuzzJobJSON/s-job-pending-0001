@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"version\":1,\"kind\":\"source.run\",\"id\":\"s-job-pending-0001\",\"idempotency_key\":\"schedule:nightly:2026-11-19T02:00:00Z\",\"created_at\":\"2026-11-19T12:00:00Z\",\"trigger\":{\"kind\":\"schedule\",\"name\":\"nightly\",\"event\":\"schedule\"},\"source\":{\"run_id\":\"run-0001\",\"schedule\":\"nightly\",\"source\":\"repo-scan\",\"slot\":\"2026-11-19T02:00:00Z\"}}")

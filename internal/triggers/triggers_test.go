@@ -162,6 +162,27 @@ func TestGitHubRejectsStaticToken(t *testing.T) {
 	}
 }
 
+// TestGitHubAcceptsEitherSignatureHeader pins that a GitHub trigger takes the
+// body signature from X-Hub-Signature-256 or X-Mayfly-Signature-256. Both carry
+// the same HMAC over the same body and secret, so neither is weaker; the token
+// header stays rejected (TestGitHubRejectsStaticToken).
+func TestGitHubAcceptsEitherSignatureHeader(t *testing.T) {
+	body := []byte(`{"action":"opened","number":1,"repository":{"full_name":"acme/app"},"sender":{"login":"alice"}}`)
+	cfg := config.TriggerConfig{Name: "github", Type: "github", Secret: "gh-secret"}
+	for _, name := range []string{"X-Hub-Signature-256", "X-Mayfly-Signature-256"} {
+		header := http.Header{}
+		header.Set("X-GitHub-Event", "pull_request")
+		header.Set(name, "sha256="+hmacHex("gh-secret", body))
+		if _, err := Parse(cfg, header, body); err != nil {
+			t.Fatalf("%s: valid signature rejected: %v", name, err)
+		}
+		header.Set(name, "sha256="+hmacHex("wrong", body))
+		if _, err := Parse(cfg, header, body); !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("%s: wrong signature accepted: %v", name, err)
+		}
+	}
+}
+
 func TestDatadogToken(t *testing.T) {
 	body := []byte(`{"title":"High error rate","text":"5xx above threshold","alert_type":"error","url":"https://app.example/monitor/1"}`)
 	cfg := config.TriggerConfig{Name: "datadog", Type: "datadog", Secret: "dd"}

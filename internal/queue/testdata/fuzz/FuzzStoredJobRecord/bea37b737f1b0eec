@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"joB\":{\"version\":1,\"kind\":\"session.create\",\"prompt\":\"00\",\"trigger\":{\"kind\":\"0\"}}}")

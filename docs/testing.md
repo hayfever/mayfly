@@ -10,6 +10,8 @@ Mayfly has three test layers. The first two run in seconds without a cluster; th
 
 `go test ./test/compat` checks that the current build reads each committed persisted-format fixture set: queue jobs on bbolt and redis, journal steps, the schedule watermark, session records, and the artifact index. [development.md](development.md#persisted-formats-and-migrations) describes the fixture sets and the migration path.
 
+[formal-verification.md](formal-verification.md) covers the TLA+ model of the session lifecycle and resume protocol, the TLC check, and the native fuzz targets.
+
 Plugin behavior is covered in the first two layers:
 
 - `internal/plugin` checks every manifest in [plugins.md](plugins.md), the defaults, the placement blocks, the names, and the loader paths.

@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"id\":\"0\",\"options\":{\"Prompt\":\"0\",\"Trigger\":{\"event\":\"0\"}}}")
