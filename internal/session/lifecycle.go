@@ -105,7 +105,13 @@ func (m *Manager) PostMessage(id, actor, text string) (model.Event, error) {
 	if err := m.reserveSequence(inst); err != nil {
 		return model.Event{}, fmt.Errorf("reserve turn sequence: %w", err)
 	}
-	return m.appendEvent(inst, model.Event{Type: model.EventUserMessage, Actor: actor, Text: text}), nil
+	stored := m.appendEvent(inst, model.Event{Type: model.EventUserMessage, Actor: actor, Text: text})
+	// The sender is acknowledged only after the message is durable. Adoption
+	// redelivers it under this same sequence if the runtime never starts it.
+	if err := m.persistPending(inst, stored); err != nil {
+		return model.Event{}, err
+	}
+	return stored, nil
 }
 
 // EmitRuntimeEvents accepts assistant, tool, and status events from the
@@ -961,6 +967,7 @@ func (m *Manager) adoptPods(ctx context.Context, pods []corev1.Pod, only map[str
 		m.persistInstance(inst)
 		m.hub.Append(id, model.Event{Type: model.EventSystem, Actor: "mayfly", Text: "Session recovered by control plane restart."})
 		m.restoreJournalThread(id)
+		m.redeliverPending(inst)
 		m.logger.Info("adopted session", "session", id, "pod", pod.Name, "restarts", inst.restarts)
 	}
 	return replacements, live, failed
@@ -1066,6 +1073,7 @@ func (m *Manager) adoptPodless(ctx context.Context, id string, objs k8s.OrphanOb
 	m.persistInstance(inst)
 	m.hub.Append(id, model.Event{Type: model.EventSystem, Actor: "mayfly", Text: "Session recovered by control plane restart."})
 	m.restoreJournalThread(id)
+	m.redeliverPending(inst)
 	m.logger.Info("adopted session without a pod; starting a replacement", "session", id)
 	return inst, true
 }
