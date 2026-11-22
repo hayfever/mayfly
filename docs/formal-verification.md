@@ -21,6 +21,9 @@ downloads the pinned, checksummed `tla2tools.jar` once into
 The model is `spec/tla/SessionResume.tla`. It follows the implemented protocol,
 including the parts that are easy to get wrong:
 
+- a message is written to a durable pending-inbox record before its sender is
+  acknowledged; the record is keyed by the hub sequence that becomes the turn
+  key and is removed when the turn's step 0 is journaled;
 - a user message takes its turn key from the in-memory hub, after the journal
   has reserved that sequence block;
 - the runtime journals a step before applying it to the conversation;
@@ -30,33 +33,42 @@ including the parts that are easy to get wrong:
   session record, and workspace survive;
 - a control-plane restart loses the hub, in-flight begins, and registered
   instances; adoption seeds the hub above the durable floor, restores the
-  thread, and refuses a session a DELETE removed;
+  thread, redelivers every pending message under its reserved turn key, and
+  refuses a session a DELETE removed;
 - a replacement pod gets a new runtime instance and replays recorded steps
   without repeating a recorded tool result;
 - finalize and cleanup run once, and cleanup removes the pod, Secret,
   ConfigMap, NetworkPolicy, PVC, journal, and ledger.
 
 `SessionResume.cfg` checks every invariant and both liveness properties with
-one session, two turns, one control-plane restart, one pod kill, and one
-replacement pod. Sessions do not share mutable state, so one session covers
-every property; a second session only multiplies the liveness state space.
-The bounds keep a full run under three minutes on a desktop.
+one session, an initial prompt, one later message, and one control-plane
+restart. It leaves out pod kills and replacements to keep the liveness check
+fast. `SessionResume_resume.cfg` covers the runtime-resume path with one pod
+kill and one replacement, safety only. The positive run holds 34,840 distinct
+states and finishes in about 12 seconds; the resume run holds 2,429 and
+finishes in about a second. Sessions do not share mutable state, so
+one session covers every property; a second session only multiplies the
+liveness state space.
 
 `deep/SessionResume_two_sessions.cfg` runs nightly. It checks the safety
 invariants with two sessions, one turn each, and one control-plane restart
-that hits both at once, without pod kills or replacements: about 4.4 million
-distinct states and 20 minutes on a 6-core desktop. Liveness with two sessions
-is out of reach at any useful bound.
+that hits both at once, without pod kills or replacements: 51,066,742 states
+generated, 6,127,026 distinct, and about 10.5 minutes with `-workers auto` on
+this machine. `hack/tlc.sh --deep` took 14m44s including its startup and log
+handling. Liveness with two sessions is out of reach at any useful bound.
 
-`SessionResume_buggy.cfg` and `SessionResume_interrupt_buggy.cfg` are the negative checks: they must fail. See
+`SessionResume_buggy.cfg`, `SessionResume_interrupt_buggy.cfg`,
+`SessionResume_volatile_inbox_buggy.cfg`, and
+`SessionResume_redeliver_dup_buggy.cfg` are the negative checks: they must
+fail on the invariant named in the cfg. See
 [spec/tla/README.md](../spec/tla/README.md) for the cfg convention.
 
 ## Action to Go map
 
 | TLA+ action | Go code it models |
 |---|---|
-| `Create` | `session.Manager.Create` (`internal/session/manager.go`), `runner.Kubernetes.Start`, `k8s.Client.CreateSession` |
-| `PostMessage` | `session.Manager.PostMessage` and `reserveSequence` (`internal/session/lifecycle.go`), `journal.Reserve` (`internal/journal/journal.go`) |
+| `Create` | `session.Manager.Create` (`internal/session/manager.go`), `persistPending` for the initial prompt (`internal/session/pending.go`), `runner.Kubernetes.Start`, `k8s.Client.CreateSession` |
+| `PostMessage` | `session.Manager.PostMessage`, `reserveSequence`, and `persistPending` (`internal/session/lifecycle.go`, `internal/session/pending.go`), `journal.AddPending` (`internal/journal/pending.go`), `journal.Reserve` (`internal/journal/journal.go`) |
 | `Close` | `session.Manager.Close` |
 | `TTLExpire` | `session.Manager.reap` (TTL and idle close) |
 | `UserDelete` | `session.Manager.Delete` (tombstone, failed with reason `deleted`) |
@@ -64,7 +76,7 @@ is out of reach at any useful bound.
 | `FallbackExport` | `session.Manager.fallback` and `failFallback` |
 | `Cleanup` | `session.Manager.cleanup` and `deleteJournal`, `runner.Kubernetes.Stop` |
 | `RuntimeStartTurn` | the runtime's inbox loop (`internal/agent/runtime.go`: `Run`) and `Manager.RuntimeConnected` |
-| `JournalUserStep` | `agent.handleTurn` step 0 and `session.Manager.AppendJournal` (`internal/session/journal.go`) |
+| `JournalUserStep` | `agent.handleTurn` step 0 and `session.Manager.AppendJournal` (`internal/session/journal.go`); the journal store deletes the pending record in the same transaction (`internal/journal/bbolt.go`, `memory.go`) |
 | `ModelCall` | `agent.executeModel` |
 | `JournalModelStep` | `agent.handleTurn` and `runOrReplay`, then `AppendJournal` |
 | `ApplyStep` | `agent.runOrReplay` applying a recorded step, and `prepareResume` truncating to the recorded `ConvLen` |
@@ -74,8 +86,8 @@ is out of reach at any useful bound.
 | `JournalToolStep` | `agent.executeTool` returning its output, which `AppendJournal` records |
 | `PodForceDelete` | `session.Manager.pollPods` and `podMissing`, and an out-of-band pod deletion |
 | `PodGracefulDelete` | `session.Manager.podDeleting` (a drain, eviction, preemption, or `kubectl delete`) |
-| `ControlPlaneRestart` | a control-plane process restart; no single Go function, because the process is gone |
-| `Adopt` | `session.Manager.adopt`, `adoptScan`, `adoptPods`, `adoptPodless`, `seedSequence`, and `registerAdopted` |
+| `ControlPlaneRestart` | a control-plane process restart; no single Go function, because the process is gone. The hub and registered instances are lost; the journal, including the pending inbox, survives |
+| `Adopt` | `session.Manager.adopt`, `adoptScan`, `adoptPods`, `adoptPodless`, `seedSequence`, `registerAdopted`, and `redeliverPending` (`internal/session/lifecycle.go`, `internal/session/pending.go`), `hub.Redeliver` (`internal/hub/hub.go`) |
 | `ReplacementPodResume` | `session.Manager.restartSoon` and `restart` (`internal/session/restart.go`), `restoreJournalThread`, and the runtime's `prepareResume` and `armResume` |
 | `Stutter` | no Go function; a terminal session with nothing left to do |
 
@@ -88,7 +100,8 @@ tool, assistant. `ToolAt` names the tool of a step, so the call key is the same
 | Property | Meaning | Tests that sample it |
 |---|---|---|
 | `TypeOK` | Every variable stays in its declared domain | none; model well-formedness |
-| `UserMessageAtMostOnce` | A turn key is issued once, and a journaled step is applied to the conversation once, even across a restart | `TestControlPlaneRestartContinuesTurn`, `internal/journal` turn tests, `internal/session` journal tests |
+| `UserMessageAtMostOnce` | A message is started under one turn key, a turn key is issued once, and a journaled step is applied to the conversation once, even across a restart | `TestControlPlaneRestartContinuesTurn`, `internal/journal` turn tests, `internal/session` journal tests |
+| `AcceptedNotLost` | Every acknowledged message is still pending, has a journaled step, or belongs to a session that ended | `TestPostMessageSurvivesRestartBeforeTurn`, `TestJournaledStepZeroDropsPendingMessage`, `TestCreatePersistsInitialPrompt`, `TestControlPlaneRestartKeepsQueuedMessage` |
 | `TurnKeyReserved` | Every issued turn key is at or below the durable sequence floor | `internal/journal` `Reserve`/`HighWater` tests, `TestAdoptResumesPodlessSession` |
 | `NonIdempotentAtMostOnce` | A non-idempotent tool body runs at most once per call key; a resume gets the interrupted result | `TestGatewayResumeTable`, `test/integration` resume cases, `TestSessionResumesAfterPodDeletion` |
 | `CompletedReplays` | A `done` ledger record replays and never executes again | `TestGatewayResumeTable` (`done replays the result`), `TestSessionResumesAfterGracefulPodDeletion` |
@@ -107,19 +120,28 @@ faults, which are bounded.
 
 ## Negative check
 
-The model has two fault switches, both `TRUE` in the positive cfg:
+The model has four fault switches. The positive cfg uses the safe value of each:
 
 - `LedgerBeforeDispatch`: record the call as pending before dispatching it.
 - `InterruptOnResume`: turn a pending non-idempotent call from another runtime
   instance into a recorded interrupted result instead of a second dispatch.
+- `DurableInbox`: write the pending record before acknowledging a message.
+- `RedeliverNewKey`: adoption starts a pending message under a new turn key
+  instead of the reserved one.
 
 `SessionResume_buggy.cfg` sets `LedgerBeforeDispatch = FALSE`. A pod kill
 between the tool body and the result record then loses the pending record, and
 the replacement dispatches the call again. TLC reports
 `NonIdempotentAtMostOnce`. `SessionResume_interrupt_buggy.cfg` sets
-`InterruptOnResume = FALSE` and must also report the same invariant. A negative
-cfg fails the script if TLC passes it, and fails it if TLC reports a different
-error, so an unrelated parse error cannot pass as the expected failure.
+`InterruptOnResume = FALSE` and must also report the same invariant.
+`SessionResume_volatile_inbox_buggy.cfg` sets `DurableInbox = FALSE`: a
+control-plane restart before the runtime starts the turn loses an acknowledged
+message, and TLC must report `AcceptedNotLost` (2 states generated, 2 distinct).
+`SessionResume_redeliver_dup_buggy.cfg` sets `RedeliverNewKey = TRUE`: adoption
+starts the same accepted message as a second turn, and TLC must report
+`UserMessageAtMostOnce` (222 states generated, 111 distinct). A negative cfg fails the script if TLC passes it, and
+fails it if TLC reports a different error, so an unrelated parse error cannot
+pass as the expected failure.
 
 The check exists to show the positive run is not vacuous: the same model,
 with one implemented guarantee removed, exhibits the bug the guarantee
@@ -254,6 +276,11 @@ The model abstracts these details:
 - `FuzzHubAppendBudget` (`internal/hub`) drives appends, restores, and replays,
   and asserts the byte budget, the count cap, the contiguous suffix, and that
   the inbox keeps its human message.
+- `FuzzPendingJSON` (`internal/journal`) decodes the durable pending-inbox
+  record that adoption reads after a restart. Arbitrary bytes must not panic, a
+  record that decodes must re-encode stably, and the seeds cover a valid
+  record, a sequence mismatch, a non-message type, a missing time, `null`, and
+  truncated JSON. A 60-second run completed 4,663,166 executions.
 - `FuzzEventBound` (`internal/session`) asserts that a shortened text or
   payload string stays within the cap, keeps a prefix of the input, and stays
   valid UTF-8 when the input was valid. Seeds sit on the cap and on a
@@ -296,12 +323,18 @@ The model abstracts these details:
   model does not represent deltas.
 - A sequence block is the constant `Block`, and one `PostMessage` performs one
   reservation. The real control plane also reserves for non-turn events.
-- The model keeps an unstarted inbox message across a control-plane restart.
-  The real hub is in memory, so a message the runtime never read, including
-  the initial prompt of a session whose pod has not connected, can be lost.
-  The model does not cover that loss; it is tracked in
-  [#59](https://github.com/hayfever/mayfly/issues/59), whose fix must also drop
-  this assumption from the model.
+- The pending-inbox write is modeled as part of the atomic `PostMessage` and
+  `Create` actions. The model does not represent the short interval between the
+  hub append and the journal write; a crash there loses a message the sender
+  was not yet acknowledged.
+- The runtime's in-memory message queue is not modeled. The model assumes the
+  runtime eventually reads a redelivered pending message; the Go runtime
+  applies backpressure instead of dropping it.
+- The thread's display copy of a redelivered message gets a new sequence in the
+  code. The model tracks only the reserved turn key.
+- `started` counts the turn keys an accepted message was started under. The
+  `RedeliverNewKey` fault increments it to model reissuing a key; the model does
+  not explore the second turn's full script.
 - The DELETE tombstone is treated as durable. The real tombstone is in memory;
   the record deletion and synchronous object cleanup make the removal stick.
 - The `deleted` terminal state is `failed` with reason `deleted`, as in the

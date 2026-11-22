@@ -47,22 +47,27 @@ cfg that fails or a negative cfg that reports the wrong invariant.
 
 ## Bounds
 
-`SessionResume.cfg` uses one session, two user messages, one control-plane
-restart, one pod kill, one replacement pod, and a sequence block of two. The
-bounds are small on purpose: TLC runs on every pull request that touches the
-session, journal, queue, gateway, or runner packages. One session covers every
-property because sessions share no mutable state; a second session multiplies
-the liveness state space without adding a behavior. Keep a new cfg inside the
-same envelope unless it proves something the small one cannot; put a cfg that
-needs more time in `deep/`, which runs only in the nightly `tlc-deep` job.
+`SessionResume.cfg` uses one session, an initial prompt and one later message,
+one control-plane restart, and a sequence block of two. It has no pod kill or
+replacement, so the liveness check stays fast; `SessionResume_resume.cfg`
+covers that path with safety only. The bounds are small on purpose: TLC runs on
+every pull request that touches the session, journal, queue, gateway, or
+runner packages. One session covers every property because sessions share no
+mutable state; a second session multiplies the liveness state space without
+adding a behavior. Keep a new cfg inside the same envelope unless it proves
+something the small one cannot; put a cfg that needs more time in `deep/`,
+which runs only in the nightly `tlc-deep` job.
 
 ## Configurations
 
 | File | Purpose |
 |---|---|
 | `SessionResume.cfg` | All invariants and liveness, positive |
+| `SessionResume_resume.cfg` | Safety only: one pod kill and one replacement reach the tool ledger and replay path |
 | `SessionResume_buggy.cfg` | `LedgerBeforeDispatch = FALSE`: a lost pending record re-runs a non-idempotent tool |
 | `SessionResume_interrupt_buggy.cfg` | `InterruptOnResume = FALSE`: a pending non-idempotent call is dispatched again |
+| `SessionResume_volatile_inbox_buggy.cfg` | `DurableInbox = FALSE`: an acknowledged message dies with the control-plane hub |
+| `SessionResume_redeliver_dup_buggy.cfg` | `RedeliverNewKey = TRUE`: adoption starts one accepted message under two turn keys |
 | `HubRetention.cfg` | Hub byte budget, event cap, contiguous suffix, inbox exemption, inbox cap, dedup keys, positive |
 | `HubRetention_evict_inbox_buggy.cfg` | `ExemptInbox = FALSE`: a runtime flood drops an unconsumed human message |
 | `HubRetention_no_cap_buggy.cfg` | `CapEvents = FALSE`: a retained event exceeds the per-event cap |
@@ -71,7 +76,7 @@ needs more time in `deep/`, which runs only in the nightly `tlc-deep` job.
 | `QueuePoison.cfg` | Claim, recovered panic, Nack, burial, and healthy progress, positive |
 | `QueuePoison_no_recover_buggy.cfg` | `RecoverPanics = FALSE`: a handler panic crashes the worker |
 | `QueuePoison_no_claim_count_buggy.cfg` | `RecoverPanics = FALSE` and `CountAttemptOnClaim = FALSE`: a crash loop never reaches `max_attempts` |
-| `deep/SessionResume_two_sessions.cfg` | Nightly only: two sessions, one turn each, one shared control-plane restart; safety invariants (about 4.4 million distinct states, 20 minutes on a 6-core desktop) |
+| `deep/SessionResume_two_sessions.cfg` | Nightly only: two sessions, one turn each, one shared control-plane restart; safety invariants (6,127,026 distinct states, about 10.5 minutes with `-workers auto`) |
 
 `HubRetention.cfg` runs eight appends over sizes `{1, 2, 3}` with a two-event
 count cap, a four-byte budget, a two-entry inbox cap, and one dedup key, so
@@ -80,6 +85,11 @@ reachable (2458 distinct states).
 
 `QueuePoison.cfg` uses two jobs, one poison, and `MaxAttempts = 2`, so the
 positive run explores 38 states (15 distinct) and proves healthy progress.
+
+`SessionResume.cfg` holds 34,840 distinct states and finishes in about 12
+seconds; `SessionResume_resume.cfg` holds 2,429 and finishes in about a
+second. The two new negative cfgs stop after 2 and 111 distinct states, which
+is enough to show the invariant they target bites.
 
 ## Terminal states
 

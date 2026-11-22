@@ -14,10 +14,15 @@
       (agent.handleTurn, gateway.Begin);
     * a pod death loses only in-memory runtime state; the journal, ledger,
       sequence floor, and session record survive;
+    * a message is written to a durable pending-inbox record before its sender
+      is acknowledged, and the record is removed when the turn's step 0 is
+      journaled;
     * a control-plane restart loses the hub, in-flight begins, and registered
-      instances; journal, ledger, sequence floor, and records survive;
-    * adoption seeds the hub above the durable floor and refuses a session a
-      DELETE removed;
+      instances; journal, ledger, sequence floor, records, and the pending
+      inbox survive;
+    * adoption seeds the hub above the durable floor, redelivers every pending
+      message under its reserved turn key, and refuses a session a DELETE
+      removed;
     * a replacement pod resumes the last journaled turn with a new runtime
       instance and no re-execution of a recorded result.
 
@@ -52,19 +57,21 @@ CONSTANTS
     ToolIdem,             \* an idempotent tool
     ToolNonIdem,          \* a non-idempotent tool
     LedgerBeforeDispatch, \* FALSE is the negative check: record after dispatch
-    InterruptOnResume     \* FALSE is a second negative check: re-run a pending call
+    InterruptOnResume,    \* FALSE is a second negative check: re-run a pending call
+    DurableInbox,         \* FALSE is the negative check: no pending record
+    RedeliverNewKey       \* TRUE is the negative check: redeliver under a new key
 
 VARIABLES
     created, registered, seeded, deleted, status, final, closeReason,
     objects, pod, restarts, podKills, cpRestarts, instCounter,
-    hubSeq, seqFloor, posted, issued,
+    hubSeq, seqFloor, posted, pending, accepted, started, issued,
     journal, convSize, entryLen, applies,
     ledger, ledgerInst, doneExec, callState, execCount
 
 vars == <<
     created, registered, seeded, deleted, status, final, closeReason,
     objects, pod, restarts, podKills, cpRestarts, instCounter,
-    hubSeq, seqFloor, posted, issued,
+    hubSeq, seqFloor, posted, pending, accepted, started, issued,
     journal, convSize, entryLen, applies,
     ledger, ledgerInst, doneExec, callState, execCount
 >>
@@ -149,6 +156,9 @@ Init ==
     /\ hubSeq = [s \in Sessions |-> 0]
     /\ seqFloor = [s \in Sessions |-> 0]
     /\ posted = [s \in Sessions |-> {}]
+    /\ pending = [s \in Sessions |-> {}]
+    /\ accepted = [s \in Sessions |-> {}]
+    /\ started = [k \in Sessions \X Turns |-> 0]
     /\ issued = [k \in Sessions \X Turns |-> 0]
     /\ journal = [s \in Sessions |-> {}]
     /\ convSize = [s \in Sessions |-> 0]
@@ -176,8 +186,17 @@ Create(s) ==
     /\ objects' = [objects EXCEPT ![s] = Resources]
     /\ pod' = [pod EXCEPT ![s] = instCounter + 1]
     /\ instCounter' = instCounter + 1
+    \* The initial prompt is the first accepted message and turn key. Create
+    \* writes its pending record before it returns, exactly as PostMessage
+    \* does for a later message.
+    /\ hubSeq' = [hubSeq EXCEPT ![s] = 1]
+    /\ seqFloor' = [seqFloor EXCEPT ![s] = Block]
+    /\ posted' = [posted EXCEPT ![s] = {1}]
+    /\ accepted' = [accepted EXCEPT ![s] = {1}]
+    /\ pending' = [pending EXCEPT ![s] = IF DurableInbox THEN {1} ELSE {}]
+    /\ started' = [started EXCEPT ![<<s, 1>>] = 1]
     /\ UNCHANGED <<deleted, final, closeReason, restarts, podKills, cpRestarts,
-                   hubSeq, seqFloor, posted, issued, journal, convSize,
+                   issued, journal, convSize,
                    entryLen, applies, ledger, ledgerInst, doneExec, callState,
                    execCount>>
 
@@ -191,11 +210,14 @@ PostMessage(s) ==
     /\ final[s] = "none"
     /\ registered[s]
     /\ seeded[s]
-    /\ Cardinality(posted[s]) < MaxTurns
+    /\ Cardinality(accepted[s]) < MaxTurns
     /\ next <= MaxSeq
     /\ seqFloor' = [seqFloor EXCEPT ![s] = floor2]
     /\ hubSeq' = [hubSeq EXCEPT ![s] = next]
     /\ posted' = [posted EXCEPT ![s] = @ \cup {next}]
+    /\ accepted' = [accepted EXCEPT ![s] = @ \cup {next}]
+    /\ pending' = [pending EXCEPT ![s] = IF DurableInbox THEN @ \cup {next} ELSE @]
+    /\ started' = [started EXCEPT ![<<s, next>>] = 1]
     /\ issued' = [issued EXCEPT ![<<s, next>>] = @ + 1]
     /\ UNCHANGED <<created, registered, seeded, deleted, status, final,
                    closeReason, objects, pod, restarts, podKills, cpRestarts,
@@ -212,7 +234,7 @@ Close(s) ==
     /\ UNCHANGED <<created, registered, seeded, deleted, final, objects, pod,
                    restarts, podKills, cpRestarts, instCounter, hubSeq,
                    seqFloor, posted, issued, journal, convSize, entryLen,
-                   applies, ledger, ledgerInst, doneExec, callState, execCount>>
+                   applies, ledger, ledgerInst, doneExec, callState, execCount, pending, accepted, started>>
 
 \* TTLExpire: session.reap closes a session whose TTL elapsed with reason
 \* expired.
@@ -224,7 +246,7 @@ TTLExpire(s) ==
     /\ UNCHANGED <<created, registered, seeded, deleted, final, objects, pod,
                    restarts, podKills, cpRestarts, instCounter, hubSeq,
                    seqFloor, posted, issued, journal, convSize, entryLen,
-                   applies, ledger, ledgerInst, doneExec, callState, execCount>>
+                   applies, ledger, ledgerInst, doneExec, callState, execCount, pending, accepted, started>>
 
 \* UserDelete: session.Manager.Delete. The session becomes failed with reason
 \* "deleted", the tombstone records the deletion, and the live registration is
@@ -239,7 +261,7 @@ UserDelete(s) ==
     /\ UNCHANGED <<created, seeded, status, closeReason, objects, pod,
                    restarts, podKills, cpRestarts, instCounter, hubSeq,
                    seqFloor, posted, issued, journal, convSize, entryLen,
-                   applies, ledger, ledgerInst, doneExec, callState, execCount>>
+                   applies, ledger, ledgerInst, doneExec, callState, execCount, pending, accepted, started>>
 
 \* RuntimeFinalize: the runtime uploads its bundle and reports the session
 \* complete, or reports the TTL elapsed. A completed report becomes expired
@@ -260,7 +282,7 @@ RuntimeFinalize(s) ==
                    objects, pod, restarts, podKills, cpRestarts, instCounter,
                    hubSeq, seqFloor, posted, issued, journal, convSize,
                    entryLen, applies, ledger, ledgerInst, doneExec, callState,
-                   execCount>>
+                   execCount, pending, accepted, started>>
 
 \* FallbackExport: session.Manager.fallback. A closing session past its grace,
 \* a pending session past its connect timeout, or a session with no pod and no
@@ -277,7 +299,7 @@ FallbackExport(s) ==
                    objects, pod, restarts, podKills, cpRestarts, instCounter,
                    hubSeq, seqFloor, posted, issued, journal, convSize,
                    entryLen, applies, ledger, ledgerInst, doneExec, callState,
-                   execCount>>
+                   execCount, pending, accepted, started>>
 
 \* Cleanup: session.Manager.cleanup. Deletes the pod, Secret, ConfigMap,
 \* NetworkPolicy, and PVC, and deletes the journal, which also removes the
@@ -296,10 +318,11 @@ Cleanup(s) ==
     /\ doneExec' = [k \in Keys |-> IF k[1] = s THEN 0 ELSE doneExec[k]]
     /\ convSize' = [convSize EXCEPT ![s] = 0]
     /\ callState' = [k \in Keys |-> IF k[1] = s THEN "idle" ELSE callState[k]]
+    /\ pending' = [pending EXCEPT ![s] = {}]
     /\ UNCHANGED <<created, registered, seeded, deleted, status, final,
                    closeReason, restarts, podKills, cpRestarts, instCounter,
-                   hubSeq, seqFloor, posted, issued, entryLen, applies,
-                   execCount>>
+                   hubSeq, seqFloor, posted, accepted, started, issued,
+                   entryLen, applies, execCount>>
 
 \* ------------------------------------------------------------
 (* Runtime: journal, model, and tools *)
@@ -316,7 +339,7 @@ RuntimeStartTurn(s) ==
                    objects, pod, restarts, podKills, cpRestarts, instCounter,
                    hubSeq, seqFloor, posted, issued, journal, convSize,
                    entryLen, applies, ledger, ledgerInst, doneExec, callState,
-                   execCount>>
+                   execCount, pending, accepted, started>>
 
 \* JournalUserStep: agent.handleTurn step 0. Appends the user entry, which
 \* carries the conversation length after the step. The conversation line is
@@ -329,10 +352,13 @@ JournalUserStep(s) ==
     /\ convSize[s] = Cardinality(journal[s])
     /\ journal' = [journal EXCEPT ![s] = @ \cup {<<t, k>>}]
     /\ entryLen' = [entryLen EXCEPT ![<<s, t, k>>] = convSize[s] + 1]
+    \* Step 0 makes the turn key durable, so the pending copy is gone.
+    /\ pending' = [pending EXCEPT ![s] = @ \ {t}]
     /\ UNCHANGED <<created, registered, seeded, deleted, status, final,
                    closeReason, objects, pod, restarts, podKills, cpRestarts,
-                   instCounter, hubSeq, seqFloor, posted, issued, convSize,
-                   applies, ledger, ledgerInst, doneExec, callState, execCount>>
+                   instCounter, hubSeq, seqFloor, posted, accepted, started,
+                   issued, convSize, applies, ledger, ledgerInst, doneExec,
+                   callState, execCount>>
 
 \* ModelCall: the runtime executes a model step. A model call has no external
 \* side effect that survives the process, so a crash may repeat it.
@@ -349,7 +375,7 @@ ModelCall(s) ==
                    closeReason, objects, pod, restarts, podKills, cpRestarts,
                    instCounter, hubSeq, seqFloor, posted, issued, journal,
                    convSize, entryLen, applies, ledger, ledgerInst, doneExec,
-                   execCount>>
+                   execCount, pending, accepted, started>>
 
 \* JournalModelStep: the assistant message is published only from the journal
 \* entry, so the entry is appended before the conversation line.
@@ -367,7 +393,7 @@ JournalModelStep(s) ==
     /\ UNCHANGED <<created, registered, seeded, deleted, status, final,
                    closeReason, objects, pod, restarts, podKills, cpRestarts,
                    instCounter, hubSeq, seqFloor, posted, issued, convSize,
-                   applies, ledger, ledgerInst, doneExec, execCount>>
+                   applies, ledger, ledgerInst, doneExec, execCount, pending, accepted, started>>
 
 \* ApplyStep: apply a journaled step to the conversation, but only while the
 \* file is shorter than the ConvLen the entry recorded. A step that is
@@ -386,7 +412,7 @@ ApplyStep(s) ==
     /\ UNCHANGED <<created, registered, seeded, deleted, status, final,
                    closeReason, objects, pod, restarts, podKills, cpRestarts,
                    instCounter, hubSeq, seqFloor, posted, issued, journal,
-                   entryLen, ledger, ledgerInst, doneExec, callState, execCount>>
+                   entryLen, ledger, ledgerInst, doneExec, callState, execCount, pending, accepted, started>>
 
 \* ToolBegin: gateway.Begin plus beginFlight. The resume table:
 \*   done                    -> replay the recorded result, execute nothing
@@ -437,7 +463,7 @@ ToolBegin(s) ==
     /\ UNCHANGED <<created, registered, seeded, deleted, status, final,
                    closeReason, objects, pod, restarts, podKills, cpRestarts,
                    instCounter, hubSeq, seqFloor, posted, issued, journal,
-                   convSize, entryLen, applies>>
+                   convSize, entryLen, applies, pending, accepted, started>>
 
 \* ToolExecute: the external side effect. execCount is the number of times the
 \* tool body ran for this call key. The bound 2 keeps the state space finite;
@@ -455,7 +481,7 @@ ToolExecute(s) ==
     /\ UNCHANGED <<created, registered, seeded, deleted, status, final,
                    closeReason, objects, pod, restarts, podKills, cpRestarts,
                    instCounter, hubSeq, seqFloor, posted, issued, journal,
-                   convSize, entryLen, applies, ledger, ledgerInst, doneExec>>
+                   convSize, entryLen, applies, ledger, ledgerInst, doneExec, pending, accepted, started>>
 
 \* ToolComplete: gateway.Complete. Records the result as done once. With
 \* LedgerBeforeDispatch false the record is written here instead of at begin,
@@ -475,7 +501,7 @@ ToolComplete(s) ==
                    closeReason, objects, pod, restarts, podKills, cpRestarts,
                    instCounter, hubSeq, seqFloor, posted, issued, journal,
                    convSize, entryLen, applies, ledgerInst, callState,
-                   execCount>>
+                   execCount, pending, accepted, started>>
 
 \* JournalToolStep: the runtime reports the call result, which is journaled.
 \* A replayed or interrupted result is journaled without an execution.
@@ -493,7 +519,7 @@ JournalToolStep(s) ==
     /\ UNCHANGED <<created, registered, seeded, deleted, status, final,
                    closeReason, objects, pod, restarts, podKills, cpRestarts,
                    instCounter, hubSeq, seqFloor, posted, issued, convSize,
-                   applies, ledger, ledgerInst, doneExec, execCount>>
+                   applies, ledger, ledgerInst, doneExec, execCount, pending, accepted, started>>
 
 \* ------------------------------------------------------------
 (* Faults and recovery *)
@@ -511,7 +537,7 @@ PodForceDelete(s) ==
     /\ UNCHANGED <<created, registered, seeded, deleted, status, final,
                    closeReason, objects, restarts, cpRestarts, instCounter,
                    hubSeq, seqFloor, posted, issued, journal, convSize,
-                   entryLen, applies, ledger, ledgerInst, doneExec, execCount>>
+                   entryLen, applies, ledger, ledgerInst, doneExec, execCount, pending, accepted, started>>
 
 \* A drain, eviction, or preemption is also a pod death; the runtime exits
 \* without finalizing so a replacement resumes.
@@ -525,7 +551,7 @@ PodGracefulDelete(s) ==
     /\ UNCHANGED <<created, registered, seeded, deleted, status, final,
                    closeReason, objects, restarts, cpRestarts, instCounter,
                    hubSeq, seqFloor, posted, issued, journal, convSize,
-                   entryLen, applies, ledger, ledgerInst, doneExec, execCount>>
+                   entryLen, applies, ledger, ledgerInst, doneExec, execCount, pending, accepted, started>>
 
 \* ControlPlaneRestart: the process loses the hub, in-flight begins, registered
 \* instances, and seeded hubs. Journal, ledger, sequence floor, status,
@@ -536,10 +562,13 @@ ControlPlaneRestart ==
     /\ registered' = [s \in Sessions |-> FALSE]
     /\ seeded' = [s \in Sessions |-> FALSE]
     /\ hubSeq' = [s \in Sessions |-> 0]
+    \* The in-memory inbox is gone. The durable pending record is not.
+    /\ posted' = [s \in Sessions |-> {}]
     /\ UNCHANGED <<created, deleted, status, final, closeReason, objects, pod,
-                   restarts, podKills, instCounter, seqFloor, posted, issued,
-                   journal, convSize, entryLen, applies, ledger, ledgerInst,
-                   doneExec, callState, execCount>>
+                   restarts, podKills, instCounter, seqFloor, pending,
+                   accepted, started, issued, journal, convSize, entryLen,
+                   applies, ledger, ledgerInst, doneExec, callState,
+                   execCount>>
 
 \* Adopt: session.Manager.adoptPods/adoptPodless plus seedSequence. A live
 \* session is registered again and its hub is seeded above the durable floor,
@@ -554,10 +583,20 @@ Adopt(s) ==
     /\ registered' = [registered EXCEPT ![s] = TRUE]
     /\ seeded' = [seeded EXCEPT ![s] = TRUE]
     /\ hubSeq' = [hubSeq EXCEPT ![s] = MaxNat(seqFloor[s], MaxJournalTurn(s))]
+    \* Redeliver the durable pending messages under the keys they were
+    \* accepted with. RedeliverNewKey models adoption that reissues a new turn
+    \* key instead of keeping the reserved one.
+    /\ posted' = [posted EXCEPT ![s] = @ \cup pending[s]]
+    /\ started' = LET bumped ==
+            [k \in Sessions \X Turns |->
+                IF k[1] = s /\ k[2] \in pending[s] /\ RedeliverNewKey
+                THEN 2
+                ELSE started[k]]
+        IN bumped
     /\ UNCHANGED <<created, deleted, status, final, closeReason, objects, pod,
                    restarts, podKills, cpRestarts, instCounter, seqFloor,
-                   posted, issued, journal, convSize, entryLen, applies,
-                   ledger, ledgerInst, doneExec, callState, execCount>>
+                   pending, accepted, issued, journal, convSize, entryLen,
+                   applies, ledger, ledgerInst, doneExec, callState, execCount>>
 
 \* ReplacementPodResume: session.restart. A replacement pod reuses the Secret,
 \* ConfigMap, NetworkPolicy, and PVC, gets a new runtime instance, and resumes
@@ -577,7 +616,7 @@ ReplacementPodResume(s) ==
     /\ UNCHANGED <<created, registered, seeded, deleted, status, final,
                    closeReason, objects, podKills, cpRestarts, hubSeq,
                    seqFloor, posted, issued, journal, convSize, entryLen,
-                   applies, ledger, ledgerInst, doneExec, callState, execCount>>
+                   applies, ledger, ledgerInst, doneExec, callState, execCount, pending, accepted, started>>
 
 \* ------------------------------------------------------------
 (* Next and fairness *)
@@ -662,6 +701,9 @@ TypeOK ==
     /\ hubSeq \in [Sessions -> 0..MaxSeq]
     /\ seqFloor \in [Sessions -> 0..(MaxSeq + Block)]
     /\ posted \in [Sessions -> SUBSET Turns]
+    /\ pending \in [Sessions -> SUBSET Turns]
+    /\ accepted \in [Sessions -> SUBSET Turns]
+    /\ started \in [(Sessions \X Turns) -> 0..2]
     /\ issued \in [(Sessions \X Turns) -> 0..2]
     /\ journal \in [Sessions -> SUBSET (Turns \X Steps)]
     /\ convSize \in [Sessions -> 0..(MaxTurns * (LastStep + 1))]
@@ -678,12 +720,23 @@ TypeOK ==
 \* the conversation at most once, even across a control-plane restart.
 UserMessageAtMostOnce ==
     /\ \A s \in Sessions, t \in Turns : issued[<<s, t>>] <= 1
+    /\ \A s \in Sessions, t \in Turns : started[<<s, t>>] <= 1
     /\ \A k \in Keys : applies[k] <= 1
 
 \* Every turn key the hub handed out is inside the durable reservation, so the
 \* key survives a control-plane restart as a used key.
 TurnKeyReserved ==
-    \A s \in Sessions : \A t \in posted[s] : t <= seqFloor[s]
+    \A s \in Sessions :
+        /\ \A t \in posted[s] : t <= seqFloor[s]
+        /\ \A t \in pending[s] : t <= seqFloor[s]
+
+\* A message the control plane acknowledged is never lost: it is either
+\* still durable in the pending inbox, already started in the journal, or its
+\* session has ended. This is the property #59 lacked.
+AcceptedNotLost ==
+    \A s \in Sessions, t \in Turns :
+        t \in accepted[s] =>
+            t \in pending[s] \/ t \in JournalTurns(s) \/ final[s] /= "none"
 
 \* A non-idempotent tool body runs at most once per call key. After a crash,
 \* the resumed runtime gets the interrupted result instead of a second run.
@@ -695,12 +748,13 @@ NonIdempotentAtMostOnce ==
 CompletedReplays ==
     \A k \in Keys : ledger[k] = "done" => execCount[k] <= doneExec[k]
 
-\* An idempotent call is always keyed by the turn the control plane issued, so
+\* An idempotent call is always keyed by a turn the control plane accepted, so
 \* a re-dispatch after a resume reuses the same <session>/<turn>/<step> key.
+\* accepted survives a restart even when the in-memory inbox does not.
 IdempotentSameKey ==
     \A s \in Sessions, t \in Turns, k \in ToolSteps :
         ToolAt(k) = ToolIdem /\ callState[<<s, t, k>>] /= "idle"
-            => t \in posted[s]
+            => t \in accepted[s]
 
 \* A deleted session is never registered again by adoption.
 NoResurrection ==
