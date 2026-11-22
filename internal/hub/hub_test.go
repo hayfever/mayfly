@@ -149,3 +149,40 @@ func TestEvictedStepKeyCanBeAppendedAgain(t *testing.T) {
 		}
 	}
 }
+
+func TestSubscribeAfterEvictedSeqReplaysTheRetainedSuffix(t *testing.T) {
+	const budget = 2048
+	h := New(100, WithByteBudget(budget))
+	h.Create("s")
+	for range 5 {
+		h.Append("s", model.Event{Type: model.EventToolResult, Text: strings.Repeat("x", 900)})
+	}
+	ch, cancel := h.SubscribeEvents("s", 0)
+	defer cancel()
+
+	var first model.Event
+	select {
+	case first = <-ch:
+	default:
+		t.Fatal("no replayed event")
+	}
+	if first.Seq == 1 {
+		t.Fatal("the first event was not evicted, so the gap is untested")
+	}
+	last := first.Seq
+	for range 10 {
+		select {
+		case ev := <-ch:
+			if ev.Seq != last+1 {
+				t.Fatalf("replayed seq %d after %d", ev.Seq, last)
+			}
+			last = ev.Seq
+		default:
+			if last != h.LastSeq("s") {
+				t.Fatalf("replay ended at %d, LastSeq = %d", last, h.LastSeq("s"))
+			}
+			return
+		}
+	}
+	t.Fatal("replay did not end")
+}
