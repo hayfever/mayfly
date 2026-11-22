@@ -245,11 +245,11 @@ func (r *Runtime) Run(ctx context.Context) error {
 				if r.skipResumeEvent(ev) {
 					return
 				}
-				select {
-				case userCh <- ev:
-				default:
-					r.events.Emit(ctx, model.EventError, "mayfly", "Message queue is full; message dropped.", nil)
-				}
+				// Backpressure, never a drop. The control plane made this
+				// message durable before its sender was acknowledged, and a
+				// replacement runtime would redeliver it. Dropping it here
+				// would only waste that guarantee while this process lives.
+				enqueueUser(ctx, userCh, ev)
 			case model.EventControl:
 				control, _ := model.DataAs[model.ControlData](ev.Data)
 				select {
@@ -295,11 +295,11 @@ func (r *Runtime) Run(ctx context.Context) error {
 		select {
 		case ev := <-userCh:
 			resetIdle()
-			select {
-			case workCh <- ev:
+			// The turn worker is single-flight. Waiting for it here applies
+			// backpressure to the inbox reader instead of discarding a
+			// message the control plane already made durable and acked.
+			if enqueueUser(ctx, workCh, ev) {
 				pending.start()
-			default:
-				r.events.Emit(ctx, model.EventError, "mayfly", "Agent is busy; message dropped.", nil)
 			}
 		case <-turnFinished:
 			pending.finish()
@@ -465,6 +465,19 @@ func (r *Runtime) discoverTools(ctx context.Context) (map[string]gateway.Discove
 
 // turnCounter counts turns that are queued or running. The idle timer must not
 // finalize a session while any of them can still write to the conversation.
+// enqueueUser waits for room in a runtime queue. It reports false only when
+// the runtime is shutting down. A message the control plane accepted is never
+// dropped: while this process lives it waits here, and after a restart the
+// durable pending record delivers it again.
+func enqueueUser(ctx context.Context, ch chan<- model.Event, ev model.Event) bool {
+	select {
+	case ch <- ev:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 type turnCounter struct{ n int }
 
 func (c *turnCounter) start() { c.n++ }
