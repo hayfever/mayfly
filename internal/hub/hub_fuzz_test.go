@@ -113,7 +113,7 @@ func FuzzHubAppendBudget(f *testing.F) {
 		if human.Seq == 0 {
 			t.Fatal("human message was dropped")
 		}
-		var last int64 = human.Seq
+		last := human.Seq
 		for i := 0; i+1 < len(ops); i += 2 {
 			switch ops[i] % 3 {
 			case 0:
