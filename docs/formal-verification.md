@@ -199,6 +199,10 @@ The check parses the multi-document YAML and asserts these properties:
 - Every RoleBinding refers to a Role in the same namespace and binds exactly
   one subject: the control-plane ServiceAccount in the release namespace.
 - No `(kind, namespace, name)` object is rendered twice.
+- No cluster-scoped RBAC: the chart renders no `ClusterRole` and no
+  `ClusterRoleBinding`, and no binding names a `ClusterRole` in its `roleRef`.
+  A `RoleBinding` to a `ClusterRole` is rejected too, because it grants
+  cluster-wide permissions and bypasses the Role checks.
 - `rbac.create=false` renders no Role and no RoleBinding.
 
 Run it with:
@@ -219,10 +223,23 @@ sessions Role or on a Role in the release namespace that the control plane does
 not use. The test fails if the pre-fix template passes every partition, so a
 check that no longer bites is visible.
 
+`TestRBACClusterScopedIsRejected` is the negative check for cluster-scoped
+RBAC. It copies the chart and injects one extra template at a time. The first
+fixture is a `ClusterRole` with `apiGroups`, `resources`, and `verbs` set to
+`"*"` plus a `ClusterRoleBinding` that binds it to the control-plane
+ServiceAccount. The second fixture is a `RoleBinding` whose `roleRef` names a
+`ClusterRole` that the chart does not render. The check must reject each
+fixture in every partition, with `rbac.create` set to true and false, and must
+name the offending object.
+
+`TestRBACDocsTableMatchesSpec` parses the RBAC table in
+[deployment.md](deployment.md#rbac-per-namespace) and compares it both ways
+against the Go grant sets. The sessions rows must equal the union of the
+session grants, the retained `watch` verb, and the plugin grants. The plugins
+rows must equal the plugin grants. A control-plane call added to one side fails
+the test until the other side matches.
+
 The check does not prove that a cluster accepts the RBAC. It reads rendered
 manifests; it does not contact an API server and does not exercise the
 authorization decision. The e2e suite covers the cluster side when it creates
-a session. The required grant table exists twice, in the Go test and in
-[deployment.md](deployment.md); a change to the control plane's Kubernetes
-calls must update both. The check does not cover chart values that do not
-change RBAC.
+a session. The check does not cover chart values that do not change RBAC.

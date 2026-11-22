@@ -179,10 +179,32 @@ type namespaceGrants struct {
 	allowed  grantSet
 }
 
+// clusterScopedRBAC returns a violation for every cluster-scoped RBAC object
+// and for every binding whose roleRef names a ClusterRole. The chart renders
+// no cluster-scoped RBAC: the control plane acts only in the sessions and
+// plugins namespaces. Without this pass a ClusterRole that grants "*" and a
+// binding that points at it would pass the Role checks, because the checks
+// read Roles and RoleBindings only. A RoleBinding to a ClusterRole also
+// bypasses the Role checks, so it is rejected the same way.
+func clusterScopedRBAC(objects []object) []string {
+	var out []string
+	for _, o := range objects {
+		switch o.Kind {
+		case "ClusterRole", "ClusterRoleBinding":
+			out = append(out, fmt.Sprintf("%s %q: cluster-scoped RBAC must not be rendered", o.Kind, o.Metadata.Name))
+			continue
+		}
+		if o.RoleRef.Kind == "ClusterRole" {
+			out = append(out, fmt.Sprintf("%s %q in namespace %q refers to ClusterRole %q: a ClusterRole grants cluster-wide permissions", o.Kind, o.Metadata.Name, o.Metadata.Namespace, o.RoleRef.Name))
+		}
+	}
+	return out
+}
+
 // checkObjects returns every invariant violation for one rendered chart. An
 // empty result means the objects satisfy the check.
 func checkObjects(objects []object, e expectation) []string {
-	var out []string
+	out := clusterScopedRBAC(objects)
 	roles := map[string][]object{}
 	bindings := map[string][]object{}
 	seen := map[string]bool{}
@@ -527,6 +549,227 @@ func TestRBACPrefixTemplateIsRejected(t *testing.T) {
 			}
 			t.Errorf("pre-fix template fails, but no violation names the sessions namespace %q:\n%s", p.sessions, strings.Join(got, "\n"))
 		})
+	}
+}
+
+// parseDocsRBACTable reads the RBAC table under "### RBAC per namespace" in
+// docs/deployment.md and returns the grants it lists per namespace.
+func parseDocsRBACTable(t *testing.T, path string) map[string]grantSet {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	out := map[string]grantSet{}
+	inSection := false
+	for i, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "### RBAC per namespace"):
+			inSection = true
+			continue
+		case !inSection:
+			continue
+		case strings.HasPrefix(trimmed, "## "):
+			inSection = false
+			continue
+		case !strings.HasPrefix(trimmed, "|"):
+			continue
+		}
+		cells := strings.Split(strings.Trim(trimmed, "|"), "|")
+		if len(cells) != 4 {
+			t.Fatalf("%s:%d: RBAC table row has %d cells, want 4: %q", path, i+1, len(cells), trimmed)
+		}
+		namespace := strings.TrimSpace(cells[0])
+		if namespace == "Namespace" || strings.Trim(namespace, "-") == "" {
+			continue
+		}
+		resource, group := parseResourceCell(strings.TrimSpace(cells[1]))
+		grants, ok := out[namespace]
+		if !ok {
+			grants = grantSet{}
+			out[namespace] = grants
+		}
+		verbs := 0
+		for _, verb := range strings.Split(cells[2], ",") {
+			verb = strings.TrimSpace(verb)
+			if verb == "" {
+				continue
+			}
+			grants[grant{group: group, resource: resource, verb: verb}] = struct{}{}
+			verbs++
+		}
+		if verbs == 0 {
+			t.Fatalf("%s:%d: RBAC table row lists no verb: %q", path, i+1, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s: no RBAC table rows found under \"### RBAC per namespace\"", path)
+	}
+	return out
+}
+
+// parseResourceCell splits a table resource cell into the resource and its
+// API group. "deployments (apps)" becomes ("deployments", "apps") and a cell
+// with no parenthesized group becomes (cell, "").
+func parseResourceCell(cell string) (resource, group string) {
+	if open := strings.LastIndex(cell, " ("); open >= 0 && strings.HasSuffix(cell, ")") {
+		return cell[:open], cell[open+2 : len(cell)-1]
+	}
+	return cell, ""
+}
+
+// grantDiff returns one line per grant that is in one set and not the other.
+func grantDiff(want, got grantSet) []string {
+	var out []string
+	for g := range want {
+		if _, ok := got[g]; !ok {
+			out = append(out, "missing "+g.String())
+		}
+	}
+	for g := range got {
+		if _, ok := want[g]; !ok {
+			out = append(out, "unexpected "+g.String())
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestRBACDocsTableMatchesSpec holds the published grant table in
+// docs/deployment.md to the grant sets this check asserts. The test parses the
+// table and compares it both ways against the Go specs, so a control-plane call
+// added to one side fails until the other side matches. The sessions rows are
+// the union of the session grants, the retained pods watch verb, and the plugin
+// grants: the sessions namespace carries the plugin objects when the plugins
+// namespace is unset or equal.
+func TestRBACDocsTableMatchesSpec(t *testing.T) {
+	documented := parseDocsRBACTable(t, "../../docs/deployment.md")
+
+	want := map[string]grantSet{
+		"sessions": union(sessionRequired().grants(), sessionRetained().grants(), pluginRequired().grants()),
+		"plugins":  pluginRequired().grants(),
+	}
+	for namespace, expected := range want {
+		got, ok := documented[namespace]
+		if !ok {
+			t.Errorf("docs/deployment.md has no RBAC table row for namespace %q", namespace)
+			continue
+		}
+		reportViolations(t, fmt.Sprintf("docs table, namespace %q", namespace), grantDiff(expected, got))
+	}
+	for namespace := range documented {
+		if _, ok := want[namespace]; !ok {
+			t.Errorf("docs/deployment.md lists RBAC for unexpected namespace %q", namespace)
+		}
+	}
+}
+
+// TestRBACClusterScopedIsRejected is the negative check for cluster-scoped
+// RBAC. It copies the chart and injects one extra template at a time:
+//
+//  1. a wildcard ClusterRole with a ClusterRoleBinding to the control-plane
+//     ServiceAccount. This is the shape that passed the check before the
+//     cluster-scoped pass existed.
+//  2. a RoleBinding whose roleRef names a ClusterRole that the chart does not
+//     render. This bypasses the Role checks because no Role in the namespace
+//     grants anything.
+//
+// The check must reject each fixture in every partition, with and without
+// rbac.create.
+func TestRBACClusterScopedIsRejected(t *testing.T) {
+	helm := helmPath(t)
+	src := resolveChartDir(t)
+	dir := filepath.Join(t.TempDir(), "mayfly")
+	copyTree(t, src, dir)
+	extra := filepath.Join(dir, "templates", "zz-extra.yaml")
+
+	fixtures := []struct {
+		name     string
+		manifest string
+		want     []string
+	}{
+		{
+			name: "wildcard-clusterrole",
+			manifest: `apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mayfly-extra
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mayfly-extra
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mayfly-extra
+subjects:
+  - kind: ServiceAccount
+    name: mayfly
+    namespace: mayfly
+`,
+			want: []string{`ClusterRole "mayfly-extra"`, `ClusterRoleBinding "mayfly-extra"`},
+		},
+		{
+			name: "rolebinding-to-clusterrole",
+			manifest: `apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mayfly-extra
+  namespace: mayfly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: mayfly
+    namespace: mayfly
+`,
+			want: []string{`RoleBinding "mayfly-extra"`, `ClusterRole "cluster-admin"`},
+		},
+	}
+
+	for _, fixture := range fixtures {
+		if err := os.WriteFile(extra, []byte(fixture.manifest), 0o644); err != nil {
+			t.Fatalf("write fixture %q: %v", fixture.name, err)
+		}
+		for _, p := range partitions() {
+			for _, rbac := range []bool{true, false} {
+				name := fmt.Sprintf("%s/%s/rbac=%t", fixture.name, p.name, rbac)
+				t.Run(name, func(t *testing.T) {
+					objects := renderChart(t, helm, dir, templateArgs(dir, p, rbac, ""))
+					got := checkObjects(objects, expectation{
+						release:  p.release,
+						sessions: p.sessions,
+						plugins:  p.plugins,
+						roleName: "mayfly",
+						saName:   "mayfly",
+						rbac:     rbac,
+					})
+					if len(got) == 0 {
+						t.Fatalf("fixture %q passed the check; the check does not bite", fixture.name)
+					}
+					for _, want := range fixture.want {
+						found := false
+						for _, violation := range got {
+							if strings.Contains(violation, want) {
+								found = true
+								break
+							}
+						}
+						if !found {
+							t.Errorf("no violation names %s:\n%s", want, strings.Join(got, "\n"))
+						}
+					}
+				})
+			}
+		}
 	}
 }
 
