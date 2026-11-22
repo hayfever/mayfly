@@ -9,6 +9,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 - A TLA+ model of the session lifecycle and resume protocol in `spec/tla`, checked by `hack/tlc.sh` and the `tlc` job in `.github/workflows/verify.yml`. See [docs/formal-verification.md](docs/formal-verification.md).
 - Native Go fuzz targets for webhook verification and parsing, persisted queue jobs, journal steps, session records, runtime events, HTTP request bodies, the hub, and bundles. `hack/fuzz.sh` runs every target, and the `fuzz-nightly` job runs them on a schedule.
 - `sessions.max_event_bytes` (default 64 KiB) caps one runtime event (#44).
+- `sessions.event_buffer_bytes` (default 16 MiB) bounds the retained thread bytes per session in addition to `sessions.event_buffer` (#44).
 
 ### Fixed
 
@@ -18,6 +19,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 - An artifact bundle entry whose name is not valid UTF-8 is written with the same name the manifest lists.
 - A runtime event's text and payload strings are truncated rune-safely at `sessions.max_event_bytes` instead of being retained whole (#44).
 - A session title derived from a webhook field or sent to the API is capped at 200 bytes, rune-safely, before it reaches the queue envelope or the session record (#44).
+- The hub evicts the oldest thread events when a session exceeds `sessions.event_buffer_bytes`, and keeps an unconsumed human message in the inbox through a runtime event flood (#44).
 
 ## [1.0.0-rc.2] - 2026-11-20
 
