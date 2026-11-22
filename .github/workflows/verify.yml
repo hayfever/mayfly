@@ -26,6 +26,8 @@ on:
       - "internal/triggers/**"
       - "internal/httpapi/**"
       - "internal/textutil/**"
+      - "internal/workflow/**"
+      - "internal/sources/**"
       - "hack/tlc.sh"
       - ".github/workflows/verify.yml"
   pull_request:
@@ -41,6 +43,8 @@ on:
       - "internal/triggers/**"
       - "internal/httpapi/**"
       - "internal/textutil/**"
+      - "internal/workflow/**"
+      - "internal/sources/**"
       - "hack/tlc.sh"
       - ".github/workflows/verify.yml"
   schedule:
