@@ -267,14 +267,14 @@ The model abstracts these details:
   fuzz-chosen bytes. It asserts that the worker recovers, counts
   `max_attempts` attempts, buries the poison job, and still completes a healthy
   job. Seeds cover an empty value, a normal value, and non-UTF-8 bytes. A
-  60-second run made 13,440 executions.
+  60-second run made 13,622 executions.
 - `FuzzHTTPJSONProjection` (`internal/sources`) decodes arbitrary upstream JSON
   and projects it with arbitrary configured paths. It asserts that a bad path or
   an unexpected shape returns an error or an error document, and that the error
-  and diff bounds hold. A 60-second run made 1,709,561 executions.
+  and diff bounds hold. A 60-second run made 1,428,289 executions.
 - `FuzzRunArtifactDecode` (`internal/workflow`) feeds arbitrary bytes to the
   source-run resume path. A torn, wrong-run, unknown-field, or newer-version
-  artifact must return an error, never a panic. A 60-second run made 265,062
+  artifact must return an error, never a panic. A 60-second run made 44,824
   executions.
 
 ## What is abstracted away
