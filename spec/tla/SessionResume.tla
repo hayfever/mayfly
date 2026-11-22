@@ -780,6 +780,14 @@ ConversationBounded ==
 Termination ==
     \A s \in Sessions : [](created[s] => <>(final[s] /= "none"))
 
+\* Every message acknowledged in a session that is still live is eventually
+\* started, or the session ends first. This is the liveness companion of
+\* AcceptedNotLost.
+AcceptedHandled ==
+    \A s \in Sessions, t \in Turns :
+        [](t \in accepted[s] /\ final[s] = "none" =>
+            <>(t \in JournalTurns(s) \/ final[s] /= "none"))
+
 \* Every session that was created eventually has no pod, no Secret, ConfigMap,
 \* NetworkPolicy, or PVC, and no journal or ledger left.
 Reclamation ==

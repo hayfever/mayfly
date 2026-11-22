@@ -40,7 +40,7 @@ including the parts that are easy to get wrong:
 - finalize and cleanup run once, and cleanup removes the pod, Secret,
   ConfigMap, NetworkPolicy, PVC, journal, and ledger.
 
-`SessionResume.cfg` checks every invariant and both liveness properties with
+`SessionResume.cfg` checks every invariant and all liveness properties with
 one session, an initial prompt, one later message, and one control-plane
 restart. It leaves out pod kills and replacements to keep the liveness check
 fast. `SessionResume_resume.cfg` covers the runtime-resume path with one pod
@@ -110,6 +110,7 @@ tool, assistant. `ToolAt` names the tool of a step, so the call key is the same
 | `JournalPrefix` | A turn's journal is a prefix: no step is journaled before its predecessor | `verifyTurn` gap test, `internal/agent` replay tests |
 | `ConversationBounded` | The conversation never runs ahead of the journal and trails it by at most the step being applied | `prepareResume` tests, `internal/agent` conversation replay tests |
 | `Termination` | Every created session reaches `completed`, `expired`, or `failed` | `TestSessionTTLExpiry`, `TestDeleteSession`, `TestControlPlaneRestartContinuesTurn` |
+| `AcceptedHandled` | Every acknowledged message in a live session is eventually started, or the session ends first | `TestPostMessageSurvivesRestartBeforeTurn`, `TestControlPlaneRestartKeepsQueuedMessage` |
 | `Reclamation` | Every created session eventually has no pod, Secret, ConfigMap, NetworkPolicy, PVC, journal, or ledger | `TestShutdownWaitsForCleanup`, `TestDeleteSession` |
 
 Liveness assumes weak fairness on the runtime's step actions and on the
