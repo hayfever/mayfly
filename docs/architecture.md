@@ -23,7 +23,7 @@ This page describes the system as of 1.0.0-rc.2: one control plane (`mayflyd`) t
 The control plane and runtime communicate over HTTP. The runtime initiates every connection:
 
 - `POST /internal/v1/sessions/{id}/events` — thread events. An event may carry `step_key`; a repeated key is dropped.
-- `GET /internal/v1/sessions/{id}/inbox` — server-sent stream of human messages and close requests.
+- `GET /internal/v1/sessions/{id}/inbox` — server-sent stream of human messages and close requests. A pending message accepted before a control-plane restart is redelivered here under its reserved sequence.
 - `POST /internal/v1/sessions/{id}/journal` — one completed turn step.
 - `GET /internal/v1/sessions/{id}/journal?turn=N` — the steps of one turn; without `turn`, the last turn.
 - `POST /internal/v1/sessions/{id}/artifacts` — final bundle.
@@ -278,6 +278,19 @@ The runtime receives only `user_message` and `control` events on its inbox. This
 An event may carry a per-event `step_key`. The hub drops a repeat of the same key within a session, so a step that executed but did not reach the journal before a crash cannot post its assistant or tool message twice. Restore uses the same keys, so a retried journal append cannot duplicate an event that adoption already showed. Streaming `assistant_delta` events have no key and may repeat for the interrupted step. The internal events endpoint has no batch-level key.
 
 Retention is bounded per session (`sessions.event_buffer`, default 5000 events). Finalized sessions are dropped from memory after `sessions.retention` (default `30m`). Thread buffers are lost on restart; session records survive it in the record store (see [State model](#state-model)). On adoption, the last journaled turn's events are replayed into the new thread (without entering the inbox), so a control-plane restart does not lose the in-flight turn from the UI. Durable history is the artifact bundle plus the journal.
+
+A message accepted before its turn starts is also durable. `PostMessage` and
+`Create` write a pending-inbox record to the journal, keyed by the session and
+the event sequence that will become the turn key, before they acknowledge the
+caller. The record is deleted in the same journal transaction that appends step
+0 of the turn. Adoption reads the remaining records and puts each event back on
+the new hub's inbox under its original sequence, and restores a thread copy
+with a new sequence. Keeping the sequence is what makes redelivery idempotent:
+the runtime's inbox cursor treats an event it already read as consumed, and the
+step-0 identity check (`sameTurnEvent`) replays the journaled turn instead of
+starting a second one. The runtime applies backpressure when its in-memory
+message queue is full instead of dropping the message, so a connected runtime
+keeps the same guarantee.
 
 ## Artifact format
 

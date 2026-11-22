@@ -15,6 +15,7 @@ type Memory struct {
 	floor   map[string]int64
 	last    map[string]int64
 	calls   map[string]map[string]Call
+	pending map[string]map[int64]Pending
 }
 
 // NewMemory returns an empty in-memory store.
@@ -24,6 +25,7 @@ func NewMemory() *Memory {
 		floor:   map[string]int64{},
 		last:    map[string]int64{},
 		calls:   map[string]map[string]Call{},
+		pending: map[string]map[int64]Pending{},
 	}
 }
 
@@ -49,6 +51,11 @@ func (m *Memory) Append(_ context.Context, e Entry) error {
 	}
 	steps[e.Step] = cloneEntry(e)
 	m.last[e.SessionID] = e.Turn
+	if e.Step == 0 {
+		// The runtime started the turn. Its sequence is now durable in the
+		// journal, so the pending copy must not be delivered again.
+		delete(m.pending[e.SessionID], e.Turn)
+	}
 	return nil
 }
 
@@ -105,7 +112,49 @@ func (m *Memory) Reserve(_ context.Context, session string, floor int64) error {
 	return nil
 }
 
-// Delete removes a session's steps, sequence reservation, and tool calls.
+// AddPending records one accepted message.
+func (m *Memory) AddPending(_ context.Context, p Pending) error {
+	if err := validatePending(p); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	records, ok := m.pending[p.SessionID]
+	if !ok {
+		records = map[int64]Pending{}
+		m.pending[p.SessionID] = records
+	}
+	records[p.Seq] = clonePending(p)
+	return nil
+}
+
+// Pending returns a session's unstarted messages in sequence order.
+func (m *Memory) Pending(_ context.Context, session string) ([]Pending, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	records := m.pending[session]
+	seqs := make([]int64, 0, len(records))
+	for seq := range records {
+		seqs = append(seqs, seq)
+	}
+	sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
+	out := make([]Pending, 0, len(seqs))
+	for _, seq := range seqs {
+		out = append(out, clonePending(records[seq]))
+	}
+	return out, nil
+}
+
+// DeletePending removes one pending message.
+func (m *Memory) DeletePending(_ context.Context, session string, seq int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.pending[session], seq)
+	return nil
+}
+
+// Delete removes a session's steps, sequence reservation, pending messages,
+// and tool calls.
 func (m *Memory) Delete(_ context.Context, session string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -113,6 +162,7 @@ func (m *Memory) Delete(_ context.Context, session string) error {
 	delete(m.floor, session)
 	delete(m.last, session)
 	delete(m.calls, session)
+	delete(m.pending, session)
 	return nil
 }
 

@@ -126,6 +126,49 @@ func (h *Hub) Restore(sessionID string, ev model.Event) model.Event {
 	return h.append(sessionID, ev, false)
 }
 
+// Redeliver puts a message the control plane accepted before a restart back
+// on the inbox, keeping its original sequence. That sequence is the turn key
+// the sender's 202 promised, and the runtime's inbox cursor and step-0 check
+// use it to avoid starting the same message twice. It allocates no new
+// sequence and does not change the visible thread: the sequence is below the
+// seed adoption installed, so it could not be appended in order. Adoption
+// restores a separate thread copy with a new sequence.
+func (h *Hub) Redeliver(sessionID string, ev model.Event) bool {
+	if ev.Seq <= 0 {
+		return false
+	}
+	h.Create(sessionID)
+	h.mu.Lock()
+	s := h.streams[sessionID]
+	h.mu.Unlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.inbox {
+		if existing.Seq == ev.Seq {
+			return false
+		}
+	}
+	ev.SessionID = sessionID
+	s.inbox = append(s.inbox, ev)
+	if len(s.inbox) > s.max {
+		// The inbox count cap is the same one a live post obeys. A runtime
+		// that falls this far behind sees the same bounded window.
+		s.inbox = append([]model.Event(nil), s.inbox[len(s.inbox)-s.max:]...)
+	}
+	for sub := range s.subs {
+		if sub.filter != nil && !sub.filter(ev) {
+			continue
+		}
+		select {
+		case sub.ch <- ev:
+		default:
+			// Slow subscriber: the durable copy is replayed on reconnect.
+		}
+	}
+	return true
+}
+
 func (h *Hub) append(sessionID string, ev model.Event, inbox bool) model.Event {
 	h.Create(sessionID)
 	h.mu.Lock()

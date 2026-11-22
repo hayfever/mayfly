@@ -671,7 +671,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 	m.hub.Create(id)
 	m.persistInstance(inst)
 	m.notifyCreated()
-	m.appendEvent(inst, model.Event{
+	promptEvent := m.appendEvent(inst, model.Event{
 		Type:  model.EventUserMessage,
 		Actor: "trigger",
 		Text:  prompt,
@@ -681,6 +681,18 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 			Event: opts.Trigger.Event,
 		},
 	})
+	// The initial prompt is durable before Create returns and before the
+	// runtime starts, so a control-plane restart during a slow image pull or
+	// scheduling cannot lose it. A write failure ends the session here: the
+	// caller never receives a session whose first turn is not recoverable.
+	if err := m.persistPending(inst, promptEvent); err != nil {
+		m.mu.Lock()
+		inst.idempotencyKey = ""
+		m.mu.Unlock()
+		m.finalize(inst, model.StatusFailed, "journal", "could not persist the initial prompt: "+err.Error())
+		snapshot := m.copySession(inst)
+		return &snapshot, err
+	}
 	m.appendEvent(inst, model.Event{Type: model.EventStatus, Actor: "mayfly", Text: "Session created.", Data: model.StatusData{Status: model.StatusPending}})
 
 	startCtx, cancel := context.WithTimeout(ctx, 90*time.Second)

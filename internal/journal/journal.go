@@ -82,11 +82,13 @@ type Sequencer interface {
 type Durable interface {
 	Store
 	Sequencer
+	PendingStore
 	// MaxTurn reports the highest turn with a journaled entry, or zero.
 	// Turn keys are reserved before use, so it is a safe seed floor.
 	MaxTurn(ctx context.Context, session string) (int64, error)
-	// Delete removes every step and reservation for a session. Finalizing a
-	// session deletes its journal: the artifact bundle is the durable history.
+	// Delete removes every step, reservation, and pending message for a
+	// session. Finalizing a session deletes its journal: the artifact bundle
+	// is the durable history.
 	Delete(ctx context.Context, session string) error
 }
 

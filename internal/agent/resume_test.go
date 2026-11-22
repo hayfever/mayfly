@@ -672,3 +672,43 @@ func TestHandleTurnRejectsStepGap(t *testing.T) {
 		t.Fatal("a step gap was not fatal")
 	}
 }
+
+// TestRedeliveredPendingEventKeepsItsTurnKey covers adoption's redelivery of a
+// message accepted before a control-plane restart. The event arrives under the
+// sequence the sender was promised, so the journaled step 0 describes this
+// exact message and the runtime replays that turn instead of starting a second
+// one under a new key.
+func TestRedeliveredPendingEventKeepsItsTurnKey(t *testing.T) {
+	t0 := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
+	redelivered := model.Event{Seq: 9, Type: model.EventUserMessage, Actor: "user", Text: "queued", Time: t0}
+	input, err := json.Marshal(redelivered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := journal.NewMemory()
+	if err := store.Append(context.Background(), journal.Entry{
+		SessionID: "s1", Turn: redelivered.Seq, Step: 0, Name: "user",
+		Input: input, Output: json.RawMessage(`{"message":{"role":"user","content":"queued"}}`), ConvLen: 10,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := store.Turn(context.Background(), "s1", redelivered.Seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyTurn(entries, redelivered); err != nil {
+		t.Fatalf("the reserved turn key was rejected: %v", err)
+	}
+	// A new key or changed content would describe a different message, and
+	// starting that turn is the duplicate this guarantee prevents.
+	for name, ev := range map[string]model.Event{
+		"new key":   {Seq: 10, Type: redelivered.Type, Actor: redelivered.Actor, Text: redelivered.Text, Time: t0},
+		"new text":  {Seq: 9, Type: redelivered.Type, Actor: redelivered.Actor, Text: "other", Time: t0},
+		"new time":  {Seq: 9, Type: redelivered.Type, Actor: redelivered.Actor, Text: redelivered.Text, Time: t0.Add(time.Second)},
+		"new actor": {Seq: 9, Type: redelivered.Type, Actor: "other", Text: redelivered.Text, Time: t0},
+	} {
+		if err := verifyTurn(entries, ev); err == nil {
+			t.Fatalf("%s: a different message passed the step-0 identity check", name)
+		}
+	}
+}
