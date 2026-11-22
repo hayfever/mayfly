@@ -194,6 +194,34 @@ func (s *boltStore) Claim(_ context.Context, max int) ([]Lease, error) {
 				continue
 			}
 			job.ID = id
+			if max := s.cfg.MaxAttempts; max > 0 && job.Attempts >= max {
+				// The last attempt was never settled: the worker died, or its
+				// process was killed. Count it once more only to bury the job.
+				buried, berr := json.Marshal(deadRecord{
+					Job:      job,
+					Error:    expiredLeaseError(job.Attempts),
+					FailedAt: now,
+				})
+				if berr != nil {
+					return berr
+				}
+				if err := tx.Bucket(bucketDead).Put([]byte(id), buried); err != nil {
+					return err
+				}
+				if err := jobs.Delete([]byte(id)); err != nil {
+					return err
+				}
+				moves = append(moves, move{from: append([]byte(nil), key...)})
+				continue
+			}
+			job.Attempts++
+			updated, uerr := json.Marshal(job)
+			if uerr != nil {
+				return uerr
+			}
+			if err := jobs.Put([]byte(id), updated); err != nil {
+				return err
+			}
 			leases = append(leases, Lease{ID: id, Job: job, Deadline: deadline})
 			moves = append(moves, move{from: append([]byte(nil), key...)})
 		}
@@ -217,6 +245,9 @@ func (s *boltStore) Claim(_ context.Context, max int) ([]Lease, error) {
 
 func (s *boltStore) Ack(_ context.Context, lease Lease, result Result) error {
 	now := s.now()
+	if lease.Job.Attempts > 0 {
+		lease.Job.Attempts--
+	}
 	payload, err := json.Marshal(doneRecord{Job: lease.Job, SessionID: result.SessionID, FinishedAt: now})
 	if err != nil {
 		return err
@@ -255,7 +286,6 @@ func (s *boltStore) Nack(_ context.Context, lease Lease, cause error) error {
 		if err := json.Unmarshal(payload, &job); err != nil {
 			return err
 		}
-		job.Attempts++
 		if max := s.cfg.MaxAttempts; max > 0 && job.Attempts >= max {
 			buried, err := json.Marshal(deadRecord{Job: job, Error: causeString(cause), FailedAt: now})
 			if err != nil {
@@ -292,6 +322,21 @@ func (s *boltStore) Release(_ context.Context, lease Lease, after time.Duration)
 		ready := tx.Bucket(bucketReady)
 		if !holdsLease(ready, lease) {
 			return ErrLeaseLost
+		}
+		payload := tx.Bucket(bucketJobs).Get([]byte(lease.ID))
+		var job Job
+		if err := json.Unmarshal(payload, &job); err != nil {
+			return err
+		}
+		if job.Attempts > 0 {
+			job.Attempts--
+		}
+		updated, err := json.Marshal(job)
+		if err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketJobs).Put([]byte(lease.ID), updated); err != nil {
+			return err
 		}
 		if err := ready.Delete(readyKey(lease.Deadline, lease.ID)); err != nil {
 			return err

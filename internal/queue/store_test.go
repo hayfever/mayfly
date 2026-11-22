@@ -291,6 +291,43 @@ func TestStoreVisibilityExpiryReclaims(t *testing.T) {
 	}
 }
 
+func TestStoreExpiredFinalAttemptIsBuried(t *testing.T) {
+	cfg := shortLeaseConfig(t)
+	cfg.MaxAttempts = 2
+	backends := clockedBackends(t, cfg)
+	for name, store := range backends.stores {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			job := testJob("poison")
+			if err := store.Accept(ctx, job); err != nil {
+				t.Fatal(err)
+			}
+			// Two claims run the handler and then lose the process. Neither
+			// settles the lease.
+			claimOne(t, store)
+			backends.advance(cfg.VisibilityTimeout.Std() + time.Millisecond)
+			second := claimOne(t, store)
+			if second.Job.Attempts != 2 {
+				t.Fatalf("attempts = %d, want 2", second.Job.Attempts)
+			}
+			backends.advance(cfg.VisibilityTimeout.Std() + time.Millisecond)
+			if leases, err := store.Claim(ctx, 1); err != nil || len(leases) != 0 {
+				t.Fatalf("expired final attempt was claimed again: %v, %v", leases, err)
+			}
+			record, ok, err := store.Get(ctx, job.ID)
+			if err != nil || !ok {
+				t.Fatalf("dead record = %+v, %v, %v", record, ok, err)
+			}
+			if record.State != StateDead || record.Job.Attempts != 2 {
+				t.Fatalf("record = %+v, want dead after 2 attempts", record)
+			}
+			if !strings.Contains(record.Error, "lease expired") {
+				t.Fatalf("dead error = %q, want the expired-lease cause", record.Error)
+			}
+		})
+	}
+}
+
 func TestStoreRetryThenDead(t *testing.T) {
 	cfg := testConfig(t)
 	backends := clockedBackends(t, cfg)
@@ -310,8 +347,8 @@ func TestStoreRetryThenDead(t *testing.T) {
 			}
 			backends.advance(Backoff(1, cfg.RetryBase.Std()))
 			retry := claimOne(t, store)
-			if retry.Job.Attempts != 1 {
-				t.Fatalf("attempts = %d, want 1", retry.Job.Attempts)
+			if retry.Job.Attempts != 2 {
+				t.Fatalf("attempts = %d, want 2", retry.Job.Attempts)
 			}
 			if err := store.Nack(ctx, retry, errors.New("boom again")); err != nil {
 				t.Fatal(err)
@@ -548,6 +585,7 @@ func claimOne(t *testing.T, store Store) Lease {
 
 func TestStoreStaleLeaseCannotSettle(t *testing.T) {
 	cfg := shortLeaseConfig(t)
+	cfg.MaxAttempts = 4
 	backends := clockedBackends(t, cfg)
 	for name, store := range backends.stores {
 		t.Run(name, func(t *testing.T) {
@@ -570,9 +608,9 @@ func TestStoreStaleLeaseCannotSettle(t *testing.T) {
 			if err := store.Nack(ctx, current, errors.New("real failure")); err != nil {
 				t.Fatalf("current nack = %v", err)
 			}
-			backends.advance(Backoff(1, cfg.RetryBase.Std()))
-			if retry := claimOne(t, store); retry.Job.Attempts != 1 {
-				t.Fatalf("attempts = %d, want 1", retry.Job.Attempts)
+			backends.advance(Backoff(2, cfg.RetryBase.Std()))
+			if retry := claimOne(t, store); retry.Job.Attempts != 3 {
+				t.Fatalf("attempts = %d, want 3", retry.Job.Attempts)
 			}
 		})
 	}

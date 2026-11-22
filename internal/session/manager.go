@@ -406,6 +406,7 @@ func (m *Manager) dispatch(fn func()) bool {
 	m.mu.Unlock()
 	go func() {
 		defer m.wg.Done()
+		defer m.recoverDispatch()
 		fn()
 	}()
 	return true

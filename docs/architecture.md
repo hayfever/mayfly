@@ -65,7 +65,7 @@ Properties:
 
 - Delivery key: `X-GitHub-Delivery`, Slack `trigger_id`, or an `Idempotency-Key` header. The same key accepted twice stores one job; the second response reports `duplicate: true`.
 - Capacity: a worker claims only when `sessions.max_concurrent` has a free slot. A race returns `ErrCapacity`, which releases the job without counting an attempt.
-- Retry: failures back off from `queue.retry_base`, doubling to ten minutes. A job that reaches `queue.max_attempts` is buried in the dead set.
+- Retry: each claim counts an attempt, so a crash or handler panic cannot retry a job forever. A recovered panic is logged with its stack and Nacked. Failures back off from `queue.retry_base`, doubling to ten minutes. A job that reaches `queue.max_attempts` is buried in the dead set.
 - Visibility: a worker that dies mid-job loses its lease after `queue.visibility_timeout`; the job becomes claimable again. Delivery is at least once: if a worker creates the session and stops before acknowledging the job, the job runs again after the timeout. A lease that expired cannot reschedule a job another worker now holds.
 - Correlation: the job id is stored on the session (`trigger.job_id`), and the queue keeps a completed record for `queue.tombstone_ttl`, so either side can be found from the other.
 - Dead letters: a job that exhausts `queue.max_attempts` is buried with its last error. `GET /api/v1/queue/dead` lists buried jobs; the admin API can retry or delete them.
@@ -354,7 +354,7 @@ Skills are Markdown files from `skills.dirs` and from pinned `skills.sources` ta
 
 ## Metrics and logs
 
-`/metrics` serves Prometheus metrics on `server.addr`, or on `server.metrics.address` as a listener of its own. The registry covers sessions, queue depth and attempts, HTTP requests, model calls, gateway calls, and build info, plus the Go and process collectors. Labels are bounded: `route` is the registered route template or `unmatched`, `method` is a standard HTTP method or `OTHER`, and a refused call to a tool the session does not have is `tool="unknown"`. No metric carries a session id, job id, or raw path.
+`/metrics` serves Prometheus metrics on `server.addr`, or on `server.metrics.address` as a listener of its own. The registry covers sessions, queue depth and attempts, HTTP requests, model calls, gateway calls, recovered panics (`mayfly_panics_total{component}`), and build info, plus the Go and process collectors. Labels are bounded: `route` is the registered route template or `unmatched`, `method` is a standard HTTP method or `OTHER`, and a refused call to a tool the session does not have is `tool="unknown"`. No metric carries a session id, job id, or raw path.
 
 Each HTTP request writes one structured log line with its request id. The control plane accepts a well-formed `X-Request-Id` or generates one, and returns it in the response header and in `error.details.request_id`. `MAYFLY_LOG_LEVEL` sets the level. See [observability.md](observability.md).
 

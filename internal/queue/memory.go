@@ -116,6 +116,15 @@ func (s *memoryStore) Claim(_ context.Context, max int) ([]Lease, error) {
 	leases := make([]Lease, 0, len(ready))
 	for _, c := range ready {
 		entry := s.jobs[c.id]
+		if max := s.cfg.MaxAttempts; max > 0 && entry.job.Attempts >= max {
+			// The last attempt was never settled: the worker died, or its
+			// process was killed. Count it once more only to bury the job.
+			entry.dead = true
+			entry.deadErr = expiredLeaseError(entry.job.Attempts)
+			entry.deadAt = now
+			continue
+		}
+		entry.job.Attempts++
 		entry.readyAt = now.Add(s.cfg.VisibilityTimeout.Std())
 		leases = append(leases, Lease{ID: c.id, Job: entry.job, Deadline: entry.readyAt})
 	}
@@ -130,6 +139,9 @@ func (s *memoryStore) Ack(_ context.Context, lease Lease, result Result) error {
 		return nil
 	}
 	entry.done = true
+	if entry.job.Attempts > 0 {
+		entry.job.Attempts--
+	}
 	entry.sessionID = result.SessionID
 	entry.finishedAt = s.now()
 	return nil
@@ -146,7 +158,6 @@ func (s *memoryStore) Nack(_ context.Context, lease Lease, cause error) error {
 	if entry.done || entry.dead || !entry.readyAt.Equal(lease.Deadline) {
 		return ErrLeaseLost
 	}
-	entry.job.Attempts++
 	if max := s.cfg.MaxAttempts; max > 0 && entry.job.Attempts >= max {
 		entry.dead = true
 		entry.deadErr = causeString(cause)
@@ -166,6 +177,9 @@ func (s *memoryStore) Release(_ context.Context, lease Lease, after time.Duratio
 	}
 	if entry.done || entry.dead || !entry.readyAt.Equal(lease.Deadline) {
 		return ErrLeaseLost
+	}
+	if entry.job.Attempts > 0 {
+		entry.job.Attempts--
 	}
 	entry.readyAt = s.now().Add(after)
 	return nil

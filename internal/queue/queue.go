@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/hayfever/mayfly/internal/config"
@@ -79,8 +80,12 @@ type Job struct {
 	Options        session.CreateOptions
 	Source         *SourceJob
 	AcceptedAt     time.Time
-	Attempts       int
-	Metadata       map[string]string
+	// Attempts counts failed attempts. Claim adds the in-flight attempt before
+	// the handler runs; Nack keeps it, and Ack or Release removes it. A worker
+	// that dies mid-handle leaves the attempt counted, so an unrecoverable
+	// poison job still reaches max_attempts.
+	Attempts int
+	Metadata map[string]string
 }
 
 // SourceJob identifies one scheduled run of one data source.
@@ -149,12 +154,14 @@ type Stats struct {
 type Store interface {
 	// Accept stores a job once. A repeated idempotency key returns ErrDuplicate.
 	Accept(ctx context.Context, job Job) error
-	// Claim leases up to max due jobs.
+	// Claim leases up to max due jobs and counts one attempt per job. A job
+	// that used its last attempt without settling is buried as dead.
 	Claim(ctx context.Context, max int) ([]Lease, error)
-	// Ack completes a job and keeps a short-lived record of its session.
+	// Ack completes a job and keeps a short-lived record of its session. The
+	// successful attempt is not a failed attempt, so its count is removed.
 	Ack(ctx context.Context, lease Lease, result Result) error
-	// Nack records a failed attempt, requeues with backoff, or buries the job
-	// when max_attempts is reached.
+	// Nack settles a failed handler attempt: it requeues with backoff, or
+	// buries the job when the attempt reached max_attempts.
 	Nack(ctx context.Context, lease Lease, cause error) error
 	// Release requeues a job without counting an attempt.
 	Release(ctx context.Context, lease Lease, after time.Duration) error
@@ -264,6 +271,14 @@ func Backoff(attempts int, base time.Duration) time.Duration {
 		delay = 10 * time.Minute
 	}
 	return delay
+}
+
+// expiredLeaseError is the dead-letter cause when a job used its last attempt
+// and the worker never settled it, because the process crashed, was killed, or
+// could not recover. It names the attempt count so an operator can tell this
+// apart from a handler error.
+func expiredLeaseError(attempts int) string {
+	return fmt.Sprintf("job lease expired after %d attempts without a result", attempts)
 }
 
 // due reports whether a job with this ready time can be claimed.

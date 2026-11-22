@@ -113,9 +113,10 @@ A turn is executed as ordered journaled steps. The journal lives in the control 
 ```mermaid
 stateDiagram-v2
   [*] --> queued: Accept (dedupe, max_jobs)
-  queued --> leased: Claim (lease deadline = now + visibility_timeout)
+  queued --> leased: Claim (attempt + 1, lease deadline = now + visibility_timeout)
+  queued --> dead: Claim when an expired lease already used max_attempts
   leased --> queued: ready time passes (lease expired or delay over)
-  leased --> leased: Release (ErrCapacity, no attempt) or Nack (attempt + 1, backoff)
+  leased --> leased: Release (ErrCapacity, attempt refunded) or Nack (backoff)
   leased --> done: Ack (stores session id)
   leased --> dead: Nack when attempts reach max_attempts
   dead --> queued: Retry (attempts reset to 0)
@@ -135,7 +136,7 @@ Queue:
 - `max_jobs` (default 1000) counts queued and leased jobs only. Done and dead jobs do not count.
 - Delivery is at least once. A lease is identified by its deadline. In bbolt that is the `ready` key, in Redis the sorted-set score, and in memory `readyAt`. `Nack` and `Release` succeed only while that deadline is still current, and otherwise return `ErrLeaseLost`. `Ack` does not check the lease. If a worker creates a session and then dies before `Ack`, the job runs again after `visibility_timeout` (default 5m, minimum 2m). While a handler runs, the worker renews its lease every third of `visibility_timeout`, so the timeout detects a crashed worker instead of bounding job length. Each job kind has its own deadline: `sources.job_timeout` for schedule jobs, 5 minutes for other kinds.
 - The worker never claims more than `min(concurrency, FreeSlots()) - inflight`. Hitting the session cap is not a failure: `ErrCapacity` becomes `ErrRetryLater`, and the job is released after `5 x poll_interval` without spending an attempt.
-- Failure backoff is `retry_base << (attempts-1)`, capped at 10 minutes. At `max_attempts` (default 5) the job is buried with its last error. Only `Retry` (attempts reset to 0) or `Delete` removes it from the dead set.
+- Attempts are counted at claim time, so a handler that panics or a process that dies mid-job still spends one. The worker recovers a handler panic, logs the stack, increments `mayfly_panics_total{component="queue"}`, and Nacks the job. Failure backoff is `retry_base << (attempts-1)`, capped at 10 minutes. At `max_attempts` (default 5) the job is buried with its last error; a lease that expires on the final attempt is buried on the next claim with a `lease expired` error. Only `Retry` (attempts reset to 0) or `Delete` removes it from the dead set.
 - `Ack` keeps a done record (job plus session ID) for `tombstone_ttl` (default 1h). The session also stores the job ID in `trigger.job_id`, so either side can be found from the other. bbolt purges expired records lazily on `Accept`, at most 256 per call.
 - On shutdown the worker releases leases it claimed but never started. Handlers already running finish on a context detached from shutdown.
 

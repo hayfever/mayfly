@@ -237,12 +237,40 @@ func (s *redisStore) Claim(ctx context.Context, max int) ([]Lease, error) {
 			continue
 		}
 		job.ID = id
+		if max := s.cfg.MaxAttempts; max > 0 && job.Attempts >= max {
+			// The last attempt was never settled: the worker died, or its
+			// process was killed. Count it once more only to bury the job.
+			buried, _ := json.Marshal(deadRecord{
+				Job:      job,
+				Error:    expiredLeaseError(job.Attempts),
+				FailedAt: s.now(),
+			})
+			pipe := s.client.TxPipeline()
+			pipe.HSet(ctx, s.dead, id, buried)
+			pipe.HDel(ctx, s.jobs, id)
+			pipe.ZRem(ctx, s.queue, id)
+			if _, perr := pipe.Exec(ctx); perr != nil {
+				return leases, fmt.Errorf("queue bury expired job %s: %w", id, perr)
+			}
+			continue
+		}
+		job.Attempts++
+		updated, err := json.Marshal(job)
+		if err != nil {
+			return leases, fmt.Errorf("queue claim attempts %s: %w", id, err)
+		}
+		if err := s.client.HSet(ctx, s.jobs, id, updated).Err(); err != nil {
+			return leases, fmt.Errorf("queue claim attempts %s: %w", id, err)
+		}
 		leases = append(leases, Lease{ID: id, Job: job, Deadline: deadline})
 	}
 	return leases, nil
 }
 
 func (s *redisStore) Ack(ctx context.Context, lease Lease, result Result) error {
+	if lease.Job.Attempts > 0 {
+		lease.Job.Attempts--
+	}
 	record, err := json.Marshal(doneRecord{Job: lease.Job, SessionID: result.SessionID, FinishedAt: s.now()})
 	if err != nil {
 		return err
@@ -267,7 +295,6 @@ func (s *redisStore) Nack(ctx context.Context, lease Lease, cause error) error {
 	if err := json.Unmarshal(payload, &job); err != nil {
 		return err
 	}
-	job.Attempts++
 	mode := "retry"
 	var updated []byte
 	if max := s.cfg.MaxAttempts; max > 0 && job.Attempts >= max {
@@ -284,7 +311,25 @@ func (s *redisStore) Nack(ctx context.Context, lease Lease, cause error) error {
 }
 
 func (s *redisStore) Release(ctx context.Context, lease Lease, after time.Duration) error {
-	return s.runSettle(ctx, lease, "release", s.now().Add(after).UnixMilli(), nil)
+	payload, err := s.client.HGet(ctx, s.jobs, lease.ID).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return s.runSettle(ctx, lease, "release", s.now().Add(after).UnixMilli(), nil)
+	}
+	if err != nil {
+		return err
+	}
+	var job Job
+	if err := json.Unmarshal(payload, &job); err != nil {
+		return err
+	}
+	if job.Attempts > 0 {
+		job.Attempts--
+	}
+	updated, err := json.Marshal(job)
+	if err != nil {
+		return err
+	}
+	return s.runSettle(ctx, lease, "retry", s.now().Add(after).UnixMilli(), updated)
 }
 
 func (s *redisStore) Extend(ctx context.Context, lease Lease, ttl time.Duration) (Lease, error) {

@@ -1,13 +1,13 @@
 # Formal verification
 
 Two checks cover behavior that unit tests can only sample: TLA+ models of the
-session lifecycle and of hub retention, and native Go fuzz targets. A third
-check covers the chart RBAC over its whole namespace configuration space. Each
-has a script or command and a CI job.
+session lifecycle, hub retention, and queue poison recovery, and native Go fuzz
+targets. A third check covers the chart RBAC over its whole namespace
+configuration space. Each has a script or command and a CI job.
 
 | Check | Script | CI job |
 |---|---|---|
-| TLC on `SessionResume.tla` and `HubRetention.tla` | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
+| TLC on `SessionResume.tla`, `HubRetention.tla`, and `QueuePoison.tla` | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
 | TLC with two sessions | `hack/tlc.sh --deep` | `tlc-deep` in verify.yml, nightly and on demand |
 | Every fuzz target | `hack/fuzz.sh` | `fuzz-nightly` in verify.yml |
 | Chart RBAC property check | `MAYFLY_REQUIRE_HELM=1 go test ./test/chart/...` | `chart` step of the `test` job in [ci.yml](../.github/workflows/ci.yml) |
@@ -189,6 +189,66 @@ The model abstracts these details:
 - Subscribers and live fan-out are outside the model; it checks retention, not
   channel delivery.
 
+## Queue poison-job model
+
+`spec/tla/QueuePoison.tla` models one queue with a poison job and a healthy
+job. It covers the crash loop that a panic in a queue handler used to cause:
+the worker catches the panic and Nacks the job, a crash keeps a counted
+attempt, the lease expires, the worker restarts, and a job that used all its
+attempts is buried in the dead set.
+
+| TLA+ action | Go code it models |
+|---|---|
+| `Claim` | `queue.Worker.Run` and `Store.Claim` (`internal/queue/worker.go`, `memory.go`, `bbolt.go`, `redis.go`). The claim increments `Job.Attempts`; a job at `queue.max_attempts` is written to the dead set instead of leased |
+| `Handle` | `queue.Worker.invoke` and `queue.Worker.reportPanic` (`internal/queue/worker.go`), then `Store.Nack`. A recovered panic leaves the attempt counted, logs the stack, and increments `mayfly_panics_total{component="queue"}` |
+| `ExpireLease` | the visibility timeout (`queue.visibility_timeout`). The next `Claim` returns the job to a worker. The model does not count an attempt here, because `Claim` does |
+| `Restart` | a control-plane process restart after a crash; no single Go function, because the process is gone |
+| `Stutter` | no Go function; a queue with no ready job |
+
+`RecoverPanics` and `CountAttemptOnClaim` are the fault switches. Both are
+`TRUE` in the positive cfg. `RecoverPanics = FALSE` models a handler panic that
+ends the process, which is the pre-fix `Worker.handle`. `CountAttemptOnClaim =
+FALSE` models the old counter, which incremented only on `Nack`; a reclaim after
+a crash then kept the same attempt count forever.
+
+| Property | Meaning | Tests that sample it |
+|---|---|---|
+| `TypeOK` | Every variable stays in its declared domain | none; model well-formedness |
+| `AttemptsWithinMax` | No job exceeds `queue.max_attempts` handler attempts | `TestStoreRetryThenDead`, `TestStoreExpiredFinalAttemptIsBuried` |
+| `NoLostJob` | Every job stays in exactly one of `ready`, `leased`, `done`, or `dead` | `TestStoreRetryThenDead`, `TestStoreRecordsAndDeadLetters`, `TestStoreExpiredFinalAttemptIsBuried` |
+| `NoPanicCrash` | A handler panic never crashes the worker | `TestWorkerRecoversHandlerPanicAndBuriesPoisonJob`, `TestDispatchRecoversPanicAndReleasesShutdown` |
+| `CrashesBounded` | A poison job crashes the process at most `MaxAttempts` times, even when the panic is not recoverable | `TestStoreExpiredFinalAttemptIsBuried` |
+| `HealthyJobsProgress` | A healthy job is eventually done while a poison job retries or is buried | `TestWorkerRecoversHandlerPanicAndBuriesPoisonJob` |
+
+`QueuePoison.cfg` uses `MaxAttempts = 2`, one poison job, and one healthy job.
+It checks every invariant and `HealthyJobsProgress`: 38 states generated, 15
+distinct, under one second.
+
+`QueuePoison_no_recover_buggy.cfg` sets `RecoverPanics = FALSE` and must report
+`NoPanicCrash` (13 states generated, 9 distinct). The panic ends the process,
+so every other job stops with it. `QueuePoison_no_claim_count_buggy.cfg` sets
+`RecoverPanics = FALSE` and `CountAttemptOnClaim = FALSE` and must report
+`CrashesBounded` (79 states generated, 33 distinct). A reclaim after a crash
+keeps the same attempt count, so the poison job crashes without bound. That cfg
+omits `NoPanicCrash`, because the first unrecovered panic violates it before the
+crash bound is reachable.
+
+The model abstracts these details:
+
+- Time, backoff, and the visibility timeout are actions, not durations. A
+  reclaim can happen immediately after a crash, and this only makes the
+  negative cfg easier to reach.
+- The model has one worker but permits several leased jobs. `Claim(j)`
+  fairness is per job, so `HealthyJobsProgress` does not rely on a schedule.
+- A job payload is its identity and its attempt count. The panic value, the
+  stack, and the dead-letter error string are outside the model.
+- One poison kind and one handler. The real queue has session and source jobs;
+  both reach `Worker.invoke` and the same recover.
+- The memory, bbolt, and Redis stores have one model. The conformance suite
+  runs `TestStoreExpiredFinalAttemptIsBuried` against each backend that the
+  test environment provides.
+- `Retry` and `Delete` on the dead-letter admin API are outside the model.
+
 ## Fuzz targets for the bounds
 
 - `FuzzHubAppendBudget` (`internal/hub`) drives appends, restores, and replays,
@@ -203,6 +263,19 @@ The model abstracts these details:
   boundary seeds at the cap, one byte over, and a straddling rune.
   `FuzzGitHubParse` applies the UTF-8 assertion to every input, and one seed
   carries a non-UTF-8 `X-GitHub-Event` header.
+- `FuzzWorkerHandlerPanic` (`internal/queue`) runs a handler that panics on
+  fuzz-chosen bytes. It asserts that the worker recovers, counts
+  `max_attempts` attempts, buries the poison job, and still completes a healthy
+  job. Seeds cover an empty value, a normal value, and non-UTF-8 bytes. A
+  60-second run made 13,622 executions.
+- `FuzzHTTPJSONProjection` (`internal/sources`) decodes arbitrary upstream JSON
+  and projects it with arbitrary configured paths. It asserts that a bad path or
+  an unexpected shape returns an error or an error document, and that the error
+  and diff bounds hold. A 60-second run made 1,428,289 executions.
+- `FuzzRunArtifactDecode` (`internal/workflow`) feeds arbitrary bytes to the
+  source-run resume path. A torn, wrong-run, unknown-field, or newer-version
+  artifact must return an error, never a panic. A 60-second run made 44,824
+  executions.
 
 ## What is abstracted away
 

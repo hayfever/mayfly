@@ -1,14 +1,15 @@
-# TLA+ session and retention models
+# TLA+ lifecycle, retention, and queue models
 
 `SessionResume.tla` models the Mayfly session lifecycle and resume protocol as
 implemented. `HubRetention.tla` models the in-memory hub: the per-event cap,
 the retained thread byte budget, the thread and inbox count caps, the inbox
-exemption, the dedup-key table, and the restore path. A cfg runs the
-module named by its basename up to the first underscore, so
-`HubRetention_evict_inbox_buggy.cfg` runs `HubRetention.tla`.
-[formal-verification.md](../../docs/formal-verification.md) maps each action
-to the Go code it models, lists the invariants, and states what the models
-abstract away.
+exemption, the dedup-key table, and the restore path. `QueuePoison.tla` models
+a queue with a poison job: claim, handler panic, Nack, lease expiry, restart,
+and burial at `max_attempts`. A cfg runs the module named by its basename up to
+the first underscore, so `HubRetention_evict_inbox_buggy.cfg` runs
+`HubRetention.tla`. [formal-verification.md](../../docs/formal-verification.md)
+maps each action to the Go code it models, lists the invariants, and states
+what the models abstract away.
 
 ## Run it
 
@@ -27,9 +28,10 @@ temporary directory, never into the repository.
 
 ## Config convention
 
-- `SessionResume.cfg` and `HubRetention.cfg` are the positive
+- `SessionResume.cfg`, `HubRetention.cfg`, and `QueuePoison.cfg` are the positive
   configurations. Each must pass with no invariant violation;
-  `SessionResume.cfg` must also prove both liveness properties.
+  `SessionResume.cfg` and `QueuePoison.cfg` must also prove their liveness
+  properties.
 - A configuration whose file name ends in `_buggy.cfg` is a negative check. It
   must produce an invariant violation, not a pass and not a parse error. The
   invariant name is in a comment line:
@@ -66,12 +68,18 @@ needs more time in `deep/`, which runs only in the nightly `tlc-deep` job.
 | `HubRetention_no_cap_buggy.cfg` | `CapEvents = FALSE`: a retained event exceeds the per-event cap |
 | `HubRetention_inbox_overflow_buggy.cfg` | `CapInbox = FALSE`: the inbox grows past its count cap |
 | `HubRetention_key_leak_buggy.cfg` | `EvictKeys = FALSE`: a dedup key outlives its evicted event |
+| `QueuePoison.cfg` | Claim, recovered panic, Nack, burial, and healthy progress, positive |
+| `QueuePoison_no_recover_buggy.cfg` | `RecoverPanics = FALSE`: a handler panic crashes the worker |
+| `QueuePoison_no_claim_count_buggy.cfg` | `RecoverPanics = FALSE` and `CountAttemptOnClaim = FALSE`: a crash loop never reaches `max_attempts` |
 | `deep/SessionResume_two_sessions.cfg` | Nightly only: two sessions, one turn each, one shared control-plane restart; safety invariants (about 4.4 million distinct states, 20 minutes on a 6-core desktop) |
 
 `HubRetention.cfg` runs eight appends over sizes `{1, 2, 3}` with a two-event
 count cap, a four-byte budget, a two-entry inbox cap, and one dedup key, so
 both eviction paths, the event cap, the inbox cap, and key eviction are
 reachable (2458 distinct states).
+
+`QueuePoison.cfg` uses two jobs, one poison, and `MaxAttempts = 2`, so the
+positive run explores 38 states (15 distinct) and proves healthy progress.
 
 ## Terminal states
 
