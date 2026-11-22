@@ -277,6 +277,32 @@ func TestGenericAndDatadogTitlesAreBounded(t *testing.T) {
 	}
 }
 
+func TestGitHubTitleReplacesInvalidUTF8(t *testing.T) {
+	const secret = "gh-secret"
+	body := []byte(`{"repository":{"full_name":"acme/app"},"sender":{"login":"alice"}}`)
+	header := http.Header{}
+	header.Set("X-GitHub-Event", "push\xff")
+	header.Set("X-GitHub-Delivery", "delivery-\xfe")
+	header.Set("X-Hub-Signature-256", "sha256="+hmacHex(secret, body))
+	res, err := Parse(config.TriggerConfig{Name: "github", Type: "github", Secret: secret}, header, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{
+		"title":       res.Options.Title,
+		"event":       res.Options.Trigger.Event,
+		"delivery":    res.DeliveryKey,
+		"prompt body": res.Options.Prompt,
+	} {
+		if !utf8.ValidString(value) {
+			t.Fatalf("%s is not valid UTF-8: %q", name, value)
+		}
+	}
+	if !strings.Contains(res.Options.Title, "\uFFFD") || !strings.Contains(res.Options.Title, "push") {
+		t.Fatalf("title = %q, want the event name with a replacement rune", res.Options.Title)
+	}
+}
+
 func TestTruncateKeepsRunes(t *testing.T) {
 	for _, tc := range []struct {
 		in    string
@@ -287,6 +313,8 @@ func TestTruncateKeepsRunes(t *testing.T) {
 		{"hello", 3, true},
 		{"a" + strings.Repeat("日", 10), 5, true},
 		{"a" + strings.Repeat("日", 10), 1, true},
+		{"a\xffb", 10, true},
+		{"a\xffb", 2, true},
 	} {
 		got := truncate(tc.in, tc.max)
 		if len(got) > tc.max {

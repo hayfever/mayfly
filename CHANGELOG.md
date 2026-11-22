@@ -20,6 +20,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 - An artifact bundle entry whose name is not valid UTF-8 is written with the same name the manifest lists.
 - A runtime event's text and payload strings are truncated rune-safely at `sessions.max_event_bytes` instead of being retained whole (#44).
 - A session title derived from a webhook field or sent to the API is capped at 200 bytes, rune-safely, before it reaches the queue envelope or the session record (#44).
+- A webhook header or prompt with invalid UTF-8 can no longer produce an invalid session title: invalid bytes are stored as U+FFFD (#44).
 - The hub evicts the oldest thread events when a session exceeds `sessions.event_buffer_bytes`, and keeps an unconsumed human message in the inbox through a runtime event flood (#44).
 - The control plane passes `sessions.event_buffer_bytes` to the hub, so the setting takes effect instead of leaving the hub on its default (#44).
 

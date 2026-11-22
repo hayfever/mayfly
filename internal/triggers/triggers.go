@@ -201,8 +201,8 @@ func parseGitHub(cfg config.TriggerConfig, header http.Header, body []byte) (*Re
 	if !verifyGitHub(cfg, header, body) {
 		return nil, ErrUnauthorized
 	}
-	event := header.Get("X-GitHub-Event")
-	delivery := header.Get("X-GitHub-Delivery")
+	event := textutil.Valid(header.Get("X-GitHub-Event"))
+	delivery := textutil.Valid(header.Get("X-GitHub-Delivery"))
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
@@ -510,11 +510,13 @@ func stringSlice(v any, fallback []string) []string {
 }
 
 // truncate returns s with at most max bytes, backing up to a UTF-8 sequence
-// boundary and ending a shortened value with an ellipsis.
+// boundary and ending a shortened value with an ellipsis. An invalid UTF-8
+// byte is replaced with U+FFFD, so the result is always valid text.
 func truncate(s string, max int) string {
 	if max <= 0 {
 		return ""
 	}
+	s = textutil.Valid(s)
 	if len(s) <= max {
 		return s
 	}

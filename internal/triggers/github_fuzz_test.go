@@ -11,6 +11,7 @@ import (
 
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/session"
+	"github.com/hayfever/mayfly/internal/textutil"
 )
 
 // FuzzGitHubParse checks the GitHub trigger: a signed delivery parses for any
@@ -64,16 +65,14 @@ func FuzzGitHubParse(f *testing.F) {
 		if res == nil {
 			t.Fatal("nil result with nil error")
 		}
-		if res.Options.Trigger.Kind != "github" || res.Options.Trigger.Event != event {
+		if want := textutil.Valid(event); res.Options.Trigger.Kind != "github" || res.Options.Trigger.Event != want {
 			t.Fatalf("trigger = %+v", res.Options.Trigger)
 		}
-		if delivery != "" {
-			if res.DeliveryKey != delivery {
-				t.Fatalf("delivery key = %q, want %q", res.DeliveryKey, delivery)
-			}
-			if res.Options.Trigger.Delivery != delivery {
-				t.Fatalf("trigger delivery = %q, want %q", res.Options.Trigger.Delivery, delivery)
-			}
+		if want := textutil.Valid(delivery); res.DeliveryKey != want {
+			t.Fatalf("delivery key = %q, want %q", res.DeliveryKey, want)
+		}
+		if res.Options.Trigger.Delivery != res.DeliveryKey {
+			t.Fatalf("trigger delivery = %q, want %q", res.Options.Trigger.Delivery, res.DeliveryKey)
 		}
 		if limit := (12 << 10) + len("…"); len(res.Options.Prompt) > limit {
 			t.Fatalf("prompt is %d bytes, over the %d-byte summary bound", len(res.Options.Prompt), limit)
@@ -81,7 +80,7 @@ func FuzzGitHubParse(f *testing.F) {
 		if len(res.Options.Title) > session.MaxTitleBytes {
 			t.Fatalf("title is %d bytes, over the %d-byte cap", len(res.Options.Title), session.MaxTitleBytes)
 		}
-		if !utf8.ValidString(res.Options.Title) && utf8.ValidString(event) {
+		if !utf8.ValidString(res.Options.Title) {
 			t.Fatalf("title is not valid UTF-8: %q", res.Options.Title)
 		}
 

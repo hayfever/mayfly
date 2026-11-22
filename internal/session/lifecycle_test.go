@@ -120,6 +120,27 @@ func TestCreateTruncatesOversizedTitle(t *testing.T) {
 	}
 }
 
+// TestCreateSanitizesInvalidTitle checks that a prompt with invalid UTF-8
+// cannot put an invalid title in the session record: the derived title takes
+// the same replacement rune the webhook triggers use.
+func TestCreateSanitizesInvalidTitle(t *testing.T) {
+	m := testManager(t)
+	m.runner = nopRunner{}
+	if err := m.loadAgents(); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := m.Create(context.Background(), CreateOptions{Prompt: "bad\xffprompt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.ValidString(sess.Title) {
+		t.Fatalf("title is not valid UTF-8: %q", sess.Title)
+	}
+	if !strings.Contains(sess.Title, "\uFFFD") {
+		t.Fatalf("title = %q, want a replacement rune", sess.Title)
+	}
+}
+
 func TestValidateRejectsOversizedDeliveryKey(t *testing.T) {
 	m := testManager(t)
 	m.runner = nopRunner{}

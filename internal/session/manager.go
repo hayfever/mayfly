@@ -541,7 +541,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 	if title == "" {
 		title = "Session " + id
 	}
-	title = textutil.Truncate(title, MaxTitleBytes)
+	title = textutil.Truncate(textutil.Valid(title), MaxTitleBytes)
 	systemPrompt, err := agent.RenderPrompt(promptData{
 		SessionID: id,
 		Title:     title,
