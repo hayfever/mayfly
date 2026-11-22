@@ -178,6 +178,8 @@ The model abstracts these details:
   `Consume` removes the oldest message when the runtime reads it, while the
   real hub keeps the copy until a later post drops it or eviction removes the
   thread copy.
+- `MaxInbox` is a constant separate from `MaxEvents`, so a cfg can shrink one
+  cap. The Go hub uses `sessions.event_buffer` for both.
 - `Keys` is a finite set of abstract step keys, and no event holds more than
   one. A real `StepKey` is a string such as `11/1/assistant`.
 - `DedupRetry` spends one append step from `MaxAppends`, while the Go reject
