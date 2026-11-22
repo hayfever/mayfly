@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/model"
@@ -211,4 +212,50 @@ func TestSubscribeAfterEvictedSeqReplaysTheRetainedSuffix(t *testing.T) {
 		}
 	}
 	t.Fatal("replay did not end")
+}
+
+// TestRedeliverKeepsReservedSequence covers adoption handing a message the
+// control plane accepted before a restart back to the inbox. The sequence is
+// the turn key, so redelivery must not allocate a new one, and a runtime that
+// already read that sequence must not receive it twice.
+func TestRedeliverKeepsReservedSequence(t *testing.T) {
+	h := New(10)
+	h.Seed("s1", 100)
+	ev := model.Event{
+		Seq:   5,
+		Time:  time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC),
+		Type:  model.EventUserMessage,
+		Actor: "user",
+		Text:  "queued",
+	}
+	ch, cancel := h.SubscribeInbox("s1", 0)
+	defer cancel()
+
+	if !h.Redeliver("s1", ev) {
+		t.Fatal("Redeliver refused a valid event")
+	}
+	if got := <-ch; got.Seq != ev.Seq || got.Text != ev.Text {
+		t.Fatalf("subscriber got %+v, want the reserved event", got)
+	}
+	if got := h.LastSeq("s1"); got != 100 {
+		t.Fatalf("LastSeq after redelivery = %d, want the adoption seed", got)
+	}
+	inbox := h.InboxAfter("s1", 0)
+	if len(inbox) != 1 || inbox[0].Seq != ev.Seq || inbox[0].Text != ev.Text || inbox[0].SessionID != "s1" {
+		t.Fatalf("inbox = %+v", inbox)
+	}
+	// A repeated adoption pass is idempotent.
+	if h.Redeliver("s1", ev) {
+		t.Fatal("Redeliver accepted the same sequence twice")
+	}
+	// The thread is not touched: adoption restores a separate display copy
+	// with a sequence above the seed.
+	if got := h.EventsAfter("s1", 0); len(got) != 0 {
+		t.Fatalf("redelivery changed the thread: %+v", got)
+	}
+	// A runtime whose cursor already passed the reserved sequence is not
+	// handed the message again.
+	if got := h.InboxAfter("s1", ev.Seq); len(got) != 0 {
+		t.Fatalf("inbox after the consumed sequence = %+v", got)
+	}
 }
