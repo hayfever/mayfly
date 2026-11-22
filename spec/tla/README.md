@@ -2,7 +2,8 @@
 
 `SessionResume.tla` models the Mayfly session lifecycle and resume protocol as
 implemented. `HubRetention.tla` models the in-memory hub: the per-event cap,
-the retained thread byte budget, and the inbox exemption. A cfg runs the
+the retained thread byte budget, the thread and inbox count caps, the inbox
+exemption, the dedup-key table, and the restore path. A cfg runs the
 module named by its basename up to the first underscore, so
 `HubRetention_evict_inbox_buggy.cfg` runs `HubRetention.tla`.
 [formal-verification.md](../../docs/formal-verification.md) maps each action
@@ -60,14 +61,17 @@ needs more time in `deep/`, which runs only in the nightly `tlc-deep` job.
 | `SessionResume.cfg` | All invariants and liveness, positive |
 | `SessionResume_buggy.cfg` | `LedgerBeforeDispatch = FALSE`: a lost pending record re-runs a non-idempotent tool |
 | `SessionResume_interrupt_buggy.cfg` | `InterruptOnResume = FALSE`: a pending non-idempotent call is dispatched again |
-| `HubRetention.cfg` | Hub byte budget, event cap, contiguous suffix, inbox exemption, positive |
+| `HubRetention.cfg` | Hub byte budget, event cap, contiguous suffix, inbox exemption, inbox cap, dedup keys, positive |
 | `HubRetention_evict_inbox_buggy.cfg` | `ExemptInbox = FALSE`: a runtime flood drops an unconsumed human message |
 | `HubRetention_no_cap_buggy.cfg` | `CapEvents = FALSE`: a retained event exceeds the per-event cap |
+| `HubRetention_inbox_overflow_buggy.cfg` | `CapInbox = FALSE`: the inbox grows past its count cap |
+| `HubRetention_key_leak_buggy.cfg` | `EvictKeys = FALSE`: a dedup key outlives its evicted event |
 | `deep/SessionResume_two_sessions.cfg` | Nightly only: two sessions, one turn each, one shared control-plane restart; safety invariants (about 4.4 million distinct states, 20 minutes on a 6-core desktop) |
 
 `HubRetention.cfg` runs eight appends over sizes `{1, 2, 3}` with a two-event
-count cap and a four-byte budget, so both eviction paths and the event cap are
-reachable (1147 distinct states).
+count cap, a four-byte budget, a two-entry inbox cap, and one dedup key, so
+both eviction paths, the event cap, the inbox cap, and key eviction are
+reachable (2458 distinct states).
 
 ## Terminal states
 

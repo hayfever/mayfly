@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -131,6 +132,24 @@ func TestInboxSurvivesRuntimeEventFlood(t *testing.T) {
 	}
 	if _, bytes := snapshot(h, "s"); bytes > budget {
 		t.Fatalf("retained bytes = %d, over the %d-byte budget", bytes, budget)
+	}
+}
+
+func TestInboxCountCapDropsOldest(t *testing.T) {
+	h := New(2)
+	h.Create("s")
+	for i := range 3 {
+		got := h.Append("s", model.Event{Type: model.EventUserMessage, Text: fmt.Sprintf("message %d", i)})
+		if got.Seq == 0 {
+			t.Fatalf("human message %d was dropped", i)
+		}
+	}
+	inbox := h.InboxAfter("s", 0)
+	if len(inbox) != 2 {
+		t.Fatalf("inbox = %+v, want the newest two messages", inbox)
+	}
+	if inbox[0].Text != "message 1" || inbox[1].Text != "message 2" {
+		t.Fatalf("inbox = %+v, want the oldest entry dropped", inbox)
 	}
 }
 
