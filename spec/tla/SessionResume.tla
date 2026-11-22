@@ -730,13 +730,19 @@ TurnKeyReserved ==
         /\ \A t \in posted[s] : t <= seqFloor[s]
         /\ \A t \in pending[s] : t <= seqFloor[s]
 
-\* A message the control plane acknowledged is never lost: it is either
-\* still durable in the pending inbox, already started in the journal, or its
-\* session has ended. This is the property #59 lacked.
+\* A message the control plane acknowledged is never lost: it is still on
+\* the live in-memory inbox, durable in the pending inbox, already started in
+\* the journal, or its session has ended. Counting the live inbox makes the
+\* negative check fail only when a control-plane restart actually drops an
+\* unstarted message, not merely because no pending record was written. This
+\* is the property #59 lacked.
 AcceptedNotLost ==
     \A s \in Sessions, t \in Turns :
         t \in accepted[s] =>
-            t \in pending[s] \/ t \in JournalTurns(s) \/ final[s] /= "none"
+            \/ t \in posted[s]
+            \/ t \in pending[s]
+            \/ t \in JournalTurns(s)
+            \/ final[s] /= "none"
 
 \* A non-idempotent tool body runs at most once per call key. After a crash,
 \* the resumed runtime gets the interrupted result instead of a second run.

@@ -101,7 +101,7 @@ tool, assistant. `ToolAt` names the tool of a step, so the call key is the same
 |---|---|---|
 | `TypeOK` | Every variable stays in its declared domain | none; model well-formedness |
 | `UserMessageAtMostOnce` | A message is started under one turn key, a turn key is issued once, and a journaled step is applied to the conversation once, even across a restart | `TestControlPlaneRestartContinuesTurn`, `internal/journal` turn tests, `internal/session` journal tests |
-| `AcceptedNotLost` | Every acknowledged message is still pending, has a journaled step, or belongs to a session that ended | `TestPostMessageSurvivesRestartBeforeTurn`, `TestJournaledStepZeroDropsPendingMessage`, `TestCreatePersistsInitialPrompt`, `TestControlPlaneRestartKeepsQueuedMessage` |
+| `AcceptedNotLost` | Every acknowledged message is still on the live inbox, durable in the pending inbox, has a journaled step, or belongs to a session that ended | `TestPostMessageSurvivesRestartBeforeTurn`, `TestJournaledStepZeroDropsPendingMessage`, `TestCreatePersistsInitialPrompt`, `TestControlPlaneRestartKeepsQueuedMessage` |
 | `TurnKeyReserved` | Every issued turn key is at or below the durable sequence floor | `internal/journal` `Reserve`/`HighWater` tests, `TestAdoptResumesPodlessSession` |
 | `NonIdempotentAtMostOnce` | A non-idempotent tool body runs at most once per call key; a resume gets the interrupted result | `TestGatewayResumeTable`, `test/integration` resume cases, `TestSessionResumesAfterPodDeletion` |
 | `CompletedReplays` | A `done` ledger record replays and never executes again | `TestGatewayResumeTable` (`done replays the result`), `TestSessionResumesAfterGracefulPodDeletion` |
@@ -137,7 +137,9 @@ the replacement dispatches the call again. TLC reports
 `InterruptOnResume = FALSE` and must also report the same invariant.
 `SessionResume_volatile_inbox_buggy.cfg` sets `DurableInbox = FALSE`: a
 control-plane restart before the runtime starts the turn loses an acknowledged
-message, and TLC must report `AcceptedNotLost` (2 states generated, 2 distinct).
+message, and TLC must report `AcceptedNotLost` with a counterexample that runs
+`Create` then `ControlPlaneRestart`. The invariant counts the live inbox, so a
+missing pending record alone is not a violation; only the restart that drops it is.
 `SessionResume_redeliver_dup_buggy.cfg` sets `RedeliverNewKey = TRUE`: adoption
 starts the same accepted message as a second turn, and TLC must report
 `UserMessageAtMostOnce` (222 states generated, 111 distinct). A negative cfg fails the script if TLC passes it, and
