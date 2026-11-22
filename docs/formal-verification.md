@@ -45,7 +45,7 @@ one session, an initial prompt, one later message, and one control-plane
 restart. It leaves out pod kills and replacements to keep the liveness check
 fast. `SessionResume_resume.cfg` covers the runtime-resume path with one pod
 kill and one replacement, safety only. The positive run holds 34,840 distinct
-states and finishes in about 12 seconds; the resume run holds 2,429 and
+states and finishes in about 18 seconds; the resume run holds 2,429 and
 finishes in about a second. Sessions do not share mutable state, so
 one session covers every property; a second session only multiplies the
 liveness state space.

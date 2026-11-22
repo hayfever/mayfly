@@ -87,6 +87,8 @@ reachable (2458 distinct states).
 positive run explores 38 states (15 distinct) and proves healthy progress.
 
 `SessionResume.cfg` holds 34,840 distinct states and finishes in about 12
+
+`SessionResume.cfg` holds 34,840 distinct states and finishes in about 18
 seconds; `SessionResume_resume.cfg` holds 2,429 and finishes in about a
 second. The two new negative cfgs stop after 2 and 111 distinct states, which
 is enough to show the invariant they target bites.
