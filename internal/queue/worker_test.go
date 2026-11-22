@@ -1,10 +1,12 @@
 package queue
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -94,8 +96,8 @@ func TestWorkerRunsAndSettlesJobs(t *testing.T) {
 		t.Fatalf("job buried before its attempts ran out: %+v", stats)
 	}
 	lease := claimOne(t, store)
-	if lease.Job.Attempts != 1 {
-		t.Fatalf("attempts after one failure = %d, want 1", lease.Job.Attempts)
+	if lease.Job.Attempts != 2 {
+		t.Fatalf("attempts including the in-flight claim = %d, want 2", lease.Job.Attempts)
 	}
 	if err := store.Ack(context.Background(), lease, Result{}); err != nil {
 		t.Fatal(err)
@@ -171,15 +173,23 @@ func TestWorkerReleaseDoesNotCountAttempt(t *testing.T) {
 		stats, err := store.Stats(context.Background())
 		return err == nil && stats.Pending == 1 && stats.Dead == 0
 	})
+	cancel()
+	<-done
+	job := testJob("deferred")
+	record, ok, err := store.Get(context.Background(), job.ID)
+	if err != nil || !ok {
+		t.Fatalf("released job record = %+v, %v, %v", record, ok, err)
+	}
+	if record.Job.Attempts != 0 {
+		t.Fatalf("release counted an attempt: %d", record.Job.Attempts)
+	}
 	lease := claimOne(t, store)
-	if lease.Job.Attempts != 0 {
-		t.Fatalf("release counted an attempt: %d", lease.Job.Attempts)
+	if lease.Job.Attempts != 1 {
+		t.Fatalf("claim did not count its attempt: %d", lease.Job.Attempts)
 	}
 	if err := store.Ack(context.Background(), lease, Result{}); err != nil {
 		t.Fatal(err)
 	}
-	cancel()
-	<-done
 }
 
 func TestWorkerStopsOnCancel(t *testing.T) {
@@ -319,6 +329,102 @@ func TestWorkerRenewsLeaseForSlowJob(t *testing.T) {
 				t.Fatalf("handler ran %d times, want 1", runs)
 			}
 		})
+	}
+}
+
+func TestWorkerRecoversHandlerPanicAndBuriesPoisonJob(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.MaxAttempts = 2
+	cfg.RetryBase = config.Duration(50 * time.Millisecond)
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	store, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	poison := testJob("poison-delivery")
+	poison.Trigger = "poison"
+	if err := store.Accept(context.Background(), poison); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	panics, healthy := 0, 0
+	handler := func(_ context.Context, job Job) (Result, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if job.Trigger == "poison" {
+			panics++
+			panic("handler blew up")
+		}
+		healthy++
+		return Result{SessionID: "healthy-session"}, nil
+	}
+	var components []string
+	worker := NewWorker(store, handler, 1, nil, 5*time.Millisecond, logger)
+	worker.SetPanicObserver(func(component string) {
+		mu.Lock()
+		defer mu.Unlock()
+		components = append(components, component)
+	})
+	cancel, done := startWorker(t, worker)
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	// The first panic is Nacked, so the job waits for its retry instead of
+	// dying with the worker.
+	waitFor(t, 2*time.Second, func() bool {
+		stats, err := store.Stats(context.Background())
+		return err == nil && stats.Pending == 1 && stats.Dead == 0
+	})
+	// The second panic reaches max_attempts and buries the job.
+	waitFor(t, 2*time.Second, func() bool {
+		stats, err := store.Stats(context.Background())
+		return err == nil && stats.Dead == 1 && stats.Pending == 0
+	})
+
+	// The worker is still running: a healthy job completes after the poison
+	// job is dead.
+	healthyJob := testJob("healthy-delivery")
+	healthyJob.Trigger = "healthy"
+	if err := store.Accept(context.Background(), healthyJob); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return healthy == 1
+	})
+
+	record, ok, err := store.Get(context.Background(), poison.ID)
+	if err != nil || !ok {
+		t.Fatalf("poison record = %+v, %v, %v", record, ok, err)
+	}
+	if record.State != StateDead || record.Job.Attempts != 2 {
+		t.Fatalf("poison record = %+v, want dead after 2 attempts", record)
+	}
+	if !strings.Contains(record.Error, "panicked") {
+		t.Fatalf("dead error = %q, want the panic cause", record.Error)
+	}
+
+	cancel()
+	<-done
+	text := logs.String()
+	for _, want := range []string{"job handler panicked", `panic="handler blew up"`, "stack=", "goroutine"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("panic log is missing %q:\n%s", want, text)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if panics != 2 {
+		t.Fatalf("handler panicked %d times, want 2", panics)
+	}
+	if len(components) != 2 || components[0] != "queue" || components[1] != "queue" {
+		t.Fatalf("panic components = %v, want two queue records", components)
 	}
 }
 

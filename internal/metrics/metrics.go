@@ -32,6 +32,13 @@ const (
 	AttemptSucceeded  = "succeeded"
 	AttemptFailed     = "failed"
 	AttemptRetryLater = "retry_later"
+	// ComponentQueue, ComponentSession, and ComponentHTTP label a recovered
+	// panic. ComponentOther keeps the label set closed when a caller passes an
+	// unknown component.
+	ComponentQueue   = "queue"
+	ComponentSession = "session"
+	ComponentHTTP    = "http"
+	ComponentOther   = "other"
 )
 
 // queueScrapeTimeout bounds the queue read that one scrape starts, so a slow
@@ -83,6 +90,7 @@ type Metrics struct {
 	sessionsCreated  prometheus.Counter
 	sessionsFinished *prometheus.CounterVec
 	queueAttempts    *prometheus.CounterVec
+	panics           *prometheus.CounterVec
 	httpRequests     *prometheus.CounterVec
 	httpDuration     *prometheus.HistogramVec
 	llmRequests      *prometheus.CounterVec
@@ -106,6 +114,10 @@ func New(src Sources, build BuildInfo) *Metrics {
 			Name: "mayfly_queue_job_attempts_total",
 			Help: "Queue job attempts handled by this process, by result.",
 		}, []string{"result"}),
+		panics: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mayfly_panics_total",
+			Help: "Panics recovered by this process, by component.",
+		}, []string{"component"}),
 		httpRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mayfly_http_requests_total",
 			Help: "HTTP requests served, by route template, method, and status code.",
@@ -144,6 +156,7 @@ func New(src Sources, build BuildInfo) *Metrics {
 		m.sessionsCreated,
 		m.sessionsFinished,
 		m.queueAttempts,
+		m.panics,
 		m.httpRequests,
 		m.httpDuration,
 		m.llmRequests,
@@ -204,6 +217,20 @@ func (m *Metrics) QueueJobAttempt(result string) {
 		return
 	}
 	m.queueAttempts.WithLabelValues(result).Inc()
+}
+
+// Panic records one panic that a recover kept from ending the process. The
+// component label is closed: an unknown value is recorded as ComponentOther.
+func (m *Metrics) Panic(component string) {
+	if m == nil {
+		return
+	}
+	switch component {
+	case ComponentQueue, ComponentSession, ComponentHTTP:
+	default:
+		component = ComponentOther
+	}
+	m.panics.WithLabelValues(component).Inc()
 }
 
 // HTTPRequest records one served request. route must be a route template.

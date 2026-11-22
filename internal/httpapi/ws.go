@@ -2,11 +2,34 @@ package httpapi
 
 import (
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/hayfever/mayfly/internal/metrics"
 )
+
+// recoverWebSocketReader keeps one client's message from ending the process.
+// The HTTP middleware recovers the request handler, but the reader runs in its
+// own goroutine, so it needs its own recover. readerDone still closes, and the
+// writer side ends the connection.
+func (s *Server) recoverWebSocketReader(sessionID string) {
+	value := recover()
+	if value == nil {
+		return
+	}
+	if s.logger != nil {
+		s.logger.Error("websocket reader panicked",
+			"session", sessionID,
+			"panic", value,
+			"stack", string(debug.Stack()))
+	}
+	if s.metrics != nil {
+		s.metrics.Panic(metrics.ComponentHTTP)
+	}
+}
 
 func (s *Server) attachWebSocket(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -48,6 +71,7 @@ func (s *Server) attachWebSocket(w http.ResponseWriter, r *http.Request) {
 	errCh := make(chan string, 4)
 	go func() {
 		defer close(readerDone)
+		defer s.recoverWebSocketReader(id)
 		conn.SetReadLimit(64 << 10)
 		_ = conn.SetReadDeadline(time.Now().Add(150 * time.Second))
 		conn.SetPongHandler(func(string) error {

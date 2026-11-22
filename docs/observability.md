@@ -25,6 +25,7 @@ On the main port, `/metrics` is part of the public API listener, so it requires 
 | `mayfly_sessions_finished_total` | counter | `result` | Sessions that reached a terminal state: `completed`, `failed`, `expired` |
 | `mayfly_queue_jobs` | gauge | `state` | Queued jobs by state: `pending`, `leased`, `dead`. Read from the queue store at scrape time; a failed read leaves the gauge unset |
 | `mayfly_queue_job_attempts_total` | counter | `result` | Job attempts this process ran: `succeeded`, `failed`, `retry_later` |
+| `mayfly_panics_total` | counter | `component` | Panics a recover kept from ending the process: `queue` for a job handler, `session` for background session work, `http` for a WebSocket reader. An unknown component is recorded as `other` |
 | `mayfly_http_requests_total` | counter | `route`, `method`, `code` | Requests served. `method` is a standard HTTP method or `OTHER` |
 | `mayfly_http_request_duration_seconds` | histogram | `route`, `method` | Request duration |
 | `mayfly_llm_requests_total` | counter | `model`, `result` | Model calls the broker proxied upstream: `ok`, `error` |
@@ -56,6 +57,14 @@ The control plane accepts an incoming `X-Request-Id` header when it holds 1 to 6
 ```json
 {"time":"2026-01-02T03:04:05Z","level":"INFO","msg":"http request","request_id":"7f3c9a1b2d4e5f60","method":"POST","route":"/api/v1/sessions","status":201,"duration_ms":12,"bytes":348}
 ```
+
+## Panic logs
+
+A recovered panic writes one error line. A queue job handler writes `msg="job handler panicked"` with `job`, `kind`, `trigger`, `attempt`, `panic`, and `stack`. Background session work writes `msg="session background work panicked"` with `panic` and `stack`. A WebSocket reader writes `msg="websocket reader panicked"` with `session`, `panic`, and `stack`. The `stack` value is the output of `debug.Stack()` and starts with `goroutine`.
+
+The handler panic is a failed attempt: the job is Nacked, retried with backoff, and buried when it reaches `queue.max_attempts`. The worker keeps running. A session panic releases the shutdown wait; the stack names the method that panicked, because `Manager.dispatch` does not receive a session id.
+
+A panic in a source fan-out projection has no logger. The source package turns it into an error document for that page with the text `source "<name>": internal error: <value>`. The source job then fails, retries, and can be dead-lettered. The stack is not logged.
 
 ## Audit lines
 

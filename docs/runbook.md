@@ -198,6 +198,25 @@ Retry resets the attempt count. Delete drops the job without running it. A retri
 
 A dead job whose prompt is stale and whose trigger is noisy is a candidate for delete. A dead job for a source connection usually needs the connection fixed first.
 
+## Triage a recovered panic
+
+A recovered panic is a bug, not a normal retry. The control plane stays up and writes an error line with a stack trace. A queue job is Nacked and retried with backoff. Background session work stops for that goroutine, and shutdown still completes.
+
+1. Confirm the component and the rate:
+
+```bash
+curl -s http://localhost:9090/metrics | grep '^mayfly_panics_total'
+kubectl -n mayfly logs deployment/mayfly --since=15m | grep -E 'job handler panicked|session background work panicked'
+```
+
+2. Read the `stack` field. For a queue job, note `job`, `kind`, `trigger`, and `attempt`. The stack names the handler or source projection that panicked.
+
+3. If the job is now `dead`, follow [Triage dead letters](#triage-dead-letters). Fix the cause before you retry. A retry of the same input panics again. A dead source job whose error contains `internal error` came from a source projection panic: check the source definition and the upstream page before you retry.
+
+4. If the component is `session`, the log has no session id. Use the stack's method name and the nearby session records to find the session. If the component is `http`, the log has the session id and the WebSocket connection is closed. Do not restart the control plane to clear the log. The panic is already contained.
+
+5. If the rate stays above zero for one handler or source, disable that schedule or trigger, capture the stack, and report the input. A restart does not fix a poison input.
+
 ## Clear a stuck session
 
 A session is stuck when its status stays `pending` or `running` and the thread stops.

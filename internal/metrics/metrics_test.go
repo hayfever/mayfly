@@ -95,6 +95,7 @@ func TestNewRegistersEveryMetric(t *testing.T) {
 	m.SessionCreated()
 	m.SessionFinished(model.StatusCompleted)
 	m.QueueJobAttempt(AttemptFailed)
+	m.Panic(ComponentQueue)
 	m.HTTPRequest("/api/v1/sessions", "GET", 200, 5*time.Millisecond)
 	m.LLMRequest("gpt-test", "ok", time.Second)
 	m.ToolCall("plugin__tool", "ok")
@@ -106,6 +107,7 @@ func TestNewRegistersEveryMetric(t *testing.T) {
 		"mayfly_sessions_finished_total",
 		"mayfly_queue_jobs",
 		"mayfly_queue_job_attempts_total",
+		"mayfly_panics_total",
 		"mayfly_http_requests_total",
 		"mayfly_http_request_duration_seconds",
 		"mayfly_llm_requests_total",
@@ -119,6 +121,36 @@ func TestNewRegistersEveryMetric(t *testing.T) {
 	}
 	if value := find(t, got["mayfly_build_info"], map[string]string{"version": "1.2.3", "commit": "abc", "date": "today"}); value != 1 {
 		t.Fatalf("build info = %v", value)
+	}
+}
+
+func TestPanicBoundsTheComponentLabel(t *testing.T) {
+	m := New(Sources{}, BuildInfo{})
+	m.Panic(ComponentQueue)
+	m.Panic(ComponentQueue)
+	m.Panic(ComponentSession)
+	m.Panic(ComponentHTTP)
+	m.Panic("free text from a caller")
+
+	panics := gather(t, m)["mayfly_panics_total"]
+	if got := find(t, panics, map[string]string{"component": ComponentQueue}); got != 2 {
+		t.Fatalf("queue panics = %v, want 2", got)
+	}
+	if got := find(t, panics, map[string]string{"component": ComponentSession}); got != 1 {
+		t.Fatalf("session panics = %v, want 1", got)
+	}
+	if got := find(t, panics, map[string]string{"component": ComponentHTTP}); got != 1 {
+		t.Fatalf("http panics = %v, want 1", got)
+	}
+	if got := find(t, panics, map[string]string{"component": ComponentOther}); got != 1 {
+		t.Fatalf("other panics = %v, want 1", got)
+	}
+	for _, sample := range panics {
+		switch sample.labels["component"] {
+		case ComponentQueue, ComponentSession, ComponentHTTP, ComponentOther:
+		default:
+			t.Fatalf("unbounded component label %q", sample.labels["component"])
+		}
 	}
 }
 
@@ -222,6 +254,7 @@ func TestNilMetricsAcceptsEveryCall(t *testing.T) {
 	m.SessionCreated()
 	m.SessionFinished(model.StatusFailed)
 	m.QueueJobAttempt(AttemptFailed)
+	m.Panic(ComponentQueue)
 	m.HTTPRequest("/", "GET", 500, time.Second)
 	m.LLMRequest("model", "error", time.Second)
 	m.ToolCall("tool", "error")

@@ -3,7 +3,9 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -25,6 +27,7 @@ type Worker struct {
 	poll        time.Duration
 	timeout     time.Duration
 	timeouts    map[Kind]time.Duration
+	onPanic     func(component string)
 }
 
 // DefaultJobTimeout bounds one handler call when no per-kind timeout is set.
@@ -46,6 +49,12 @@ func (w *Worker) timeoutFor(job Job) time.Duration {
 		return d
 	}
 	return w.timeout
+}
+
+// SetPanicObserver attaches a counter for recovered handler panics. Call it
+// before Run. A nil function is ignored.
+func (w *Worker) SetPanicObserver(fn func(component string)) {
+	w.onPanic = fn
 }
 
 // NewWorker builds a worker. free reports how many sessions may start now; nil
@@ -144,8 +153,12 @@ func (w *Worker) handle(ctx context.Context, lease Lease) {
 	jobCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.timeoutFor(lease.Job))
 	defer cancel()
 	stopHeartbeat := w.heartbeat(jobCtx, lease)
-	result, err := w.handler(jobCtx, lease.Job)
+	result, panicValue, stack, err := w.invoke(jobCtx, lease.Job)
 	lease = stopHeartbeat()
+	if panicValue != nil {
+		w.reportPanic(lease, panicValue, stack)
+		err = fmt.Errorf("job handler panicked: %v", panicValue)
+	}
 
 	settleCtx, settleCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer settleCancel()
@@ -160,10 +173,43 @@ func (w *Worker) handle(ctx context.Context, lease Lease) {
 			w.logger.Warn("queue release failed", "job", lease.ID, "error", releaseErr)
 		}
 	default:
-		w.logger.Warn("job failed", "job", lease.ID, "trigger", lease.Job.Trigger, "attempt", lease.Job.Attempts+1, "error", err)
+		if panicValue == nil {
+			w.logger.Warn("job failed", "job", lease.ID, "trigger", lease.Job.Trigger, "attempt", lease.Job.Attempts, "error", err)
+		}
 		if nackErr := w.store.Nack(settleCtx, lease, err); nackErr != nil {
 			w.logger.Warn("queue nack failed", "job", lease.ID, "error", nackErr)
 		}
+	}
+}
+
+// invoke runs the handler and turns a panic into a settled failure. The
+// recover keeps the worker loop and every other job alive; the stack is taken
+// inside the deferred call, while the handler's frames are still present.
+func (w *Worker) invoke(ctx context.Context, job Job) (result Result, panicValue any, stack []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = Result{}
+			err = nil
+			panicValue = r
+			stack = debug.Stack()
+		}
+	}()
+	result, err = w.handler(ctx, job)
+	return result, nil, nil, err
+}
+
+// reportPanic records one recovered handler panic. The attempt was counted by
+// Claim, so Nack buries the job when this was the last allowed attempt.
+func (w *Worker) reportPanic(lease Lease, value any, stack []byte) {
+	w.logger.Error("job handler panicked",
+		"job", lease.ID,
+		"kind", string(lease.Job.JobKind()),
+		"trigger", lease.Job.Trigger,
+		"attempt", lease.Job.Attempts,
+		"panic", value,
+		"stack", string(stack))
+	if w.onPanic != nil {
+		w.onPanic("queue")
 	}
 }
 

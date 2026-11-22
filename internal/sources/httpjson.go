@@ -260,6 +260,7 @@ func (s *httpJSON) runFanout(parent, ctx context.Context, in Input) ([]Document,
 					out[index] = s.errorDocument(jobs[index], message)
 				}
 			}
+			defer s.recoverFanoutTarget(fail)
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
@@ -668,6 +669,17 @@ func (s *httpJSON) document(response any, parent *Document, label, target string
 			document.Error = truncate(fmt.Sprintf("unknown change status %q", status), 300)
 		}
 		return &document
+	}
+}
+
+// recoverFanoutTarget turns a panic in one fan-out projection into item errors
+// for that target's jobs. The worker that runs the source step recovers only
+// its own goroutine, so without this recover a malformed upstream page would
+// end the control-plane process. The panic value is part of the error so the
+// dead-letter record names the cause; the stack is not exposed in run output.
+func (s *httpJSON) recoverFanoutTarget(fail func(string)) {
+	if value := recover(); value != nil {
+		fail(fmt.Sprintf("source %q: internal error: %v", s.def.Name, value))
 	}
 }
 
