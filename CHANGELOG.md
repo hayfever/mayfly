@@ -10,6 +10,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 - Native Go fuzz targets for webhook verification and parsing, persisted queue jobs, journal steps, session records, runtime events, HTTP request bodies, the hub, and bundles. `hack/fuzz.sh` runs every target, and the `fuzz-nightly` job runs them on a schedule.
 - `sessions.max_event_bytes` (default 64 KiB) caps one runtime event (#44).
 - `sessions.event_buffer_bytes` (default 16 MiB) bounds the retained thread bytes per session in addition to `sessions.event_buffer` (#44).
+- `spec/tla/HubRetention.tla` checks the per-event cap, the hub byte budget, the contiguous retained suffix, and the inbox exemption. `hack/tlc.sh` runs a cfg's module by its basename prefix, and two `_buggy.cfg` files prove the invariants bite (#44).
 
 ### Fixed
 

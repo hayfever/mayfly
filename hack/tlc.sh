@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Run TLC on the session resume model.
+# Run TLC on the session lifecycle and hub retention models.
 #
 #   hack/tlc.sh                 every *.cfg directly under spec/tla (the PR set)
 #   hack/tlc.sh --deep          every *.cfg under spec/tla/deep (nightly bounds)
 #   hack/tlc.sh CFG...          the named cfgs: a path, or a file name under
 #                               spec/tla or spec/tla/deep
+#
+# The module for a cfg is its basename up to the first underscore, so
+# SessionResume_buggy.cfg runs SessionResume.tla.
 #
 # The jar is pinned by version and SHA-256. It is cached outside the repo; the
 # TLC state directory goes under a temporary directory, also outside the repo.
@@ -167,6 +170,11 @@ summary=()
 
 for cfg in "${cfgs[@]}"; do
 	name="$(basename "$cfg")"
+	# The module is the cfg basename up to the first underscore, so
+	# SessionResume_buggy.cfg runs SessionResume.tla and
+	# HubRetention_evict_inbox_buggy.cfg runs HubRetention.tla.
+	base="${name%.cfg}"
+	module="${base%%_*}"
 	expect=""
 	if [[ "$name" == *_buggy.cfg ]]; then
 		expect="$(sed -n 's/^\\\* expect-violation:[[:space:]]*\([A-Za-z0-9_]*\).*/\1/p' "$cfg" | head -n 1)"
@@ -183,7 +191,7 @@ for cfg in "${cfgs[@]}"; do
 		# shellcheck disable=SC2086 # TLC_JAVA_OPTS is a list of options.
 		"$JAVA_BIN" -XX:+UseParallelGC ${TLC_JAVA_OPTS:-} -cp "$JAR" tlc2.TLC \
 			-workers auto -config "$cfg" -metadir "$WORK/meta-${name}" \
-			SessionResume.tla
+			"${module}.tla"
 	) >"$log" 2>&1 || status=$?
 	elapsed=$(($(date +%s) - start))
 

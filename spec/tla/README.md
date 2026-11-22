@@ -1,9 +1,13 @@
-# TLA+ session model
+# TLA+ session and retention models
 
 `SessionResume.tla` models the Mayfly session lifecycle and resume protocol as
-implemented. [formal-verification.md](../../docs/formal-verification.md) maps
-each action to the Go code it models, lists the invariants, and states what the
-model abstracts away.
+implemented. `HubRetention.tla` models the in-memory hub: the per-event cap,
+the retained thread byte budget, and the inbox exemption. A cfg runs the
+module named by its basename up to the first underscore, so
+`HubRetention_evict_inbox_buggy.cfg` runs `HubRetention.tla`.
+[formal-verification.md](../../docs/formal-verification.md) maps each action
+to the Go code it models, lists the invariants, and states what the models
+abstract away.
 
 ## Run it
 
@@ -22,8 +26,9 @@ temporary directory, never into the repository.
 
 ## Config convention
 
-- `SessionResume.cfg` is the positive configuration. It must pass with no
-  invariant violation and with both liveness properties proved.
+- `SessionResume.cfg` and `HubRetention.cfg` are the positive
+  configurations. Each must pass with no invariant violation;
+  `SessionResume.cfg` must also prove both liveness properties.
 - A configuration whose file name ends in `_buggy.cfg` is a negative check. It
   must produce an invariant violation, not a pass and not a parse error. The
   invariant name is in a comment line:
@@ -55,7 +60,14 @@ needs more time in `deep/`, which runs only in the nightly `tlc-deep` job.
 | `SessionResume.cfg` | All invariants and liveness, positive |
 | `SessionResume_buggy.cfg` | `LedgerBeforeDispatch = FALSE`: a lost pending record re-runs a non-idempotent tool |
 | `SessionResume_interrupt_buggy.cfg` | `InterruptOnResume = FALSE`: a pending non-idempotent call is dispatched again |
+| `HubRetention.cfg` | Hub byte budget, event cap, contiguous suffix, inbox exemption, positive |
+| `HubRetention_evict_inbox_buggy.cfg` | `ExemptInbox = FALSE`: a runtime flood drops an unconsumed human message |
+| `HubRetention_no_cap_buggy.cfg` | `CapEvents = FALSE`: a retained event exceeds the per-event cap |
 | `deep/SessionResume_two_sessions.cfg` | Nightly only: two sessions, one turn each, one shared control-plane restart; safety invariants (about 4.4 million distinct states, 20 minutes on a 6-core desktop) |
+
+`HubRetention.cfg` runs eight appends over sizes `{1, 2, 3}` with a two-event
+count cap and a four-byte budget, so both eviction paths and the event cap are
+reachable (1147 distinct states).
 
 ## Terminal states
 
@@ -76,4 +88,5 @@ Name a new action after the Go path it models, and add it to the action table
 in [formal-verification.md](../../docs/formal-verification.md). If you add a
 fault switch, add a `*_buggy.cfg` that flips it and expects the invariant the
 fault breaks. Keep the turn script in `ToolAt` and `CurrentStep` in step with
-the runtime's step order.
+the runtime's step order. Keep the new cfg's module name as the prefix before
+the first underscore.
