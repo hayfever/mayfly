@@ -19,8 +19,11 @@ const pendingTimeout = 10 * time.Second
 // fails the request: the caller must never see a 202 for a message the
 // control plane cannot recover.
 func (m *Manager) persistPending(inst *instance, ev model.Event) error {
-	if m.journal == nil || ev.Seq <= 0 {
+	if m.journal == nil {
 		return nil
+	}
+	if ev.Seq <= 0 {
+		return fmt.Errorf("persist pending message: the event has no sequence")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), pendingTimeout)
 	defer cancel()
