@@ -115,7 +115,82 @@ helm install mayfly deploy/helm/mayfly \
 
 The chart creates the control-plane and agent ServiceAccounts, RBAC, ConfigMaps for skills and agent manifests, Service, optional Ingress, and optional LiteLLM deployment. Set `image.digest` and `agentImage.digest` for immutable images and `imagePullSecrets` for private registries. See [../deploy/helm/mayfly/README.md](../deploy/helm/mayfly/README.md).
 
-Service plugins need `config.plugins.namespace`. When it is empty it follows `config.sessions.namespace`. The chart renders the plugin Role and RoleBinding in that namespace when it differs from the release namespace: create, get, list, update, and delete on Secrets, Services, Deployments, and NetworkPolicies. Set `config.agents.allowed_images` to allow the plugin images, and `config.plugins.audit_path` when you want the call audit on the control-plane volume. Inline and sidecar plugins need no extra RBAC: their objects are part of the session pod.
+Service plugins need `config.plugins.namespace`. When it is empty it follows `config.sessions.namespace`. Set `config.agents.allowed_images` to allow the plugin images, and `config.plugins.audit_path` when you want the call audit on the control-plane volume. Inline and sidecar plugins need no extra RBAC: their objects are part of the session pod.
+
+### RBAC per namespace
+
+The chart renders a Role and RoleBinding only where the control plane creates
+or removes Kubernetes objects. Both objects use the chart fullname (`mayfly`
+for a release named `mayfly`). Every RoleBinding binds the control-plane
+ServiceAccount, which stays in the release namespace.
+
+| Namespace | Resource (API group) | Verbs | Go call site |
+|---|---|---|---|
+| sessions | pods | create, get, list, watch, delete | `k8s.Client.CreateSession`, `DeletePod`, `DeleteSession`, `SessionPods`, `GetPod` |
+| sessions | pods/log | get | `k8s.Client.Logs` |
+| sessions | secrets | create, get, list, update, delete | `CreateSession`, `DeleteSession`, `OrphanSessions`, `GarbageCollect`, `SessionKeys` |
+| sessions | configmaps | create, get, list, delete | `CreateSession`, `DeleteSession`, `OrphanSessions`, `GarbageCollect`, `SessionConfig` |
+| sessions | persistentvolumeclaims | create, get, list, delete | `CreateSession`, `DeleteSession`, `OrphanSessions`, `GarbageCollect` |
+| sessions | services | create, get, list, update, delete | plugin reconciler, only when the plugins namespace is the sessions namespace |
+| sessions | deployments (apps) | create, get, list, update, delete | plugin reconciler, only when the plugins namespace is the sessions namespace |
+| sessions | networkpolicies (networking.k8s.io) | create, get, list, update, delete | `CreateSession`, `DeleteSession`, `GarbageCollect` |
+| plugins | secrets | create, get, list, update, delete | `EnsurePluginSecret`, `DeletePluginObjects`, `PluginObjectNames`, `PluginGatewayKey` |
+| plugins | services | create, get, list, update, delete | `ApplyPluginObjects`, `DeletePluginObjects`, `PluginObjectNames` |
+| plugins | deployments (apps) | create, get, list, update, delete | `ApplyPluginObjects`, `DeletePluginObjects`, `PluginObjectNames` |
+| plugins | networkpolicies (networking.k8s.io) | create, get, list, update, delete | `ApplyPluginObjects`, `DeletePluginObjects`, `PluginObjectNames` |
+
+The call sites are in [internal/k8s/client.go](../internal/k8s/client.go).
+`sessions` is `config.sessions.namespace`, or the release namespace when that
+value is empty. `plugins` is `config.plugins.namespace`, or the sessions
+namespace when that value is empty. The chart renders the plugin Role only
+when the plugins namespace differs from the sessions namespace. When all three
+namespaces are the same, one Role and one RoleBinding grant the whole set.
+When the plugins namespace differs, the plugin Role holds the services and
+deployments grants and the session Role omits them.
+
+The session Role also grants `watch` on pods. The control plane polls with
+`list` and does not watch pods; the verb is retained from earlier chart
+releases so an upgrade does not reduce the default grant.
+
+The chart does not render a Role in the release namespace unless the release
+namespace is also the sessions or plugins namespace. The control plane reads
+its own Secret and ConfigMap as mounted files, not through the Kubernetes API.
+
+The chart does not create namespaces. Create the sessions and plugins
+namespaces before you install or upgrade a release that points at them:
+
+```bash
+kubectl create namespace mayfly-sessions
+kubectl create namespace mayfly-plugins
+```
+
+To check the rendered grant for a separate sessions namespace:
+
+```bash
+kubectl -n mayfly-sessions get role,rolebinding mayfly -o yaml
+```
+
+To check the grant end to end, install with the separate namespace and create
+one session. The session objects appear in `mayfly-sessions`:
+
+```bash
+kubectl create namespace mayfly-sessions
+helm upgrade --install mayfly deploy/helm/mayfly -n mayfly \
+  --set existingSecret=mayfly-secrets \
+  --set config.sessions.namespace=mayfly-sessions
+
+kubectl -n mayfly port-forward svc/mayfly 8080:8080 &
+token="$(kubectl -n mayfly get secret mayfly-secrets -o jsonpath='{.data.MAYFLY_API_TOKEN}' | base64 -d)"
+curl -sS -X POST http://localhost:8080/api/v1/sessions \
+  -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+  -d '{"prompt":"check RBAC"}'
+kubectl -n mayfly-sessions get pods -l mayfly.io/managed=true
+```
+
+A 403 from the session create request means the Role and RoleBinding are
+missing from the sessions namespace. Check that the release namespace, the
+sessions namespace, and the plugins namespace in the values match the
+namespaces you created.
 
 ## Real cluster with Kustomize
 

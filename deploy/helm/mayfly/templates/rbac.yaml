@@ -1,10 +1,16 @@
 {{- if .Values.rbac.create -}}
+{{- $name := include "mayfly.fullname" . -}}
+{{- $serviceAccount := include "mayfly.controlPlaneServiceAccountName" . -}}
 {{- $sessionsNamespace := .Values.config.sessions.namespace | default .Release.Namespace -}}
 {{- $pluginsNamespace := dig "plugins" "namespace" "" .Values.config | default $sessionsNamespace -}}
+# Session objects live in config.sessions.namespace. The Role and RoleBinding
+# stay in that namespace, and the subject is the control-plane ServiceAccount
+# in the release namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "mayfly.fullname" . }}
+  name: {{ $name }}
+  namespace: {{ $sessionsNamespace }}
   labels:
     {{- include "mayfly.labels" . | nindent 4 }}
 rules:
@@ -26,35 +32,40 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["create", "get", "list", "update", "delete"]
+{{- if eq $pluginsNamespace $sessionsNamespace }}
+  # Service plugin objects share the sessions namespace, so this Role also
+  # carries the grants the plugin reconciler uses there.
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["create", "get", "list", "update", "delete"]
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["create", "get", "list", "update", "delete"]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "mayfly.fullname" . }}
+  name: {{ $name }}
+  namespace: {{ $sessionsNamespace }}
   labels:
     {{- include "mayfly.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "mayfly.fullname" . }}
+  name: {{ $name }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "mayfly.controlPlaneServiceAccountName" . }}
+    name: {{ $serviceAccount }}
     namespace: {{ .Release.Namespace }}
-{{- if ne $pluginsNamespace .Release.Namespace }}
+{{- if ne $pluginsNamespace $sessionsNamespace }}
 ---
-# Service plugin objects live in plugins.namespace. When that is another
-# namespace, the control plane needs the same Role there.
+# Service plugin objects live in config.plugins.namespace. When that is another
+# namespace, the control plane needs only the grants those objects use.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "mayfly.fullname" . }}
+  name: {{ $name }}
   namespace: {{ $pluginsNamespace }}
   labels:
     {{- include "mayfly.labels" . | nindent 4 }}
@@ -75,17 +86,17 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "mayfly.fullname" . }}
+  name: {{ $name }}
   namespace: {{ $pluginsNamespace }}
   labels:
     {{- include "mayfly.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "mayfly.fullname" . }}
+  name: {{ $name }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "mayfly.controlPlaneServiceAccountName" . }}
+    name: {{ $serviceAccount }}
     namespace: {{ .Release.Namespace }}
 {{- end }}
 {{- end }}

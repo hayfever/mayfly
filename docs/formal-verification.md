@@ -1,14 +1,16 @@
 # Formal verification
 
 Two checks cover behavior that unit tests can only sample: a TLA+ model of the
-session lifecycle and resume protocol, and native Go fuzz targets. Each has a
-script and a CI job.
+session lifecycle and resume protocol, and native Go fuzz targets. A third
+check covers the chart RBAC over its whole namespace configuration space. Each
+has a script or command and a CI job.
 
 | Check | Script | CI job |
 |---|---|---|
 | TLC on the session model | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
 | TLC with two sessions | `hack/tlc.sh --deep` | `tlc-deep` in verify.yml, nightly and on demand |
 | Every fuzz target | `hack/fuzz.sh` | `fuzz-nightly` in verify.yml |
+| Chart RBAC property check | `MAYFLY_REQUIRE_HELM=1 go test ./test/chart/...` | `chart` step of the `test` job in [ci.yml](../.github/workflows/ci.yml) |
 
 `hack/tlc.sh` needs a JDK 17 or newer (`java` on `PATH`, or `JAVA`). It
 downloads the pinned, checksummed `tla2tools.jar` once into
@@ -164,3 +166,63 @@ ledger operations and replaying them through the model, is future work.
 A fuzz target checks the input handling of the package that adds it; the
 targets do not check the lifecycle. `hack/fuzz.sh` discovers targets
 automatically; a branch with no fuzz target exits 0 and says so.
+
+## Chart RBAC property check
+
+`test/chart/rbac_test.go` checks the chart RBAC over the whole configuration
+space that changes it. It runs `helm template` for every equality partition of
+the release namespace, `config.sessions.namespace`, and
+`config.plugins.namespace`:
+
+| Partition | Release | Sessions | Plugins |
+|---|---|---|---|
+| all equal | `mayfly` | `mayfly` | `mayfly` |
+| release equals sessions | `mayfly` | `mayfly` | `plugins` |
+| release equals plugins | `mayfly` | `sessions` | `mayfly` |
+| sessions equals plugins | `mayfly` | `sessions` | `sessions` |
+| all distinct | `mayfly` | `sessions` | `plugins` |
+
+Each partition is crossed with `rbac.create` set to true and false, and with
+the default and a custom `serviceAccount.controlPlaneName`. The test also
+renders the chart with default values and with `e2e/values.yaml`.
+
+The check parses the multi-document YAML and asserts these properties:
+
+- Coverage: every `(namespace, apiGroup, resource, verb)` row in the RBAC
+  table in [deployment.md](deployment.md#rbac-per-namespace) is granted by a
+  Role in that namespace.
+- Least privilege: no Role grants a permission outside that table. The pods
+  `watch` verb is the one tolerated extra, because earlier chart releases
+  grant it.
+- Every namespace that needs a Role has exactly one Role and one RoleBinding
+  with the chart fullname.
+- Every RoleBinding refers to a Role in the same namespace and binds exactly
+  one subject: the control-plane ServiceAccount in the release namespace.
+- No `(kind, namespace, name)` object is rendered twice.
+- `rbac.create=false` renders no Role and no RoleBinding.
+
+Run it with:
+
+```bash
+MAYFLY_REQUIRE_HELM=1 go test ./test/chart/...
+```
+
+The test skips when `helm` is not on `PATH`, unless `MAYFLY_REQUIRE_HELM=1`
+makes the missing binary a failure. `MAYFLY_CHART_DIR` points the check at
+another chart directory.
+
+`TestRBACPrefixTemplateIsRejected` is the negative check. It copies the chart,
+replaces `templates/rbac.yaml` with the pre-fix template in
+`test/chart/testdata/rbac-prefix.yaml`, and asserts the check fails. Only the
+all-equal partition passes; the other four partitions fail on the missing
+sessions Role or on a Role in the release namespace that the control plane does
+not use. The test fails if the pre-fix template passes every partition, so a
+check that no longer bites is visible.
+
+The check does not prove that a cluster accepts the RBAC. It reads rendered
+manifests; it does not contact an API server and does not exercise the
+authorization decision. The e2e suite covers the cluster side when it creates
+a session. The required grant table exists twice, in the Go test and in
+[deployment.md](deployment.md); a change to the control plane's Kubernetes
+calls must update both. The check does not cover chart values that do not
+change RBAC.

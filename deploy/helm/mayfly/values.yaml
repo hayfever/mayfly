@@ -94,6 +94,8 @@ config:
     # with its own max_body_bytes.
     webhook_max_body_bytes: 1048576
   sessions:
+    # Session objects and the Role that manages them are rendered in this
+    # namespace. Empty uses the release namespace.
     namespace: "" # defaults to the release namespace
     default_ttl: 30m
     max_ttl: 2h

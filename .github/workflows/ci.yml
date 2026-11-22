@@ -41,9 +41,13 @@ jobs:
           helm lint deploy/helm/mayfly --set existingSecret=mayfly-secrets
           helm template mayfly deploy/helm/mayfly -n mayfly \
             --set existingSecret=mayfly-secrets >/dev/null
+          helm template mayfly deploy/helm/mayfly -n mayfly \
+            --set existingSecret=mayfly-secrets \
+            --set config.sessions.namespace=mayfly-sessions >/dev/null
           helm lint deploy/helm/mayfly -f e2e/values.yaml
           helm template mayfly deploy/helm/mayfly -n mayfly \
             -f e2e/values.yaml >/dev/null
+          MAYFLY_REQUIRE_HELM=1 go test ./test/chart/...
 
   lint:
     runs-on: ubuntu-latest
