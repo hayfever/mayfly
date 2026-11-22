@@ -3,10 +3,14 @@ package triggers
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/session"
 )
 
 // FuzzGenericParse checks the generic trigger: a signed or token-authenticated
@@ -17,6 +21,13 @@ func FuzzGenericParse(f *testing.F) {
 	f.Add("gen-secret", []byte("plain text prompt"), uint8(2))
 	f.Add("gen-secret", []byte(`{"prompt":"token auth"}`), uint8(11))
 	f.Add("", []byte(`{"prompt":"unsigned"}`), uint8(1))
+	for _, title := range []string{
+		strings.Repeat("t", session.MaxTitleBytes),           // exactly the cap
+		strings.Repeat("t", session.MaxTitleBytes+1),         // one byte over
+		strings.Repeat("t", session.MaxTitleBytes-4) + "日zz", // the cut lands inside a rune
+	} {
+		f.Add("gen-secret", []byte(fmt.Sprintf(`{"prompt":"triage","title":%q}`, title)), uint8(2))
+	}
 	f.Fuzz(func(t *testing.T, secret string, body []byte, mode uint8) {
 		cfg := config.TriggerConfig{
 			Name:          "generic",
@@ -67,6 +78,12 @@ func FuzzGenericParse(f *testing.F) {
 		}
 		if res.Options.Trigger.Delivery != res.DeliveryKey {
 			t.Fatalf("trigger delivery %q != delivery key %q", res.Options.Trigger.Delivery, res.DeliveryKey)
+		}
+		if len(res.Options.Title) > session.MaxTitleBytes {
+			t.Fatalf("title is %d bytes, over the %d-byte cap", len(res.Options.Title), session.MaxTitleBytes)
+		}
+		if !utf8.ValidString(res.Options.Title) {
+			t.Fatalf("title is not valid UTF-8: %q", res.Options.Title)
 		}
 
 		// No credential, a wrong token, and a mutated body must all be

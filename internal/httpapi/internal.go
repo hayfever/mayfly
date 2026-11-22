@@ -17,6 +17,11 @@ import (
 	"github.com/hayfever/mayfly/internal/session"
 )
 
+// maxRuntimeEventsBodyBytes bounds one runtime event POST. The runtime posts
+// one event per request, so a body above this limit is not a legitimate
+// batch. The per-event cap in session.Manager bounds the retained event.
+const maxRuntimeEventsBodyBytes = 1 << 20
+
 func (s *Server) internalEvents(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.internalSession(r)
 	if !ok {
@@ -26,7 +31,7 @@ func (s *Server) internalEvents(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Events []model.Event `json:"events"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRuntimeEventsBodyBytes)).Decode(&req); err != nil {
 		writeInternalError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}

@@ -38,6 +38,7 @@ import (
 	"github.com/hayfever/mayfly/internal/runner"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
 	"github.com/hayfever/mayfly/internal/skills"
+	"github.com/hayfever/mayfly/internal/textutil"
 	"github.com/hayfever/mayfly/internal/version"
 )
 
@@ -55,6 +56,16 @@ var ErrCapacity = errors.New("session capacity reached")
 
 const maxPromptBytes = 64 << 10
 const maxMessageBytes = 32 << 10
+
+// MaxTitleBytes bounds a session title. Webhook triggers truncate a derived
+// title before queueing, and Create truncates the final title, including one
+// taken from the first line of the prompt, so every stored title fits.
+const MaxTitleBytes = 200
+
+// maxDeliveryKeyBytes bounds the caller-supplied delivery and idempotency
+// keys. Both reach the queue envelope and the session trigger record. A Slack
+// trigger_id is the longest legitimate value.
+const maxDeliveryKeyBytes = 512
 const podTerminalGrace = 20 * time.Second
 
 // sequenceBlock is how far ahead the control plane reserves hub sequence
@@ -424,6 +435,12 @@ func (m *Manager) resolveRequest(opts CreateOptions) (request, error) {
 	if len(prompt) > maxPromptBytes {
 		return request{}, fmt.Errorf("prompt exceeds %d bytes", maxPromptBytes)
 	}
+	if len(opts.Trigger.Delivery) > maxDeliveryKeyBytes {
+		return request{}, fmt.Errorf("trigger delivery key exceeds %d bytes", maxDeliveryKeyBytes)
+	}
+	if len(opts.IdempotencyKey) > maxDeliveryKeyBytes {
+		return request{}, fmt.Errorf("idempotency key exceeds %d bytes", maxDeliveryKeyBytes)
+	}
 	ttl := opts.TTL
 	if ttl <= 0 {
 		ttl = m.cfg.Sessions.DefaultTTL.Std()
@@ -524,6 +541,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 	if title == "" {
 		title = "Session " + id
 	}
+	title = textutil.Truncate(title, MaxTitleBytes)
 	systemPrompt, err := agent.RenderPrompt(promptData{
 		SessionID: id,
 		Title:     title,

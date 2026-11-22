@@ -1083,3 +1083,27 @@ func TestCreateFailureReportsSessionID(t *testing.T) {
 		t.Fatalf("internal error text leaked: %s", rec.Body.String())
 	}
 }
+
+func TestCreateSessionTruncatesOversizedTitle(t *testing.T) {
+	server, _ := sessionServer(t, 0)
+	rec := httptest.NewRecorder()
+	body := fmt.Sprintf(`{"prompt":"x","agent":"helper","title":%q}`, strings.Repeat("t", 5000))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-admin")
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var decoded struct {
+		Session struct {
+			Title string `json:"title"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(decoded.Session.Title); got > session.MaxTitleBytes {
+		t.Fatalf("title is %d bytes, over %d", got, session.MaxTitleBytes)
+	}
+}

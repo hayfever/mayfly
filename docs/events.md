@@ -27,7 +27,7 @@ order for one session.
 | `time` | string | RFC 3339 timestamp. Always present. |
 | `type` | string | Event type. Always present. The set is open: ignore a type this build does not know. |
 | `actor` | string | Writer: `user`, `agent`, `mayfly`, or a trigger name. |
-| `text` | string | Human-readable text. |
+| `text` | string | Human-readable text. A runtime event can carry a truncated value; see [Bounds](#bounds). |
 | `data` | object | Payload. The schema depends on `type`. |
 
 An event type without a payload has no `data` field.
@@ -126,6 +126,20 @@ runtime failure.
 
 A control action for the session runtime. `action` is the action name, for
 example `close`. `reason` is the cause.
+
+## Bounds
+
+The runtime is not trusted with control-plane memory. `sessions.max_event_bytes`
+caps one runtime event: text and every payload string over the cap are
+truncated rune-safely and end with `…[truncated]`. `step_key` and `actor` have
+smaller identifier-sized bounds.
+
+The hub retains at most `sessions.event_buffer` events and
+`sessions.event_buffer_bytes` accounted bytes per session, and drops the oldest
+event first. A human message the runtime has not read stays in the inbox even
+when runtime volume evicts its thread copy. A replay after an evicted sequence
+starts at the oldest retained event, so `seq` can jump; the gap is visible in
+the returned sequence numbers.
 
 ## Delivery
 

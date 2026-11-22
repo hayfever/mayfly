@@ -797,3 +797,24 @@ func TestValidateRejectsMetricsOnMainAddress(t *testing.T) {
 		t.Fatal("the main address was accepted as the metrics address")
 	}
 }
+
+func TestSessionByteLimits(t *testing.T) {
+	cfg := Default()
+	if cfg.Sessions.MaxEventBytes != DefaultMaxEventBytes || cfg.Sessions.EventBufferBytes != DefaultEventBufferBytes {
+		t.Fatalf("defaults = %d / %d", cfg.Sessions.MaxEventBytes, cfg.Sessions.EventBufferBytes)
+	}
+	decoder := yaml.NewDecoder(strings.NewReader("sessions:\n  max_event_bytes: 1024\n  event_buffer_bytes: 4096\n"))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sessions.MaxEventBytes != 1024 || cfg.Sessions.EventBufferBytes != 4096 {
+		t.Fatalf("loaded limits = %d / %d", cfg.Sessions.MaxEventBytes, cfg.Sessions.EventBufferBytes)
+	}
+	cfg.Sessions.MaxEventBytes = 0
+	cfg.Sessions.EventBufferBytes = 0
+	cfg.applyDefaults()
+	if cfg.Sessions.MaxEventBytes != DefaultMaxEventBytes || cfg.Sessions.EventBufferBytes != DefaultEventBufferBytes {
+		t.Fatalf("zero limits did not fall back to defaults")
+	}
+}

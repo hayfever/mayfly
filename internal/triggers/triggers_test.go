@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/session"
 )
 
 func hmacHex(secret string, body []byte) string {
@@ -211,4 +214,86 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+func TestGitHubTitleIsBounded(t *testing.T) {
+	secret := "gh-secret"
+	for name, repo := range map[string]string{
+		"ascii":     strings.Repeat("r", 5000),
+		"multibyte": strings.Repeat("日", 2000),
+	} {
+		t.Run(name, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]any{
+				"action":     "opened",
+				"number":     7,
+				"repository": map[string]any{"full_name": repo},
+				"pull_request": map[string]any{
+					"title": "Fix the widget",
+					"body":  "details",
+				},
+				"sender": map[string]any{"login": "alice"},
+			})
+			header := http.Header{}
+			header.Set("X-GitHub-Event", "pull_request")
+			header.Set("X-GitHub-Delivery", "delivery-1")
+			header.Set("X-Hub-Signature-256", "sha256="+hmacHex(secret, body))
+			res, err := Parse(config.TriggerConfig{Name: "github", Type: "github", Secret: secret}, header, body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(res.Options.Title); got > session.MaxTitleBytes {
+				t.Fatalf("title is %d bytes, over %d", got, session.MaxTitleBytes)
+			}
+			if !utf8.ValidString(res.Options.Title) {
+				t.Fatalf("title is not valid UTF-8: %q", res.Options.Title)
+			}
+			if !strings.HasPrefix(res.Options.Prompt, "Pull request") {
+				t.Fatalf("prompt = %q", res.Options.Prompt)
+			}
+		})
+	}
+}
+
+func TestGenericAndDatadogTitlesAreBounded(t *testing.T) {
+	long := strings.Repeat("t", 5000)
+	generic, err := Parse(config.TriggerConfig{Name: "generic", Type: "generic", AllowUnsigned: true},
+		http.Header{"Content-Type": []string{"application/json"}},
+		[]byte(fmt.Sprintf(`{"prompt":"triage","title":%q}`, long)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(generic.Options.Title); got > session.MaxTitleBytes {
+		t.Fatalf("generic title is %d bytes, over %d", got, session.MaxTitleBytes)
+	}
+
+	datadog, err := Parse(config.TriggerConfig{Name: "datadog", Type: "datadog", AllowUnsigned: true},
+		http.Header{"Content-Type": []string{"application/json"}},
+		[]byte(fmt.Sprintf(`{"title":%q,"text":"alert","alert_type":"error"}`, long)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(datadog.Options.Title); got > session.MaxTitleBytes {
+		t.Fatalf("datadog title is %d bytes, over %d", got, session.MaxTitleBytes)
+	}
+}
+
+func TestTruncateKeepsRunes(t *testing.T) {
+	for _, tc := range []struct {
+		in    string
+		max   int
+		valid bool
+	}{
+		{"hello", 10, true},
+		{"hello", 3, true},
+		{"a" + strings.Repeat("日", 10), 5, true},
+		{"a" + strings.Repeat("日", 10), 1, true},
+	} {
+		got := truncate(tc.in, tc.max)
+		if len(got) > tc.max {
+			t.Fatalf("truncate(%q, %d) = %q is over the cap", tc.in, tc.max, got)
+		}
+		if !utf8.ValidString(got) {
+			t.Fatalf("truncate(%q, %d) = %q is not valid UTF-8", tc.in, tc.max, got)
+		}
+	}
 }

@@ -43,6 +43,8 @@ Set `version: 1` in every file. A file without the key is read as version 1, and
 | `idle_timeout` | `20m` | Runtime closes itself after this period without user messages; `0` disables |
 | `close_grace` | `90s` | Time to wait for finalize after close before force stop and fallback |
 | `event_buffer` | `5000` | Retained thread events per session in memory |
+| `event_buffer_bytes` | `16777216` | Retained thread byte budget per session, in addition to `event_buffer`. The oldest events are evicted first. A human message the runtime has not read stays in the inbox even when its thread copy is evicted |
+| `max_event_bytes` | `65536` | Cap on one runtime event. Longer text and payload strings are truncated rune-safely and end with `…[truncated]` |
 | `max_steps` | `24` | Maximum model/tool iterations per user message |
 | `max_history_messages` | `120` | Messages sent to the model; oldest are trimmed at a user boundary |
 | `max_concurrent` | `50` | Maximum sessions that have not finalized. Webhook work waits in the queue; direct API calls get `429` and `Retry-After`. `0` removes the cap |
