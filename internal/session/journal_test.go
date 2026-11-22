@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hayfever/mayfly/internal/hub"
 	"github.com/hayfever/mayfly/internal/journal"
@@ -344,6 +345,57 @@ func TestRestoreJournalThreadKeepsKeysAndTypes(t *testing.T) {
 	}
 	if got := m.hub.EventsAfter("s1", 0); len(got) != 2 {
 		t.Fatalf("events after a retried append = %+v", got)
+	}
+}
+
+// TestRestoreJournalThreadBoundsOversizedEvents covers adoption of a journal
+// written under a larger journal.max_entry_bytes: every restored event must
+// fit sessions.max_event_bytes, like a live runtime event.
+func TestRestoreJournalThreadBoundsOversizedEvents(t *testing.T) {
+	m := testManager(t)
+	m.cfg.Sessions.MaxEventBytes = 64
+	m.journal = journal.NewMemory()
+	journalInstance(t, m)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	text := strings.Repeat("日", 300)
+	input, err := json.Marshal(model.Event{Type: model.EventUserMessage, Actor: "trigger", Text: text, Time: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := journal.Entry{SessionID: "s1", Turn: 11, Step: 0, Name: "user", Input: input, ConvLen: 1, Time: now}
+	output, err := json.Marshal(map[string]any{"events": []journal.StepEvent{
+		{
+			Type:  string(model.EventToolCall),
+			Actor: "agent",
+			Text:  text,
+			Data:  model.ToolCallData{Tool: "read", CallID: "c1", Arguments: strings.Repeat("a", 300)},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := journal.Entry{SessionID: "s1", Turn: 11, Step: 1, Name: "tool", Output: output, ConvLen: 2, Time: now}
+	for _, entry := range []journal.Entry{user, call} {
+		if err := m.journal.Append(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m.restoreJournalThread("s1")
+	events := m.hub.EventsAfter("s1", 0)
+	if len(events) != 2 {
+		t.Fatalf("restored events = %+v", events)
+	}
+	for _, ev := range events {
+		if len(ev.Text) > 64 || !utf8.ValidString(ev.Text) || !strings.HasSuffix(ev.Text, eventTruncationMark) {
+			t.Fatalf("restored text = %q (%d bytes)", ev.Text, len(ev.Text))
+		}
+	}
+	data, ok := events[1].Data.(model.ToolCallData)
+	if !ok || len(data.Arguments) > 64 || !utf8.ValidString(data.Arguments) {
+		t.Fatalf("restored tool call data = %#v", events[1].Data)
 	}
 }
 

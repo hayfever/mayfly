@@ -301,6 +301,7 @@ func (m *Manager) restoreJournalThread(id string) {
 		return
 	}
 	restored := 0
+	limit := m.maxEventBytes()
 	for _, entry := range entries {
 		if entry.Step == 0 {
 			// Only the user message that started the turn belongs on the
@@ -315,6 +316,9 @@ func (m *Manager) restoreJournalThread(id string) {
 			if ev.Time.IsZero() {
 				ev.Time = entry.Time
 			}
+			// A journal entry can be larger than sessions.max_event_bytes,
+			// so the restore path applies the same bound as a live event.
+			ev = boundRuntimeEvent(ev, limit)
 			if stored := m.hub.Restore(id, ev); stored.Seq != 0 {
 				restored++
 				m.countRestoredMessage(id, ev)
@@ -322,6 +326,7 @@ func (m *Manager) restoreJournalThread(id string) {
 			continue
 		}
 		for _, ev := range stepThreadEvents(entry) {
+			ev = boundRuntimeEvent(ev, limit)
 			if stored := m.hub.Restore(id, ev); stored.Seq != 0 {
 				restored++
 				m.countRestoredMessage(id, ev)

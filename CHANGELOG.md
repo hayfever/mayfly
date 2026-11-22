@@ -22,6 +22,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 - A session title derived from a webhook field or sent to the API is capped at 200 bytes, rune-safely, before it reaches the queue envelope or the session record (#44).
 - A webhook header or prompt with invalid UTF-8 can no longer produce an invalid session title: invalid bytes are stored as U+FFFD (#44).
 - The hub evicts the oldest thread events when a session exceeds `sessions.event_buffer_bytes`, and keeps an unconsumed human message in the inbox through a runtime event flood (#44).
+- A journaled event restored at adoption is truncated to `sessions.max_event_bytes`, so a journal entry larger than the cap cannot retain an oversized event (#44).
 - The control plane passes `sessions.event_buffer_bytes` to the hub, so the setting takes effect instead of leaving the hub on its default (#44).
 
 ## [1.0.0-rc.2] - 2026-11-20

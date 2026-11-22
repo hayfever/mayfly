@@ -119,10 +119,7 @@ func (m *Manager) EmitRuntimeEvents(id, token string, events []model.Event) ([]m
 		return nil, ErrNotFound
 	}
 	m.RuntimeConnected(id)
-	limit := m.cfg.Sessions.MaxEventBytes
-	if limit <= 0 {
-		limit = config.DefaultMaxEventBytes
-	}
+	limit := m.maxEventBytes()
 	out := make([]model.Event, 0, len(events))
 	for _, ev := range events {
 		switch ev.Type {
@@ -142,6 +139,16 @@ func (m *Manager) EmitRuntimeEvents(id, token string, events []model.Event) ([]m
 		out = append(out, stored)
 	}
 	return out, nil
+}
+
+// maxEventBytes returns the configured cap on one runtime event, or the
+// default when the configuration leaves it unset. It bounds every event the
+// manager puts on the thread, including one restored from the journal.
+func (m *Manager) maxEventBytes() int {
+	if limit := m.cfg.Sessions.MaxEventBytes; limit > 0 {
+		return limit
+	}
+	return config.DefaultMaxEventBytes
 }
 
 // boundRuntimeEvent truncates the unbounded strings of one runtime event so a
