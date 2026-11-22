@@ -176,3 +176,42 @@ func FuzzBoltStoredStep(f *testing.F) {
 		}
 	})
 }
+
+// FuzzPendingJSON covers the durable record that holds a message accepted
+// before its turn started. Adoption decodes it after a control-plane restart,
+// so arbitrary bytes must not panic and a record that decodes must re-encode
+// stably. Malformed records are rejected rather than delivered.
+func FuzzPendingJSON(f *testing.F) {
+	f.Add([]byte(`{"session_id":"s1","seq":3,"event":{"seq":3,"time":"2026-11-22T10:00:00Z","type":"user_message","actor":"trigger","text":"hello","data":{"kind":"api","name":"hook","event":"create"}}}`))
+	f.Add([]byte(`{"session_id":"s2","seq":1,"event":{"seq":1,"time":"2026-11-22T10:00:00Z","type":"user_message","actor":"user","text":"x"}}`))
+	f.Add([]byte(`{"session_id":"","seq":0,"event":{"type":"user_message","text":""}}`))
+	f.Add([]byte(`{"session_id":"s1","seq":2,"event":{"seq":1,"time":"2026-11-22T10:00:00Z","type":"user_message","text":"mismatch"}}`))
+	f.Add([]byte(`{"session_id":"s1","seq":1,"event":{"seq":1,"time":"2026-11-22T10:00:00Z","type":"status","text":"not a message"}}`))
+	f.Add([]byte(`{"session_id":"s1","seq":1,"event":{"seq":1,"type":"user_message","text":"no time"}}`))
+	f.Add([]byte(`{"session_id":"s1","seq":1,"event":null}`))
+	f.Add([]byte(`{}`))
+	f.Add([]byte(`null`))
+	f.Add([]byte(`{"session_id":"s1","seq":1,"event":{"seq":1,"time":"2026-11-22T10:00:00Z","type":"user_message","text":"truncated"`))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		p, err := decodePending(data)
+		if err != nil {
+			return
+		}
+		first, err := encodePending(p)
+		if err != nil {
+			t.Fatalf("encode pending record: %v\npayload: %s", err, data)
+		}
+		again, err := decodePending(first)
+		if err != nil {
+			t.Fatalf("decode encoded pending record: %v\nencoded: %s", err, first)
+		}
+		second, err := encodePending(again)
+		if err != nil {
+			t.Fatalf("encode pending record a second time: %v", err)
+		}
+		if !bytes.Equal(first, second) {
+			t.Fatalf("pending encoding is not stable:\nfirst:  %s\nsecond: %s", first, second)
+		}
+	})
+}

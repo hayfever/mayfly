@@ -24,6 +24,10 @@ var (
 	bucketSeq     = []byte("seq")
 	bucketLast    = []byte("last")
 	bucketCalls   = []byte("calls")
+	// bucketPending holds messages accepted before their turn started. It is
+	// additive: a database written by a build without it opens unchanged, and
+	// a build without it ignores the bucket.
+	bucketPending = []byte("pending")
 	// bucketMeta holds store-wide facts. The leading NUL keeps a session ID
 	// from ever naming this bucket.
 	bucketMeta = []byte("\x00meta")
@@ -59,6 +63,9 @@ func OpenBolt(path string) (*Bolt, error) {
 			return err
 		}
 		if _, err := tx.CreateBucketIfNotExists(bucketLast); err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucketIfNotExists(bucketPending); err != nil {
 			return err
 		}
 		return checkFormat(tx)
@@ -129,7 +136,18 @@ func (s *Bolt) Append(_ context.Context, e Entry) error {
 		}
 		raw := make([]byte, 8)
 		binary.BigEndian.PutUint64(raw, uint64(e.Turn))
-		return tx.Bucket(bucketLast).Put([]byte(e.SessionID), raw)
+		if err := tx.Bucket(bucketLast).Put([]byte(e.SessionID), raw); err != nil {
+			return err
+		}
+		if e.Step == 0 {
+			// The turn key is now durable as a journaled step. In the same
+			// transaction, drop the pending copy so adoption never delivers
+			// this message a second time.
+			if pending := tx.Bucket(bucketPending).Bucket([]byte(e.SessionID)); pending != nil {
+				return pending.Delete(turnPrefix(e.Turn))
+			}
+		}
+		return nil
 	})
 }
 
@@ -229,7 +247,54 @@ func (s *Bolt) Reserve(_ context.Context, session string, floor int64) error {
 	})
 }
 
-// Delete removes a session's steps, sequence reservation, and tool calls.
+// AddPending records one accepted message.
+func (s *Bolt) AddPending(_ context.Context, p Pending) error {
+	payload, err := encodePending(p)
+	if err != nil {
+		return err
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		records, err := tx.Bucket(bucketPending).CreateBucketIfNotExists([]byte(p.SessionID))
+		if err != nil {
+			return err
+		}
+		return records.Put(turnPrefix(p.Seq), payload)
+	})
+}
+
+// Pending returns a session's unstarted messages in sequence order.
+func (s *Bolt) Pending(_ context.Context, session string) ([]Pending, error) {
+	out := []Pending{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		records := tx.Bucket(bucketPending).Bucket([]byte(session))
+		if records == nil {
+			return nil
+		}
+		return records.ForEach(func(_, raw []byte) error {
+			p, err := decodePending(raw)
+			if err != nil {
+				return fmt.Errorf("decode pending inbox record: %w", err)
+			}
+			out = append(out, p)
+			return nil
+		})
+	})
+	return out, err
+}
+
+// DeletePending removes one pending message. A missing record is not an error.
+func (s *Bolt) DeletePending(_ context.Context, session string, seq int64) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		records := tx.Bucket(bucketPending).Bucket([]byte(session))
+		if records == nil {
+			return nil
+		}
+		return records.Delete(turnPrefix(seq))
+	})
+}
+
+// Delete removes a session's steps, sequence reservation, pending messages,
+// and tool calls.
 func (s *Bolt) Delete(_ context.Context, session string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		if err := tx.Bucket(bucketJournal).DeleteBucket([]byte(session)); err != nil && !errors.Is(err, bolterrors.ErrBucketNotFound) {
@@ -239,6 +304,9 @@ func (s *Bolt) Delete(_ context.Context, session string) error {
 			return err
 		}
 		if err := tx.Bucket(bucketCalls).DeleteBucket([]byte(session)); err != nil && !errors.Is(err, bolterrors.ErrBucketNotFound) {
+			return err
+		}
+		if err := tx.Bucket(bucketPending).DeleteBucket([]byte(session)); err != nil && !errors.Is(err, bolterrors.ErrBucketNotFound) {
 			return err
 		}
 		return tx.Bucket(bucketLast).Delete([]byte(session))
