@@ -108,7 +108,7 @@ Find the session created for a delivery with `GET /api/v1/queue/jobs/{job_id}`: 
 }
 ```
 
-`prompt` is required. Empty `agent` selects the default agent. Empty `skills` or `mcp_servers` selects the agent defaults. `model` must be the default or in `llm.allow_models`.
+`prompt` is required. Empty `agent` selects the default agent. Empty `skills` or `mcp_servers` selects the agent defaults. `model` must be the default or in `llm.allow_models`. A `title` longer than 200 bytes is truncated rune-safely at the limit, and a title derived from the first line of the prompt gets the same bound.
 
 A request body with a field this build does not know returns `400 invalid_request`. A typo in an option is therefore visible, not silently ignored. The same rule applies to the message, close, and attach-ticket bodies.
 

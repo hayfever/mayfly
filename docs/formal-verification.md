@@ -1,13 +1,13 @@
 # Formal verification
 
-Two checks cover behavior that unit tests can only sample: a TLA+ model of the
-session lifecycle and resume protocol, and native Go fuzz targets. A third
+Two checks cover behavior that unit tests can only sample: TLA+ models of the
+session lifecycle and of hub retention, and native Go fuzz targets. A third
 check covers the chart RBAC over its whole namespace configuration space. Each
 has a script or command and a CI job.
 
 | Check | Script | CI job |
 |---|---|---|
-| TLC on the session model | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
+| TLC on `SessionResume.tla` and `HubRetention.tla` | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
 | TLC with two sessions | `hack/tlc.sh --deep` | `tlc-deep` in verify.yml, nightly and on demand |
 | Every fuzz target | `hack/fuzz.sh` | `fuzz-nightly` in verify.yml |
 | Chart RBAC property check | `MAYFLY_REQUIRE_HELM=1 go test ./test/chart/...` | `chart` step of the `test` job in [ci.yml](../.github/workflows/ci.yml) |
@@ -125,6 +125,85 @@ The check exists to show the positive run is not vacuous: the same model,
 with one implemented guarantee removed, exhibits the bug the guarantee
 prevents.
 
+## Hub retention model
+
+`spec/tla/HubRetention.tla` models one session stream in `internal/hub` and the
+per-event cap in `internal/session`. It covers the memory and ordering behavior
+that a hostile runtime can drive: one event's size, the retained thread's byte
+budget, the thread and inbox count caps, the inbox exemption, the dedup-key
+table, and the sequence contract.
+
+| TLA+ action | Go code it models |
+|---|---|
+| `RuntimeAppend` | `session.Manager.EmitRuntimeEvents` and `boundRuntimeEvent` (`internal/session/lifecycle.go`), then `hub.Hub.Append` and `hub.stream.append` (`internal/hub/hub.go`) |
+| `RestoreAppend` | `session.Manager.restoreJournalThread` (`internal/session/restart.go`) and `hub.Hub.Restore` (`internal/hub/hub.go`); the per-event cap applies before the append |
+| `HumanPost` | `session.Manager.PostMessage` (`internal/session/lifecycle.go`) and `hub.Hub.Append` |
+| `DedupRetry` | the reject branch of `hub.stream.append`: an event whose `StepKey` is remembered returns `Seq` 0 and changes no state |
+| `Consume` | the runtime's inbox cursor (`platformclient.Client.Inbox`, `internal/agent/runtime.go`); the hub keeps the inbox copy until its count cap drops it |
+| `Trim` | `hub.stream.trimLocked` and `evictOldestLocked`: drop the oldest event while over `sessions.event_buffer` or `sessions.event_buffer_bytes` |
+| `Stutter` | no Go function; a stream with no pending work |
+
+| Property | Meaning | Tests that sample it |
+|---|---|---|
+| `TypeOK` | Every variable stays in its declared domain | none; model well-formedness |
+| `MonotonicSeq` | Every append assigns a larger sequence number | `FuzzSequenceInvariants`, `FuzzHubAppendBudget` |
+| `EventCapEnforced` | No retained event exceeds `sessions.max_event_bytes`, whether it came from the runtime or the journal | `TestEmitRuntimeEventsTruncatesOversizedFields`, `TestRestoreJournalThreadBoundsOversizedEvents`, `FuzzEventBound` |
+| `RetainedWithinBudget` | Retained thread bytes never exceed `sessions.event_buffer_bytes` | `TestByteBudgetEvictsOldestEvents`, `FuzzHubAppendBudget` |
+| `ContiguousSuffix` | Retained sequences are a contiguous suffix ending at the latest sequence, so a replay shows a gap instead of a hole | `TestByteBudgetEvictsOldestEvents`, `FuzzHubAppendBudget`, `FuzzSequenceInvariants` |
+| `InboxNeverEvictedByRuntime` | A runtime append never removes an unconsumed human message from the inbox | `TestInboxSurvivesRuntimeEventFlood`, `FuzzHubAppendBudget` |
+| `InboxWithinCap` | The inbox holds at most `sessions.event_buffer` entries, and a later human post drops the oldest | `TestInboxCountCapDropsOldest` |
+| `KeysMatchRetained` | A remembered `StepKey` belongs to a retained event, so eviction frees the key | `TestEvictedStepKeyCanBeAppendedAgain` |
+| `NoDuplicateRetainedKey` | Two retained events never share a `StepKey` | `TestAppendDropsDuplicateStepKey` |
+
+The positive cfg uses eight appends over sizes `{1, 2, 3}`, a two-event thread
+cap, a four-byte budget, a two-entry inbox cap, and one dedup key: 19126 states
+generated, 2458 distinct, about a second.
+`HubRetention_evict_inbox_buggy.cfg` sets `ExemptInbox = FALSE`, so trimming the
+thread also consumes the matching inbox entry; TLC must report
+`InboxNeverEvictedByRuntime` (538 states generated, 112 distinct).
+`HubRetention_no_cap_buggy.cfg` sets `CapEvents = FALSE`, so an event of size
+`MaxEvent+1` is retained; TLC must report `EventCapEnforced` (43 states
+generated, 24 distinct). `HubRetention_inbox_overflow_buggy.cfg` sets
+`CapInbox = FALSE`, so two human posts exceed a one-entry inbox; TLC must
+report `InboxWithinCap` (283 states generated, 94 distinct).
+`HubRetention_key_leak_buggy.cfg` sets `EvictKeys = FALSE`, so a key outlives
+its evicted event; TLC must report `KeysMatchRetained` (40 states generated, 21
+distinct).
+
+The model abstracts these details:
+
+- Event sizes are abstract bytes from `Sizes`, not JSON or Go string lengths.
+- The inbox is a sequence of sequence numbers, not a separate slice copy. A
+  human message is one byte; `Manager.PostMessage` caps the text at 32 KiB.
+  `Consume` removes the oldest message when the runtime reads it, while the
+  real hub keeps the copy until a later post drops it or eviction removes the
+  thread copy.
+- `MaxInbox` is a constant separate from `MaxEvents`, so a cfg can shrink one
+  cap. The Go hub uses `sessions.event_buffer` for both.
+- `Keys` is a finite set of abstract step keys, and no event holds more than
+  one. A real `StepKey` is a string such as `11/1/assistant`.
+- `DedupRetry` spends one append step from `MaxAppends`, while the Go reject
+  branch costs nothing. The step only keeps TLC's state space finite.
+- The journal write path is outside the model. `RestoreAppend` models the
+  capped event that reaches `hub.Restore`, not the journal entry itself.
+- Subscribers and live fan-out are outside the model; it checks retention, not
+  channel delivery.
+
+## Fuzz targets for the bounds
+
+- `FuzzHubAppendBudget` (`internal/hub`) drives appends, restores, and replays,
+  and asserts the byte budget, the count cap, the contiguous suffix, and that
+  the inbox keeps its human message.
+- `FuzzEventBound` (`internal/session`) asserts that a shortened text or
+  payload string stays within the cap, keeps a prefix of the input, and stays
+  valid UTF-8 when the input was valid. Seeds sit on the cap and on a
+  multibyte rune that straddles it.
+- `FuzzGitHubParse`, `FuzzGenericParse`, and `FuzzDatadogParse` assert that a
+  derived title stays within `session.MaxTitleBytes` and is valid UTF-8, with
+  boundary seeds at the cap, one byte over, and a straddling rune.
+  `FuzzGitHubParse` applies the UTF-8 assertion to every input, and one seed
+  carries a non-UTF-8 `X-GitHub-Event` header.
+
 ## What is abstracted away
 
 - bbolt writes are atomic. A journal or ledger write either lands or not.
@@ -157,8 +236,8 @@ prevents.
 
 ## What is not verified
 
-The model is checked against the design, not against the Go code. Nothing in
-the repository shows that a Go execution is a behavior of the model, and the
+The models are checked against the design, not against the Go code. Nothing in
+the repository shows that a Go execution is a behavior of a model, and the
 reverse direction (a model behavior that the Go code permits) is also
 unchecked. Trace conformance, for example by recording a Go test's journal and
 ledger operations and replaying them through the model, is future work.

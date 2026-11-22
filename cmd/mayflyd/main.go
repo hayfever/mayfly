@@ -158,7 +158,7 @@ func main() {
 		}
 	}()
 
-	h := hub.New(cfg.Sessions.EventBuffer)
+	h := newHub(cfg)
 	mgr, err := session.New(cfg, bundle, store, h, journalStore, sessionRunner, kube, logger)
 	if err != nil {
 		logger.Error("create session manager", "error", err)
@@ -342,6 +342,13 @@ func main() {
 	managerCtx, cancelManager := context.WithDeadline(context.Background(), deadline)
 	mgr.Shutdown(managerCtx)
 	cancelManager()
+}
+
+// newHub builds the in-memory thread bus from the session limits. The byte
+// budget applies in addition to the event count cap, and an unset budget
+// falls back to hub.DefaultByteBudget.
+func newHub(cfg *config.Config) *hub.Hub {
+	return hub.New(cfg.Sessions.EventBuffer, hub.WithByteBudget(int64(cfg.Sessions.EventBufferBytes)))
 }
 
 // startServices starts the service plugin workloads and returns the gateway's

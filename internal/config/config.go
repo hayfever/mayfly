@@ -131,6 +131,16 @@ func (c ServerConfig) MetricsRequireAuth() bool {
 // grace period for the runtime to kill the process.
 const DefaultShutdownBudget = 25 * time.Second
 
+// DefaultMaxEventBytes bounds one runtime event in memory. The runtime posts
+// one event per request, so it also bounds what one delivery can retain.
+const DefaultMaxEventBytes = 64 << 10
+
+// DefaultEventBufferBytes is the retained thread byte budget per session.
+// It applies in addition to sessions.event_buffer, the event count cap. The
+// default is small because sessions.max_concurrent multiplies it; see the
+// memory sizing note in docs/configuration.md.
+const DefaultEventBufferBytes = 8 << 20
+
 // DefaultWebhookMaxBodyBytes bounds a webhook body when neither the trigger
 // nor the server sets a limit.
 const DefaultWebhookMaxBodyBytes = 1 << 20
@@ -180,6 +190,8 @@ type SessionsConfig struct {
 	IdleTimeout        Duration `yaml:"idle_timeout"`
 	CloseGrace         Duration `yaml:"close_grace"`
 	EventBuffer        int      `yaml:"event_buffer"`
+	EventBufferBytes   int      `yaml:"event_buffer_bytes"`
+	MaxEventBytes      int      `yaml:"max_event_bytes"`
 	MaxSteps           int      `yaml:"max_steps"`
 	MaxHistoryMessages int      `yaml:"max_history_messages"`
 	MaxConcurrent      int      `yaml:"max_concurrent"`
@@ -499,6 +511,8 @@ func Default() *Config {
 			IdleTimeout:         Duration(20 * time.Minute),
 			CloseGrace:          Duration(90 * time.Second),
 			EventBuffer:         5000,
+			EventBufferBytes:    DefaultEventBufferBytes,
+			MaxEventBytes:       DefaultMaxEventBytes,
 			MaxSteps:            24,
 			MaxHistoryMessages:  120,
 			MaxConcurrent:       50,
@@ -645,6 +659,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Sessions.EventBuffer <= 0 {
 		c.Sessions.EventBuffer = 5000
+	}
+	if c.Sessions.EventBufferBytes <= 0 {
+		c.Sessions.EventBufferBytes = DefaultEventBufferBytes
+	}
+	if c.Sessions.MaxEventBytes <= 0 {
+		c.Sessions.MaxEventBytes = DefaultMaxEventBytes
 	}
 	if c.Queue.MaxJobs <= 0 {
 		c.Queue.MaxJobs = 1000

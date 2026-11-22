@@ -20,6 +20,7 @@ import (
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/model"
 	"github.com/hayfever/mayfly/internal/session"
+	"github.com/hayfever/mayfly/internal/textutil"
 )
 
 // ErrUnauthorized means webhook verification failed.
@@ -109,7 +110,7 @@ func parseGeneric(cfg config.TriggerConfig, header http.Header, body []byte) (*R
 		prompt = text
 	}
 	if v, ok := payload["title"].(string); ok {
-		opts.Title = v
+		opts.Title = truncate(v, session.MaxTitleBytes)
 	}
 	if v, ok := payload["model"].(string); ok && v != "" {
 		opts.Model = v
@@ -150,6 +151,7 @@ func parseDatadog(cfg config.TriggerConfig, header http.Header, body []byte) (*R
 		return nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
 	}
 	title := str(payload, "title")
+	title = truncate(title, session.MaxTitleBytes)
 	text := str(payload, "text")
 	alertType := str(payload, "alert_type")
 	link := str(payload, "url")
@@ -199,14 +201,15 @@ func parseGitHub(cfg config.TriggerConfig, header http.Header, body []byte) (*Re
 	if !verifyGitHub(cfg, header, body) {
 		return nil, ErrUnauthorized
 	}
-	event := header.Get("X-GitHub-Event")
-	delivery := header.Get("X-GitHub-Delivery")
+	event := textutil.Valid(header.Get("X-GitHub-Event"))
+	delivery := textutil.Valid(header.Get("X-GitHub-Delivery"))
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
 	}
 	summary, title, actor, link := summarizeGitHub(event, payload)
 	summary = truncate(summary, 12<<10)
+	title = truncate(title, session.MaxTitleBytes)
 	bodyText := summary
 	prompt, err := applyTemplate(cfg, Data{
 		Trigger:  cfg.Name,
@@ -506,9 +509,20 @@ func stringSlice(v any, fallback []string) []string {
 	return out
 }
 
+// truncate returns s with at most max bytes, backing up to a UTF-8 sequence
+// boundary and ending a shortened value with an ellipsis. An invalid UTF-8
+// byte is replaced with U+FFFD, so the result is always valid text.
 func truncate(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	s = textutil.Valid(s)
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	const marker = "…"
+	if max <= len(marker) {
+		return textutil.Truncate(s, max)
+	}
+	return textutil.Truncate(s, max-len(marker)) + marker
 }

@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/session"
 )
 
 // FuzzDatadogParse checks the Datadog trigger: signature and token
@@ -19,6 +22,13 @@ func FuzzDatadogParse(f *testing.F) {
 	f.Add("dd-secret", []byte(`{"title":"Disk almost full","text":"91% used","alert_type":"warning"}`), uint8(1))
 	f.Add("dd-secret", []byte(`{"alert_type":"info","text":"recovered"}`), uint8(3))
 	f.Add("dd-secret", []byte(`{}`), uint8(8))
+	for _, title := range []string{
+		strings.Repeat("t", session.MaxTitleBytes),
+		strings.Repeat("t", session.MaxTitleBytes+1),
+		strings.Repeat("t", session.MaxTitleBytes-4) + "日zz",
+	} {
+		f.Add("dd-secret", []byte(fmt.Sprintf(`{"title":%q,"text":"alert","alert_type":"error"}`, title)), uint8(0))
+	}
 	f.Fuzz(func(t *testing.T, secret string, body []byte, mode uint8) {
 		cfg := config.TriggerConfig{
 			Name:          "datadog",
@@ -70,8 +80,11 @@ func FuzzDatadogParse(f *testing.F) {
 		if res.Options.Trigger.Kind != "datadog" || res.Options.Trigger.Event != str(payload, "alert_type") {
 			t.Fatalf("trigger = %+v", res.Options.Trigger)
 		}
-		if res.Options.Title != title {
-			t.Fatalf("title = %q, want %q", res.Options.Title, title)
+		if want := truncate(title, session.MaxTitleBytes); res.Options.Title != want {
+			t.Fatalf("title = %q, want %q", res.Options.Title, want)
+		}
+		if !utf8.ValidString(res.Options.Title) {
+			t.Fatalf("title is not valid UTF-8: %q", res.Options.Title)
 		}
 		// The prompt is the composed alert, trimmed at both ends, so the alert
 		// text appears unless it is only whitespace.

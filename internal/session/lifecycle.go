@@ -18,11 +18,22 @@ import (
 
 	"github.com/hayfever/mayfly/internal/artifact"
 	"github.com/hayfever/mayfly/internal/bundle"
+	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/k8s"
 	"github.com/hayfever/mayfly/internal/model"
 	"github.com/hayfever/mayfly/internal/runner"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
+	"github.com/hayfever/mayfly/internal/textutil"
 	"github.com/hayfever/mayfly/internal/version"
+)
+
+// Limits that bound one runtime event. StepKey stays identifier-sized because
+// the hub remembers it for duplicate detection; the event text and every
+// payload string use sessions.max_event_bytes.
+const (
+	maxEventStepKeyBytes = 512
+	maxEventActorBytes   = 256
+	eventTruncationMark  = "…[truncated]"
 )
 
 // ErrEmptyMessage rejects a human message with no text.
@@ -108,6 +119,7 @@ func (m *Manager) EmitRuntimeEvents(id, token string, events []model.Event) ([]m
 		return nil, ErrNotFound
 	}
 	m.RuntimeConnected(id)
+	limit := m.maxEventBytes()
 	out := make([]model.Event, 0, len(events))
 	for _, ev := range events {
 		switch ev.Type {
@@ -119,6 +131,7 @@ func (m *Manager) EmitRuntimeEvents(id, token string, events []model.Event) ([]m
 		}
 		ev.Seq = 0
 		ev.SessionID = ""
+		ev = boundRuntimeEvent(ev, limit)
 		stored := m.appendEvent(inst, ev)
 		if stored.Seq == 0 {
 			continue
@@ -126,6 +139,99 @@ func (m *Manager) EmitRuntimeEvents(id, token string, events []model.Event) ([]m
 		out = append(out, stored)
 	}
 	return out, nil
+}
+
+// maxEventBytes returns the configured cap on one runtime event, or the
+// default when the configuration leaves it unset. It bounds every event the
+// manager puts on the thread, including one restored from the journal.
+func (m *Manager) maxEventBytes() int {
+	if limit := m.cfg.Sessions.MaxEventBytes; limit > 0 {
+		return limit
+	}
+	return config.DefaultMaxEventBytes
+}
+
+// boundRuntimeEvent truncates the unbounded strings of one runtime event so a
+// hostile runtime cannot retain an oversized message. Text and every payload
+// string end with a marker, and the cut never splits a UTF-8 sequence. StepKey
+// and Actor get smaller identifier-sized bounds because the hub keeps a
+// StepKey until its event is evicted.
+func boundRuntimeEvent(ev model.Event, max int) model.Event {
+	if max <= 0 {
+		return ev
+	}
+	ev.StepKey = textutil.Truncate(ev.StepKey, maxEventStepKeyBytes)
+	ev.Actor = textutil.Truncate(ev.Actor, maxEventActorBytes)
+	ev.Text = truncateEventString(ev.Text, max)
+	switch d := ev.Data.(type) {
+	case model.UserMessageData:
+		d.Kind = truncateEventString(d.Kind, max)
+		d.Name = truncateEventString(d.Name, max)
+		d.Event = truncateEventString(d.Event, max)
+		ev.Data = d
+	case model.ToolCallData:
+		d.Tool = truncateEventString(d.Tool, max)
+		d.CallID = truncateEventString(d.CallID, max)
+		d.Arguments = truncateEventString(d.Arguments, max)
+		ev.Data = d
+	case model.ToolResultData:
+		d.Tool = truncateEventString(d.Tool, max)
+		d.CallID = truncateEventString(d.CallID, max)
+		ev.Data = d
+	case model.StatusData:
+		d.Reason = truncateEventString(d.Reason, max)
+		d.Error = truncateEventString(d.Error, max)
+		ev.Data = d
+	case model.SystemData:
+		d.Model = truncateEventString(d.Model, max)
+		d.Skills = truncateEach(d.Skills, max)
+		d.MCPServers = truncateEach(d.MCPServers, max)
+		d.Plugins = truncateEach(d.Plugins, max)
+		ev.Data = d
+	case model.ArtifactData:
+		d.Key = truncateEventString(d.Key, max)
+		d.URI = truncateEventString(d.URI, max)
+		d.SHA256 = truncateEventString(d.SHA256, max)
+		ev.Data = d
+	case model.ControlData:
+		d.Action = truncateEventString(d.Action, max)
+		d.Reason = truncateEventString(d.Reason, max)
+		ev.Data = d
+	}
+	return ev
+}
+
+// truncateEventString returns s with at most max bytes. A longer value ends
+// with eventTruncationMark. A value at or below max is returned as is.
+func truncateEventString(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	if max <= len(eventTruncationMark) {
+		return textutil.Truncate(s, max)
+	}
+	return textutil.Truncate(s, max-len(eventTruncationMark)) + eventTruncationMark
+}
+
+func truncateEach(values []string, max int) []string {
+	if values == nil {
+		return nil
+	}
+	changed := false
+	for _, v := range values {
+		if len(v) > max {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return values
+	}
+	out := make([]string, len(values))
+	for i, v := range values {
+		out[i] = truncateEventString(v, max)
+	}
+	return out
 }
 
 // reserveSequence keeps the hub's next sequence inside the range the journal

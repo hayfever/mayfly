@@ -3,10 +3,15 @@ package triggers
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/session"
+	"github.com/hayfever/mayfly/internal/textutil"
 )
 
 // FuzzGitHubParse checks the GitHub trigger: a signed delivery parses for any
@@ -20,6 +25,14 @@ func FuzzGitHubParse(f *testing.F) {
 	f.Add("gh-secret", "issues", "d-3", []byte(`{"action":"opened","issue":{"number":9,"title":"Broken deploy","body":"steps to reproduce","html_url":"https://github.com/acme/app/issues/9"},"repository":{"full_name":"acme/app"},"sender":{"login":"bob"}}`))
 	f.Add("gh-secret", "issue_comment", "d-4", []byte(`{"action":"created","issue":{"number":9,"title":"Broken deploy"},"comment":{"body":"same here","html_url":"https://github.com/acme/app/issues/9#issuecomment-1"},"repository":{"full_name":"acme/app"},"sender":{"login":"carol"}}`))
 	f.Add("gh-secret", "workflow_run", "d-5", []byte(`{"workflow_run":{"name":"CI","conclusion":"failure","html_url":"https://github.com/acme/app/actions/runs/1"},"repository":{"full_name":"acme/app"},"sender":{"login":"dave"}}`))
+	for _, repo := range []string{
+		strings.Repeat("a", 188),       // title is exactly MaxTitleBytes
+		strings.Repeat("a", 189),       // one byte over
+		strings.Repeat("a", 186) + "日", // the cut lands inside a rune
+	} {
+		f.Add("gh-secret", "pull_request", "d-edge", []byte(fmt.Sprintf(
+			`{"action":"opened","number":7,"pull_request":{"title":"x"},"repository":{"full_name":%q}}`, repo)))
+	}
 	f.Fuzz(func(t *testing.T, secret, event, delivery string, body []byte) {
 		cfg := config.TriggerConfig{Name: "github", Type: "github", Secret: secret}
 		h := fuzzHeader(
@@ -52,19 +65,23 @@ func FuzzGitHubParse(f *testing.F) {
 		if res == nil {
 			t.Fatal("nil result with nil error")
 		}
-		if res.Options.Trigger.Kind != "github" || res.Options.Trigger.Event != event {
+		if want := textutil.Valid(event); res.Options.Trigger.Kind != "github" || res.Options.Trigger.Event != want {
 			t.Fatalf("trigger = %+v", res.Options.Trigger)
 		}
-		if delivery != "" {
-			if res.DeliveryKey != delivery {
-				t.Fatalf("delivery key = %q, want %q", res.DeliveryKey, delivery)
-			}
-			if res.Options.Trigger.Delivery != delivery {
-				t.Fatalf("trigger delivery = %q, want %q", res.Options.Trigger.Delivery, delivery)
-			}
+		if want := textutil.Valid(delivery); res.DeliveryKey != want {
+			t.Fatalf("delivery key = %q, want %q", res.DeliveryKey, want)
+		}
+		if res.Options.Trigger.Delivery != res.DeliveryKey {
+			t.Fatalf("trigger delivery = %q, want %q", res.Options.Trigger.Delivery, res.DeliveryKey)
 		}
 		if limit := (12 << 10) + len("…"); len(res.Options.Prompt) > limit {
 			t.Fatalf("prompt is %d bytes, over the %d-byte summary bound", len(res.Options.Prompt), limit)
+		}
+		if len(res.Options.Title) > session.MaxTitleBytes {
+			t.Fatalf("title is %d bytes, over the %d-byte cap", len(res.Options.Title), session.MaxTitleBytes)
+		}
+		if !utf8.ValidString(res.Options.Title) {
+			t.Fatalf("title is not valid UTF-8: %q", res.Options.Title)
 		}
 
 		// The static token is not a GitHub credential.

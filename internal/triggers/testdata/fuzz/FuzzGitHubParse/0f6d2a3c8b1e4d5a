@@ -1,0 +1,5 @@
+go test fuzz v1
+string("gh-secret")
+string("push\xff")
+string("d-1")
+[]byte("{\"repository\":{\"full_name\":\"acme/app\"},\"sender\":{\"login\":\"alice\"}}")

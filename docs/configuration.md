@@ -43,6 +43,8 @@ Set `version: 1` in every file. A file without the key is read as version 1, and
 | `idle_timeout` | `20m` | Runtime closes itself after this period without user messages; `0` disables |
 | `close_grace` | `90s` | Time to wait for finalize after close before force stop and fallback |
 | `event_buffer` | `5000` | Retained thread events per session in memory |
+| `event_buffer_bytes` | `8388608` | Retained thread byte budget per session, in addition to `event_buffer`. The oldest events are evicted first. A human message the runtime has not read stays in the inbox even when its thread copy is evicted |
+| `max_event_bytes` | `65536` | Cap on one runtime event. Longer text and payload strings are truncated rune-safely and end with `…[truncated]` |
 | `max_steps` | `24` | Maximum model/tool iterations per user message |
 | `max_history_messages` | `120` | Messages sent to the model; oldest are trimmed at a user boundary |
 | `max_concurrent` | `50` | Maximum sessions that have not finalized. Webhook work waits in the queue; direct API calls get `429` and `Retry-After`. `0` removes the cap |
@@ -56,6 +58,19 @@ Set `version: 1` in every file. A file without the key is read as version 1, and
 | `artifacts_dir` | `/var/lib/mayfly/artifacts` | Container bundle staging path. The Kubernetes backend uses `/artifacts` on the workspace claim; the local backend uses its state directory |
 | `records.backend` | `journal.backend` | `memory` or `bbolt`. Where session records and the artifact index are kept. `bbolt` keeps finished sessions in `GET /api/v1/sessions` and artifact downloads working across a restart. `memory` keeps them in the process |
 | `records.path` | `sessions.db` beside `journal.bbolt.path` | Record database file, for the `bbolt` backend only. Put it on the control-plane PersistentVolume |
+
+### Session memory
+
+The hub keeps one stream per active session in control-plane memory. The
+worst case for one session is `event_buffer_bytes` plus the inbox. The inbox
+holds at most `event_buffer` human messages, and one message is at most 32
+KiB. With the defaults that is 8 MiB + 5000 × 32 KiB, about 164 MiB. With
+`max_concurrent` = 50 the hub bound is about 8 GiB.
+
+The chart's 1 GiB memory limit covers normal load, not this bound. Raise the
+pod memory limit when you raise `event_buffer_bytes`, `event_buffer`, or
+`max_concurrent`. Lower `event_buffer` to cut the inbox term, because one
+human message can be 32 KiB.
 
 ## runtime
 
