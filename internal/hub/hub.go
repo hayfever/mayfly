@@ -73,6 +73,11 @@ func New(max int, opts ...Option) *Hub {
 	return h
 }
 
+// ByteBudget returns the retained thread byte budget each session gets.
+func (h *Hub) ByteBudget() int64 {
+	return h.budget
+}
+
 // Create ensures a stream exists.
 func (h *Hub) Create(sessionID string) {
 	h.mu.Lock()
