@@ -162,6 +162,14 @@ additive, and a client must ignore a type this build does not know.
 
 Appends a human message and delivers it to the runtime. `202 {"event":{...}}`.
 
+The `202` is a durability promise: the control plane writes the message to a
+pending-inbox record in the journal before it returns, using the event `seq` as
+the turn key. If the control plane restarts before the runtime starts the turn,
+adoption redelivers the message under that same sequence. The record is removed
+once the runtime journals step 0 of the turn. A journal write failure returns
+`500` and no `202`. The initial prompt of a session, from the API or a webhook,
+follows the same rule.
+
 ### `POST /api/v1/sessions/{id}/close`
 
 ```json

@@ -65,6 +65,15 @@ A human message or the trigger message that created the session.
 
 A human message has no payload.
 
+A `user_message` accepted by the API or WebSocket is durable before its sender
+is acknowledged. The control plane stores a pending-inbox record keyed by the
+event `seq`, which is also the turn key. If the control plane restarts before
+the runtime starts the turn, adoption redelivers the event with the same `seq`
+and restores it on the thread. The record is removed when the runtime journals
+step 0. A runtime can therefore receive the same event again after it
+reconnects; the `seq` and the journaled step-0 identity tell it to continue the
+turn it already started, not to start another one.
+
 ### `assistant_message`
 
 One model reply. `finish_reason` is the model finish reason. `tool_calls` is
