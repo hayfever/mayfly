@@ -33,7 +33,8 @@ func TestAdoptResumesPodlessSession(t *testing.T) {
 	}
 	m.cfg.Runtime.Backend = "kubernetes"
 	m.cfg.Sessions.MaxRestarts = 2
-	m.journal = journal.NewMemory()
+	store := journal.NewMemory()
+	m.journal = store
 	m.kube = k8s.NewForClient(cs, "mayfly")
 	m.stateDir = t.TempDir()
 	fakeRunner := &fakeRunner{handle: runner.Handle{
@@ -85,11 +86,13 @@ func TestAdoptResumesPodlessSession(t *testing.T) {
 	if err := client.DeletePod(ctx, spec.PodName, 0); err != nil {
 		t.Fatal(err)
 	}
+	queued := addPendingMessage(t, store, "p1", 2, "queued before restart")
 
 	if err := m.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
 	defer m.Shutdown(context.Background())
+	assertRedelivered(t, m, "p1", queued)
 
 	var starts []runner.Spec
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
@@ -228,7 +231,8 @@ func TestAdoptKeepsArtifactsAgentAndIdempotencyKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.cfg.Runtime.Backend = "kubernetes"
-	m.journal = journal.NewMemory()
+	store := journal.NewMemory()
+	m.journal = store
 	m.kube = k8s.NewForClient(cs, "mayfly")
 	m.stateDir = t.TempDir()
 	m.runner = &fakeRunner{}
@@ -283,11 +287,13 @@ func TestAdoptKeepsArtifactsAgentAndIdempotencyKey(t *testing.T) {
 	if _, err := cs.CoreV1().Secrets("mayfly").Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
+	queued := addPendingMessage(t, store, "a1", 3, "accepted before restart")
 
 	if err := m.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
 	defer m.Shutdown(context.Background())
+	assertRedelivered(t, m, "a1", queued)
 
 	sess, ok := m.Get("a1")
 	if !ok {
@@ -605,4 +611,35 @@ func TestAdoptKeepsGatewayKey(t *testing.T) {
 	if string(after.GatewayKey) != string(key) {
 		t.Fatalf("replacement rotated the gateway key to %x", after.GatewayKey)
 	}
+}
+
+// addPendingMessage stores an accepted message whose turn never started, the
+// state a control-plane restart leaves between the 202 and step 0.
+func addPendingMessage(t *testing.T, store journal.PendingStore, id string, seq int64, text string) model.Event {
+	t.Helper()
+	ev := model.Event{Seq: seq, Type: model.EventUserMessage, Actor: "user", Text: text, Time: time.Now().UTC()}
+	if err := store.AddPending(context.Background(), journal.Pending{SessionID: id, Seq: seq, Event: ev}); err != nil {
+		t.Fatal(err)
+	}
+	return ev
+}
+
+// assertRedelivered checks that adoption put the pending message back on the
+// session inbox under its original sequence.
+func assertRedelivered(t *testing.T, m *Manager, id string, want model.Event) {
+	t.Helper()
+	ch, cancel, ok := m.SubscribeInbox(id, 0)
+	if !ok {
+		t.Fatalf("SubscribeInbox refused adopted session %s", id)
+	}
+	defer cancel()
+	for _, ev := range drainEvents(ch) {
+		if ev.Type == model.EventUserMessage && ev.Text == want.Text {
+			if ev.Seq != want.Seq {
+				t.Fatalf("redelivered sequence = %d, want %d", ev.Seq, want.Seq)
+			}
+			return
+		}
+	}
+	t.Fatalf("adoption did not redeliver the pending message %q", want.Text)
 }
