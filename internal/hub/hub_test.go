@@ -4,8 +4,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/model"
 )
+
+func TestDefaultByteBudgetMatchesConfig(t *testing.T) {
+	if got := DefaultByteBudget; got != int64(config.DefaultEventBufferBytes) {
+		t.Fatalf("hub default budget = %d, config default = %d", got, config.DefaultEventBufferBytes)
+	}
+}
 
 func TestAppendDropsDuplicateStepKey(t *testing.T) {
 	h := New(10)

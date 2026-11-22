@@ -136,8 +136,10 @@ const DefaultShutdownBudget = 25 * time.Second
 const DefaultMaxEventBytes = 64 << 10
 
 // DefaultEventBufferBytes is the retained thread byte budget per session.
-// It applies in addition to sessions.event_buffer, the event count cap.
-const DefaultEventBufferBytes = 16 << 20
+// It applies in addition to sessions.event_buffer, the event count cap. The
+// default is small because sessions.max_concurrent multiplies it; see the
+// memory sizing note in docs/configuration.md.
+const DefaultEventBufferBytes = 8 << 20
 
 // DefaultWebhookMaxBodyBytes bounds a webhook body when neither the trigger
 // nor the server sets a limit.

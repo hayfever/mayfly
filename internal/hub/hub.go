@@ -11,8 +11,10 @@ import (
 )
 
 // DefaultByteBudget bounds the retained thread bytes of one session when no
-// option sets another budget.
-const DefaultByteBudget int64 = 16 << 20
+// option sets another budget. It stays small because the byte budget applies
+// per session and sessions.max_concurrent multiplies it; see the memory
+// sizing note in docs/configuration.md.
+const DefaultByteBudget int64 = 8 << 20
 
 // Option configures a Hub.
 type Option func(*Hub)
