@@ -11,6 +11,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ### Fixed
 
+- The Helm chart renders the session Role and RoleBinding in `config.sessions.namespace` and binds the control-plane ServiceAccount to them. A separate sessions namespace now works; previously every session create failed with 403. The plugin Role is rendered only when `config.plugins.namespace` differs from the sessions namespace (#43).
 - Retrying a buried queue job whose trigger has no name no longer rewrites its stored payload with a derived name.
 - A pre-0.2 legacy queue job missing fields the envelope reader requires is rejected when read, instead of being rewritten on retry into a payload that can never be claimed.
 - An artifact bundle entry whose name is not valid UTF-8 is written with the same name the manifest lists.
