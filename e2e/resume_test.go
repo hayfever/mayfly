@@ -160,3 +160,71 @@ func userMessageCount(t *testing.T, id, prompt string) int {
 	}
 	return count
 }
+
+// TestControlPlaneRestartKeepsQueuedMessage posts a human message while the
+// final model call of the first turn is in flight, then replaces the control
+// plane. The message is acknowledged with 202 but cannot start before the turn
+// ends, so only the durable pending record can carry it across the restart.
+// Adoption must redeliver it once, under its reserved turn key.
+func TestControlPlaneRestartKeepsQueuedMessage(t *testing.T) {
+	mcpBase, stop := env.forwardService(t, "mcpstub", 9100)
+	defer stop()
+	resetMCPCounts(t, mcpBase)
+
+	prompt := "resume-slow-final queued " + randomHex(4)
+	queued := "queued behind the running turn " + randomHex(4)
+	s := env.createSession(t, map[string]any{"prompt": prompt, "agent": "e2e"})
+	env.waitStatus(t, s.ID, "running", 3*time.Minute)
+	env.waitEvent(t, s.ID, "completed MCP tool call", func(ev event) bool {
+		tool, _ := ev.Data["tool"].(string)
+		return ev.Type == "tool_result" && strings.HasPrefix(tool, "mcp_")
+	})
+
+	// The stub model sleeps five seconds before this turn's final reply. The
+	// 202 is the durability point: the reply returns only after the journal
+	// holds the message.
+	r := env.admin(t, http.MethodPost, "/api/v1/sessions/"+s.ID+"/messages", map[string]string{"text": queued})
+	expectStatus(t, r, http.StatusAccepted, "queued message")
+	env.killControlPlane(t)
+
+	env.waitEvent(t, s.ID, "assistant reply after control-plane restart", func(ev event) bool {
+		return ev.Type == "assistant_message" && strings.Contains(ev.Text, "Completed.")
+	})
+	eventually(t, 3*time.Minute, "queued message handled once", func() (bool, string) {
+		users, replies := 0, 0
+		for _, ev := range env.events(t, s.ID) {
+			if ev.Type == "user_message" && ev.Text == queued {
+				users++
+			}
+			if ev.Type == "assistant_message" && strings.Contains(ev.Text, "Completed.") {
+				replies++
+			}
+		}
+		got, _ := env.getSession(t, s.ID)
+		return users == 1 && replies >= 2, fmt.Sprintf("queued user messages=%d assistant replies=%d status=%s", users, replies, got.Status)
+	})
+	if got := userMessageCount(t, s.ID, prompt); got != 1 {
+		t.Fatalf("initial prompt appears %d times, want 1", got)
+	}
+	if got := mcpCallCount(t, mcpBase, "echo"); got != 1 {
+		t.Fatalf("echo tool executed %d times, want 1", got)
+	}
+}
+
+// TestControlPlaneRestartKeepsInitialPrompt creates a session and replaces the
+// control plane before its pod has connected. The initial prompt is accepted
+// before the pod exists, so only the durable pending record or the journal can
+// carry it across the restart. Adoption must deliver it exactly once.
+func TestControlPlaneRestartKeepsInitialPrompt(t *testing.T) {
+	prompt := "initial prompt across restart " + randomHex(4)
+	s := env.createSession(t, map[string]any{"prompt": prompt, "agent": "e2e"})
+	env.killControlPlane(t)
+
+	env.waitEvent(t, s.ID, "initial prompt after control-plane restart", func(ev event) bool {
+		return ev.Type == "user_message" && ev.Text == prompt
+	})
+	env.waitStatus(t, s.ID, "running", 3*time.Minute)
+	if got := userMessageCount(t, s.ID, prompt); got != 1 {
+		t.Fatalf("initial prompt appears %d times, want 1", got)
+	}
+}
