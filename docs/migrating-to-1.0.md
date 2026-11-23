@@ -96,6 +96,23 @@ A shorter value stops startup with an error that names the config key and
 environment variable. Run `mayflyd --config <path>` once to check before you
 deploy.
 
+## Session memory and request bodies
+
+The inbox of unread human messages now has its own byte budget.
+`sessions.inbox_buffer_bytes` defaults to `sessions.event_buffer_bytes`
+(8 MiB). Worst case per session is now `event_buffer_bytes` plus
+`inbox_buffer_bytes`, about 16 MiB at the defaults. Before, the inbox had only
+the count cap and could reach about 164 MiB with defaults. Existing
+configuration files need no change. Keep `inbox_buffer_bytes` above 32 KiB,
+because one human message can be that large and a larger message than the
+whole budget is dropped.
+
+A request body that does not arrive within `server.body_read_timeout`
+(default 30s) now gets `408 request_timeout` and the connection closes. This
+covers `/api/v1` JSON bodies, `/hooks/{name}`, and the internal JSON endpoints.
+WebSocket attach, event and inbox streams, the LLM proxy, and artifact uploads
+keep their own behavior.
+
 ## Skill cache
 
 `skills.cache_dir` stores verified skill source archives by SHA-256. A restart
