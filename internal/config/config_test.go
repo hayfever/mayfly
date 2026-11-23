@@ -803,19 +803,33 @@ func TestSessionByteLimits(t *testing.T) {
 	if cfg.Sessions.MaxEventBytes != DefaultMaxEventBytes || cfg.Sessions.EventBufferBytes != DefaultEventBufferBytes {
 		t.Fatalf("defaults = %d / %d", cfg.Sessions.MaxEventBytes, cfg.Sessions.EventBufferBytes)
 	}
-	decoder := yaml.NewDecoder(strings.NewReader("sessions:\n  max_event_bytes: 1024\n  event_buffer_bytes: 4096\n"))
+	if cfg.Sessions.InboxBufferBytes != DefaultEventBufferBytes {
+		t.Fatalf("inbox budget default = %d", cfg.Sessions.InboxBufferBytes)
+	}
+	decoder := yaml.NewDecoder(strings.NewReader("sessions:\n  max_event_bytes: 1024\n  event_buffer_bytes: 4096\n  inbox_buffer_bytes: 8192\n"))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Sessions.MaxEventBytes != 1024 || cfg.Sessions.EventBufferBytes != 4096 {
-		t.Fatalf("loaded limits = %d / %d", cfg.Sessions.MaxEventBytes, cfg.Sessions.EventBufferBytes)
+	if cfg.Sessions.MaxEventBytes != 1024 || cfg.Sessions.EventBufferBytes != 4096 || cfg.Sessions.InboxBufferBytes != 8192 {
+		t.Fatalf("loaded limits = %d / %d / %d", cfg.Sessions.MaxEventBytes, cfg.Sessions.EventBufferBytes, cfg.Sessions.InboxBufferBytes)
 	}
 	cfg.Sessions.MaxEventBytes = 0
 	cfg.Sessions.EventBufferBytes = 0
+	cfg.Sessions.InboxBufferBytes = 0
 	cfg.applyDefaults()
 	if cfg.Sessions.MaxEventBytes != DefaultMaxEventBytes || cfg.Sessions.EventBufferBytes != DefaultEventBufferBytes {
 		t.Fatalf("zero limits did not fall back to defaults")
+	}
+	if cfg.Sessions.InboxBufferBytes != DefaultEventBufferBytes {
+		t.Fatalf("zero inbox budget = %d, want the thread default", cfg.Sessions.InboxBufferBytes)
+	}
+	// An unset inbox budget follows a configured thread budget.
+	cfg.Sessions.EventBufferBytes = 4096
+	cfg.Sessions.InboxBufferBytes = 0
+	cfg.applyDefaults()
+	if cfg.Sessions.InboxBufferBytes != 4096 {
+		t.Fatalf("inbox budget = %d, want event_buffer_bytes", cfg.Sessions.InboxBufferBytes)
 	}
 }
 

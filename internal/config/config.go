@@ -198,14 +198,18 @@ func (c ServerConfig) ShutdownShares() (httpShare, workerShare, managerShare tim
 
 // SessionsConfig controls session defaults and runtime limits.
 type SessionsConfig struct {
-	Namespace          string   `yaml:"namespace"`
-	DefaultTTL         Duration `yaml:"default_ttl"`
-	MaxTTL             Duration `yaml:"max_ttl"`
-	IdleTimeout        Duration `yaml:"idle_timeout"`
-	CloseGrace         Duration `yaml:"close_grace"`
-	EventBuffer        int      `yaml:"event_buffer"`
-	EventBufferBytes   int      `yaml:"event_buffer_bytes"`
-	MaxEventBytes      int      `yaml:"max_event_bytes"`
+	Namespace        string   `yaml:"namespace"`
+	DefaultTTL       Duration `yaml:"default_ttl"`
+	MaxTTL           Duration `yaml:"max_ttl"`
+	IdleTimeout      Duration `yaml:"idle_timeout"`
+	CloseGrace       Duration `yaml:"close_grace"`
+	EventBuffer      int      `yaml:"event_buffer"`
+	EventBufferBytes int      `yaml:"event_buffer_bytes"`
+	MaxEventBytes    int      `yaml:"max_event_bytes"`
+	// InboxBufferBytes bounds the retained human messages per session, in
+	// addition to the event_buffer count cap. Zero or less follows
+	// event_buffer_bytes.
+	InboxBufferBytes   int      `yaml:"inbox_buffer_bytes"`
 	MaxSteps           int      `yaml:"max_steps"`
 	MaxHistoryMessages int      `yaml:"max_history_messages"`
 	MaxConcurrent      int      `yaml:"max_concurrent"`
@@ -528,6 +532,7 @@ func Default() *Config {
 			EventBuffer:         5000,
 			EventBufferBytes:    DefaultEventBufferBytes,
 			MaxEventBytes:       DefaultMaxEventBytes,
+			InboxBufferBytes:    DefaultEventBufferBytes,
 			MaxSteps:            24,
 			MaxHistoryMessages:  120,
 			MaxConcurrent:       50,
@@ -680,6 +685,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Sessions.EventBufferBytes <= 0 {
 		c.Sessions.EventBufferBytes = DefaultEventBufferBytes
+	}
+	if c.Sessions.InboxBufferBytes <= 0 {
+		c.Sessions.InboxBufferBytes = c.Sessions.EventBufferBytes
 	}
 	if c.Sessions.MaxEventBytes <= 0 {
 		c.Sessions.MaxEventBytes = DefaultMaxEventBytes

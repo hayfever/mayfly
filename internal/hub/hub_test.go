@@ -14,6 +14,92 @@ func TestDefaultByteBudgetMatchesConfig(t *testing.T) {
 	if got := DefaultByteBudget; got != int64(config.DefaultEventBufferBytes) {
 		t.Fatalf("hub default budget = %d, config default = %d", got, config.DefaultEventBufferBytes)
 	}
+	if got := DefaultInboxByteBudget; got != int64(config.DefaultEventBufferBytes) {
+		t.Fatalf("hub default inbox budget = %d, config default = %d", got, config.DefaultEventBufferBytes)
+	}
+}
+
+// inboxSnapshot returns the retained inbox events and their accounted bytes.
+func inboxSnapshot(h *Hub, sessionID string) ([]model.Event, int64) {
+	h.mu.Lock()
+	s := h.streams[sessionID]
+	h.mu.Unlock()
+	if s == nil {
+		return nil, 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	events := make([]model.Event, len(s.inbox))
+	copy(events, s.inbox)
+	return events, s.inboxBytes
+}
+
+func TestInboxByteBudgetDropsOldest(t *testing.T) {
+	const budget = 4096
+	h := New(100, WithInboxByteBudget(budget))
+	h.Create("s")
+	for i := range 20 {
+		got := h.Append("s", model.Event{Type: model.EventUserMessage, Text: fmt.Sprintf("%d %s", i, strings.Repeat("m", 1000))})
+		if got.Seq == 0 {
+			t.Fatalf("human message %d was dropped", i)
+		}
+	}
+	inbox, bytes := inboxSnapshot(h, "s")
+	if bytes > budget {
+		t.Fatalf("inbox bytes = %d, over the %d-byte budget", bytes, budget)
+	}
+	if len(inbox) == 0 {
+		t.Fatal("the inbox byte budget dropped every message")
+	}
+	if inbox[len(inbox)-1].Text == "" || !strings.HasPrefix(inbox[len(inbox)-1].Text, "19 ") {
+		t.Fatalf("newest message is missing: %+v", inbox[len(inbox)-1])
+	}
+	if inbox[0].Seq <= 1 {
+		t.Fatalf("first inbox seq = %d, want an eviction", inbox[0].Seq)
+	}
+}
+
+func TestInboxByteBudgetDropsMessageLargerThanBudget(t *testing.T) {
+	// The byte bound wins even when one message is larger than the whole
+	// budget: the inbox never exceeds what the operator allowed. Keep
+	// inbox_buffer_bytes above the 32 KiB message cap in practice.
+	h := New(10, WithInboxByteBudget(256))
+	h.Create("s")
+	got := h.Append("s", model.Event{Type: model.EventUserMessage, Text: strings.Repeat("x", 1000)})
+	if got.Seq == 0 {
+		t.Fatal("human message was dropped by the hub append")
+	}
+	inbox, bytes := inboxSnapshot(h, "s")
+	if len(inbox) != 0 || bytes != 0 {
+		t.Fatalf("inbox = %+v (%d bytes), want empty", inbox, bytes)
+	}
+}
+
+func TestRedeliverRespectsInboxByteBudget(t *testing.T) {
+	const budget = 4096
+	h := New(100, WithInboxByteBudget(budget))
+	h.Seed("s", 100)
+	for i := range 20 {
+		ev := model.Event{
+			Seq:   int64(i + 1),
+			Type:  model.EventUserMessage,
+			Actor: "user",
+			Text:  fmt.Sprintf("%d %s", i, strings.Repeat("r", 1000)),
+		}
+		if !h.Redeliver("s", ev) {
+			t.Fatalf("Redeliver refused message %d", i)
+		}
+	}
+	inbox, bytes := inboxSnapshot(h, "s")
+	if bytes > budget {
+		t.Fatalf("inbox bytes = %d, over the %d-byte budget", bytes, budget)
+	}
+	if len(inbox) == 0 || inbox[len(inbox)-1].Seq != 20 {
+		t.Fatalf("inbox = %+v, want the newest redelivered message", inbox)
+	}
+	if inbox[0].Seq <= 1 {
+		t.Fatalf("first inbox seq = %d, want an eviction", inbox[0].Seq)
+	}
 }
 
 func TestAppendDropsDuplicateStepKey(t *testing.T) {

@@ -145,7 +145,9 @@ smaller identifier-sized bounds.
 
 The hub retains at most `sessions.event_buffer` events and
 `sessions.event_buffer_bytes` accounted bytes per session, and drops the oldest
-event first. A human message the runtime has not read stays in the inbox even
+event first. The inbox holds at most `sessions.event_buffer` human messages and
+`sessions.inbox_buffer_bytes` accounted bytes; a later human post drops the
+oldest. A human message the runtime has not read stays in the inbox even
 when runtime volume evicts its thread copy. A replay after an evicted sequence
 starts at the oldest retained event, so `seq` can jump; the gap is visible in
 the returned sequence numbers.

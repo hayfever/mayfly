@@ -16,6 +16,11 @@ import (
 // sizing note in docs/configuration.md.
 const DefaultByteBudget int64 = 8 << 20
 
+// DefaultInboxByteBudget bounds the retained inbox bytes of one session when
+// no option sets another budget. It matches the thread default, so one
+// session holds about 16 MiB with both budgets at their defaults.
+const DefaultInboxByteBudget int64 = DefaultByteBudget
+
 // Option configures a Hub.
 type Option func(*Hub)
 
@@ -30,6 +35,17 @@ func WithByteBudget(bytes int64) Option {
 	}
 }
 
+// WithInboxByteBudget sets the retained inbox byte budget for each session.
+// The budget applies in addition to the inbox count cap. A value at or below
+// zero leaves the default in place.
+func WithInboxByteBudget(bytes int64) Option {
+	return func(h *Hub) {
+		if bytes > 0 {
+			h.inboxBudget = bytes
+		}
+	}
+}
+
 // retainedEvent is one thread event and its accounted size.
 type retainedEvent struct {
 	ev    model.Event
@@ -37,16 +53,18 @@ type retainedEvent struct {
 }
 
 type stream struct {
-	mu       sync.Mutex
-	seq      int64
-	events   []retainedEvent
-	bytes    int64
-	inbox    []model.Event
-	subs     map[*subscription]struct{}
-	max      int
-	budget   int64
-	keys     map[string]struct{}
-	keyOrder []string
+	mu          sync.Mutex
+	seq         int64
+	events      []retainedEvent
+	bytes       int64
+	inbox       []model.Event
+	inboxBytes  int64
+	subs        map[*subscription]struct{}
+	max         int
+	budget      int64
+	inboxBudget int64
+	keys        map[string]struct{}
+	keyOrder    []string
 }
 
 type subscription struct {
@@ -56,19 +74,20 @@ type subscription struct {
 
 // Hub owns one stream per session.
 type Hub struct {
-	mu      sync.Mutex
-	streams map[string]*stream
-	max     int
-	budget  int64
+	mu          sync.Mutex
+	streams     map[string]*stream
+	max         int
+	budget      int64
+	inboxBudget int64
 }
 
 // New creates a hub retaining at most max events per session, and at most the
-// byte budget per session. The budget defaults to DefaultByteBudget.
+// byte budgets per session. Both budgets default to DefaultByteBudget.
 func New(max int, opts ...Option) *Hub {
 	if max <= 0 {
 		max = 5000
 	}
-	h := &Hub{streams: map[string]*stream{}, max: max, budget: DefaultByteBudget}
+	h := &Hub{streams: map[string]*stream{}, max: max, budget: DefaultByteBudget, inboxBudget: DefaultInboxByteBudget}
 	for _, opt := range opts {
 		opt(h)
 	}
@@ -80,16 +99,22 @@ func (h *Hub) ByteBudget() int64 {
 	return h.budget
 }
 
+// InboxByteBudget returns the retained inbox byte budget each session gets.
+func (h *Hub) InboxByteBudget() int64 {
+	return h.inboxBudget
+}
+
 // Create ensures a stream exists.
 func (h *Hub) Create(sessionID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if _, ok := h.streams[sessionID]; !ok {
 		h.streams[sessionID] = &stream{
-			subs:   map[*subscription]struct{}{},
-			max:    h.max,
-			budget: h.budget,
-			keys:   map[string]struct{}{},
+			subs:        map[*subscription]struct{}{},
+			max:         h.max,
+			budget:      h.budget,
+			inboxBudget: h.inboxBudget,
+			keys:        map[string]struct{}{},
 		}
 	}
 }
@@ -151,11 +176,11 @@ func (h *Hub) Redeliver(sessionID string, ev model.Event) bool {
 	}
 	ev.SessionID = sessionID
 	s.inbox = append(s.inbox, ev)
-	if len(s.inbox) > s.max {
-		// The inbox count cap is the same one a live post obeys. A runtime
-		// that falls this far behind sees the same bounded window.
-		s.inbox = append([]model.Event(nil), s.inbox[len(s.inbox)-s.max:]...)
-	}
+	s.inboxBytes += eventBytes(ev)
+	// The inbox byte budget and count cap are the same ones a live post
+	// obeys. A runtime that falls this far behind sees the same bounded
+	// window.
+	s.trimInboxLocked()
 	for sub := range s.subs {
 		if sub.filter != nil && !sub.filter(ev) {
 			continue
@@ -197,9 +222,8 @@ func (h *Hub) append(sessionID string, ev model.Event, inbox bool) model.Event {
 	s.trimLocked()
 	if inbox && ev.IsInbox() {
 		s.inbox = append(s.inbox, ev)
-		if len(s.inbox) > s.max {
-			s.inbox = append([]model.Event(nil), s.inbox[len(s.inbox)-s.max:]...)
-		}
+		s.inboxBytes += size
+		s.trimInboxLocked()
 	}
 	for sub := range s.subs {
 		if sub.filter != nil && !sub.filter(ev) {
@@ -224,6 +248,26 @@ func (s *stream) trimLocked() {
 		if !s.evictOldestLocked() {
 			return
 		}
+	}
+}
+
+// trimInboxLocked drops the oldest inbox entries until the inbox fits both
+// its count cap and its byte budget. Only a human message reaches this path:
+// a runtime append never removes an inbox entry the runtime has not read.
+func (s *stream) trimInboxLocked() {
+	for len(s.inbox) > s.max || (s.inboxBudget > 0 && s.inboxBytes > s.inboxBudget) {
+		if len(s.inbox) == 0 {
+			return
+		}
+		oldest := s.inbox[0]
+		s.inboxBytes -= eventBytes(oldest)
+		// Clear the slot so the dropped strings are not kept alive by the
+		// backing array.
+		s.inbox[0] = model.Event{}
+		s.inbox = s.inbox[1:]
+	}
+	if cap(s.inbox) > 2*len(s.inbox)+16 {
+		s.inbox = append([]model.Event(nil), s.inbox...)
 	}
 }
 
