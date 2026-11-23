@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -71,4 +73,62 @@ func TestInstrumentQueueCountsAttemptResults(t *testing.T) {
 			t.Fatalf("missing %q:\n%s", line, body)
 		}
 	}
+}
+
+func TestNewLoggerWarnsOnUnknownLevel(t *testing.T) {
+	orig := os.Stderr
+	t.Cleanup(func() { os.Stderr = orig })
+
+	t.Run("unknown", func(t *testing.T) {
+		t.Setenv("MAYFLY_LOG_LEVEL", "verbose")
+		out := captureStderr(t, func() {
+			logger := newLogger()
+			logger.Debug("debug-should-be-silent")
+			logger.Info("info-still-emitted")
+		})
+		if !strings.Contains(out, `"msg":"unknown MAYFLY_LOG_LEVEL; using info"`) {
+			t.Fatalf("missing unknown-level warning:\n%s", out)
+		}
+		if !strings.Contains(out, `"value":"verbose"`) {
+			t.Fatalf("warning does not name the value:\n%s", out)
+		}
+		if !strings.Contains(out, `"msg":"info-still-emitted"`) {
+			t.Fatalf("info log at fallback level missing:\n%s", out)
+		}
+		if strings.Contains(out, "debug-should-be-silent") {
+			t.Fatalf("debug log was emitted at the info fallback:\n%s", out)
+		}
+	})
+
+	for _, level := range []string{"", "debug", "info", "warn", "error", "WARN"} {
+		t.Run("known_"+level, func(t *testing.T) {
+			t.Setenv("MAYFLY_LOG_LEVEL", level)
+			out := captureStderr(t, func() { _ = newLogger() })
+			if strings.Contains(out, "unknown MAYFLY_LOG_LEVEL") {
+				t.Fatalf("unexpected warning for %q:\n%s", level, out)
+			}
+		})
+	}
+}
+
+// captureStderr runs fn with os.Stderr pointing at a pipe and returns what was written.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+	return buf.String()
 }

@@ -220,6 +220,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
   /api/v1/sessions/{id}:
     parameters:
       - $ref: "#/components/parameters/SessionID"
@@ -242,6 +244,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
     delete:
       operationId: deleteSession
       summary: Force-delete a session
@@ -263,6 +267,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/Internal"
   /api/v1/sessions/{id}/events:
@@ -307,6 +313,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
   /api/v1/sessions/{id}/messages:
     parameters:
       - $ref: "#/components/parameters/SessionID"
@@ -351,6 +359,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/Internal"
   /api/v1/sessions/{id}/close:
@@ -392,6 +402,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/Internal"
   /api/v1/sessions/{id}/attach-ticket:
@@ -435,6 +447,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/Internal"
   /api/v1/sessions/{id}/artifact:
@@ -463,6 +477,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
   /api/v1/sessions/{id}/ws:
     parameters:
       - $ref: "#/components/parameters/SessionID"
@@ -517,6 +533,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
   /api/v1/schedules:
     get:
       operationId: listSchedules
@@ -541,6 +559,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
   /api/v1/schedules/{name}/run:
     parameters:
       - name: name
@@ -570,6 +590,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/Internal"
         "503":
@@ -596,6 +618,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "503":
           $ref: "#/components/responses/Unavailable"
   /api/v1/queue/jobs/{id}:
@@ -630,6 +654,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "503":
           $ref: "#/components/responses/Unavailable"
   /api/v1/queue/dead:
@@ -656,6 +682,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "503":
           $ref: "#/components/responses/Unavailable"
   /api/v1/queue/dead/{id}/retry:
@@ -685,6 +713,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "503":
           $ref: "#/components/responses/Unavailable"
   /api/v1/queue/dead/{id}:
@@ -709,6 +739,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "503":
           $ref: "#/components/responses/Unavailable"
   /api/v1/auth/session:
@@ -751,6 +783,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
     get:
       operationId: getWebSession
       summary: Read the current browser session
@@ -805,7 +839,9 @@ components:
         A named API token. Each operation lists the scope the token needs.
         `admin` grants every scope. A missing, unknown, or expired token
         returns `401` with code `unauthenticated`; a token without the
-        operation's scope returns `403` with code `forbidden`.
+        operation's scope returns `403` with code `forbidden`. Repeated
+        failed authentications from one client return `429` with code
+        `rate_limited` and a `Retry-After` header.
 
         Tokens come from `server.tokens` in the control-plane configuration,
         or from `server.token_env` as one token named `default` with the
@@ -901,7 +937,9 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     RateLimited:
-      description: A rate limit or capacity limit is reached. `Retry-After` is set.
+      description: >
+        A rate limit or capacity limit is reached, including too many failed
+        authentications from one client. `Retry-After` is set.
       headers:
         Retry-After:
           schema:

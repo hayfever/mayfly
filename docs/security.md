@@ -319,7 +319,7 @@ The control plane writes audit lines through a dedicated logger that ignores `MA
 
 The control plane writes one audit line for every authenticated, mutating `/api/v1` request: `POST`, `PUT`, `PATCH`, and `DELETE`. This includes a request that a valid token is not allowed to make, which is logged with status `403`. The operator actions in this API are all mutating requests.
 
-The line is JSON on stderr, uses the message `audit`, and has an `level` of `INFO`. Its fields are:
+The line is JSON on stderr, uses the message `audit`, and has a `level` of `INFO`. Its fields are:
 
 - `token_name`: the configured token name, or `unknown` when no token matched. The secret never appears.
 - `via`: `bearer` for an `Authorization` header, or `web` for a browser session cookie.

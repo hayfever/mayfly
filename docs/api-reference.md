@@ -31,7 +31,7 @@ Responses:
 | 400 | The request is not valid. | `Error` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
-| 429 | A rate limit or capacity limit is reached. `Retry-After` is set. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 500 | The runtime did not start. If the session record already exists, `error.details.session_id` names it. | `Error` |
 
 ### listSessions
@@ -55,6 +55,7 @@ Responses:
 | 400 | The request is not valid. | `Error` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 
 ### getSession
 
@@ -74,6 +75,7 @@ Responses:
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 
 ### deleteSession
 
@@ -98,6 +100,7 @@ Responses:
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 500 | An internal failure. The message never carries internals. | `Error` |
 
 ### listSessionEvents
@@ -122,6 +125,7 @@ Responses:
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 
 ### postSessionMessage
 
@@ -147,6 +151,7 @@ Responses:
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
 | 409 | The request conflicts with the current state. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 500 | An internal failure. The message never carries internals. | `Error` |
 
 ### closeSession
@@ -170,6 +175,7 @@ Responses:
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
 | 409 | The request conflicts with the current state. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 500 | An internal failure. The message never carries internals. | `Error` |
 
 ### createAttachTicket
@@ -192,6 +198,7 @@ Responses:
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 500 | An internal failure. The message never carries internals. | `Error` |
 
 ### downloadSessionArtifact
@@ -215,6 +222,7 @@ Responses:
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 
 ### attachSessionWebSocket
 
@@ -264,6 +272,7 @@ Responses:
 | 200 | Queue counters. | `object` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 503 | A dependency is not available. | `Error` |
 
 ### getQueueJob
@@ -289,6 +298,7 @@ Responses:
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
 | 409 | The request conflicts with the current state. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 503 | A dependency is not available. | `Error` |
 
 ### listDeadJobs
@@ -312,6 +322,7 @@ Responses:
 | 400 | The request is not valid. | `Error` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 503 | A dependency is not available. | `Error` |
 
 ### retryDeadJob
@@ -334,6 +345,7 @@ Responses:
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 503 | A dependency is not available. | `Error` |
 
 ### deleteDeadJob
@@ -354,6 +366,7 @@ Responses:
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 503 | A dependency is not available. | `Error` |
 
 ## schedules
@@ -384,6 +397,7 @@ Responses:
 | 400 | The request is not valid. | `Error` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 
 ### runSchedule
 
@@ -405,6 +419,7 @@ Responses:
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 500 | An internal failure. The message never carries internals. | `Error` |
 | 503 | A dependency is not available. | `Error` |
 
@@ -425,6 +440,7 @@ Responses:
 | 200 | Defaults, allowed models, agents, skills, MCP servers, triggers, and schedules. | `Config` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 
 ## auth
 
@@ -458,6 +474,7 @@ Responses:
 | 400 | The request is not valid. | `Error` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 
 ### getWebSession
 
@@ -535,7 +552,7 @@ Responses:
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
 | 413 | The body or artifact is over the configured limit. On `POST /hooks/{name}`, the limit is `server.webhook_max_body_bytes` or the trigger's `max_body_bytes`. | `Error` |
-| 429 | A rate limit or capacity limit is reached. `Retry-After` is set. | `Error` |
+| 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 500 | An internal failure. The message never carries internals. | `Error` |
 | 503 | A dependency is not available. | `Error` |
 
