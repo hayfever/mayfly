@@ -96,6 +96,7 @@ func TestNewRegistersEveryMetric(t *testing.T) {
 	m.SessionFinished(model.StatusCompleted)
 	m.QueueJobAttempt(AttemptFailed)
 	m.Panic(ComponentQueue)
+	m.AuthFailure(AuthViaBearer)
 	m.HTTPRequest("/api/v1/sessions", "GET", 200, 5*time.Millisecond)
 	m.LLMRequest("gpt-test", "ok", time.Second)
 	m.ToolCall("plugin__tool", "ok")
@@ -108,6 +109,7 @@ func TestNewRegistersEveryMetric(t *testing.T) {
 		"mayfly_queue_jobs",
 		"mayfly_queue_job_attempts_total",
 		"mayfly_panics_total",
+		"mayfly_auth_failures_total",
 		"mayfly_http_requests_total",
 		"mayfly_http_request_duration_seconds",
 		"mayfly_llm_requests_total",
@@ -121,6 +123,25 @@ func TestNewRegistersEveryMetric(t *testing.T) {
 	}
 	if value := find(t, got["mayfly_build_info"], map[string]string{"version": "1.2.3", "commit": "abc", "date": "today"}); value != 1 {
 		t.Fatalf("build info = %v", value)
+	}
+}
+
+func TestAuthFailureBoundsTheViaLabel(t *testing.T) {
+	m := New(Sources{}, BuildInfo{})
+	m.AuthFailure(AuthViaBearer)
+	m.AuthFailure(AuthViaBearer)
+	m.AuthFailure(AuthViaWeb)
+	m.AuthFailure("free text from a caller")
+
+	failures := gather(t, m)["mayfly_auth_failures_total"]
+	if got := find(t, failures, map[string]string{"via": AuthViaBearer}); got != 2 {
+		t.Fatalf("bearer failures = %v, want 2", got)
+	}
+	if got := find(t, failures, map[string]string{"via": AuthViaWeb}); got != 1 {
+		t.Fatalf("web failures = %v, want 1", got)
+	}
+	if len(failures) != 2 {
+		t.Fatalf("series = %d, want 2 bounded labels", len(failures))
 	}
 }
 

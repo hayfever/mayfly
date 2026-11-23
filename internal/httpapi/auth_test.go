@@ -3,14 +3,17 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/metrics"
 )
 
 // scopeServer returns a server whose token set the test controls.
@@ -52,6 +55,9 @@ func TestRouteScopesEnforced(t *testing.T) {
 		if !config.ValidScope(route.scope) {
 			t.Errorf("%s declares unknown scope %q", route.pattern, route.scope)
 		}
+		// Each route starts with a full failure budget; the loop makes more
+		// than one burst of refused requests.
+		s.authFailures = newAuthFailureLimiter()
 		allowed := config.APITokenConfig{Name: "scoped", Scopes: []string{route.scope}, Secret: "scoped-secret"}
 		s.tokens = []config.APITokenConfig{allowed}
 		stub := func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }
@@ -305,6 +311,7 @@ func TestHandlerScopeEnforcement(t *testing.T) {
 	if rec := serve(t, handler, http.MethodGet, "/api/v1/schedules", ""); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("missing token status = %d", rec.Code)
 	}
+	buf.Reset()
 	rec := serve(t, handler, http.MethodGet, "/api/v1/schedules", "reader-secret")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("read with sessions:read status = %d body=%s", rec.Code, rec.Body.String())
@@ -365,6 +372,310 @@ func TestAuditLineIndependentOfProcessLogLevel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFailedBearerAuthAuditsAndCounts is the #47 acceptance test for a 401 on
+// a scoped route: one audit line and one counter increment, never the secret.
+func TestFailedBearerAuthAuditsAndCounts(t *testing.T) {
+	var buf bytes.Buffer
+	logger := testLogger()
+	const secret = "reader-secret-value"
+	cfg := config.Default()
+	cfg.Server.Tokens = []config.APITokenConfig{{Name: "reader", Scopes: []string{config.ScopeQueueRead}, Secret: secret}}
+	s := New(cfg, nil, nil, logger, WithAuditLogger(NewAuditLogger(&buf)))
+	s.metrics = metrics.New(metrics.Sources{}, metrics.BuildInfo{})
+	handler := s.authorizedRoute(apiRoute{
+		pattern: "GET /api/v1/queue",
+		scope:   config.ScopeQueueRead,
+		handler: func(http.ResponseWriter, *http.Request) { t.Fatal("handler ran without a valid token") },
+	})
+
+	rec := serve(t, handler, http.MethodGet, "/api/v1/queue", "wrong-secret")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	lines := auditLines(t, &buf)
+	if len(lines) != 1 {
+		t.Fatalf("audit lines = %d, want 1: %s", len(lines), buf.String())
+	}
+	line := lines[0]
+	if line["token_name"] != "unknown" || line["via"] != authViaBearer || line["status"] != float64(http.StatusUnauthorized) {
+		t.Fatalf("audit line = %+v", line)
+	}
+	if strings.Contains(buf.String(), "wrong-secret") {
+		t.Fatalf("audit line contains the presented secret: %s", buf.String())
+	}
+	if got := counterValue(t, s.metrics, `mayfly_auth_failures_total{via="bearer"}`); got != 1 {
+		t.Fatalf("mayfly_auth_failures_total{bearer} = %v, want 1", got)
+	}
+}
+
+func TestMissingAndExpiredBearerAuthAudited(t *testing.T) {
+	past := time.Now().Add(-time.Minute)
+	cases := []struct {
+		name      string
+		presented string
+		expires   *time.Time
+	}{
+		{name: "missing"},
+		{name: "wrong", presented: "wrong-secret"},
+		{name: "expired", presented: "reader-secret-value", expires: &past},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			cfg := config.Default()
+			cfg.Server.Tokens = []config.APITokenConfig{{
+				Name:      "reader",
+				Scopes:    []string{config.ScopeQueueRead},
+				Secret:    "reader-secret-value",
+				ExpiresAt: tc.expires,
+			}}
+			s := New(cfg, nil, nil, testLogger(), WithAuditLogger(NewAuditLogger(&buf)))
+			s.metrics = metrics.New(metrics.Sources{}, metrics.BuildInfo{})
+			rec := serve(t, authTestHandler(s), http.MethodGet, "/api/v1/queue", tc.presented)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", rec.Code)
+			}
+			lines := auditLines(t, &buf)
+			if len(lines) != 1 {
+				t.Fatalf("audit lines = %d, want 1: %s", len(lines), buf.String())
+			}
+			if lines[0]["token_name"] != "unknown" || lines[0]["via"] != authViaBearer {
+				t.Fatalf("audit line = %+v", lines[0])
+			}
+			if tc.presented != "" && strings.Contains(buf.String(), tc.presented) {
+				t.Fatalf("audit line contains the presented secret: %s", buf.String())
+			}
+			if got := counterValue(t, s.metrics, `mayfly_auth_failures_total{via="bearer"}`); got != 1 {
+				t.Fatalf("failures = %v, want 1", got)
+			}
+		})
+	}
+}
+
+func TestInvalidWebSessionOnScopedRouteAudited(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := config.Default()
+	cfg.Server.Tokens = []config.APITokenConfig{{Name: "reader", Scopes: []string{config.ScopeQueueRead}, Secret: "reader-secret-value"}}
+	s := New(cfg, nil, nil, testLogger(), WithAuditLogger(NewAuditLogger(&buf)))
+	s.metrics = metrics.New(metrics.Sources{}, metrics.BuildInfo{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/queue", nil)
+	req.AddCookie(&http.Cookie{Name: webSessionCookie, Value: "not-a-session"})
+	rec := httptest.NewRecorder()
+	authTestHandler(s).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	lines := auditLines(t, &buf)
+	if len(lines) != 1 {
+		t.Fatalf("audit lines = %d, want 1: %s", len(lines), buf.String())
+	}
+	if lines[0]["token_name"] != "unknown" || lines[0]["via"] != authViaWeb {
+		t.Fatalf("audit line = %+v", lines[0])
+	}
+	if got := counterValue(t, s.metrics, `mayfly_auth_failures_total{via="web"}`); got != 1 {
+		t.Fatalf("failures = %v, want 1", got)
+	}
+}
+
+func TestFailedAuthLimiterBlocksAfterBurst(t *testing.T) {
+	s := scopeServer(t, config.APITokenConfig{Name: "reader", Scopes: []string{config.ScopeQueueRead}, Secret: "reader-secret-value"})
+	handler := authTestHandler(s)
+	for i := range 20 {
+		rec := requestFrom(handler, "192.0.2.10:4000", "wrong-secret")
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d = %d, want 401", i+1, rec.Code)
+		}
+	}
+	rec := requestFrom(handler, "192.0.2.10:4000", "wrong-secret")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("failure 21 = %d, want 429", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("429 has no Retry-After header")
+	}
+	if body := decodeEnvelope(t, rec); body.Code != codeRateLimited {
+		t.Fatalf("429 code = %q", body.Code)
+	}
+}
+
+func TestSuccessfulAuthNeverLimited(t *testing.T) {
+	s := scopeServer(t, config.APITokenConfig{Name: "reader", Scopes: []string{config.ScopeQueueRead}, Secret: "reader-secret-value"})
+	handler := authTestHandler(s)
+	for range 25 {
+		requestFrom(handler, "192.0.2.11:4000", "wrong-secret")
+	}
+	if rec := requestFrom(handler, "192.0.2.11:4000", "reader-secret-value"); rec.Code != http.StatusNoContent {
+		t.Fatalf("valid token after failures = %d, want 204", rec.Code)
+	}
+}
+
+func TestFailedAuthLimiterSeparatesIPs(t *testing.T) {
+	s := scopeServer(t, config.APITokenConfig{Name: "reader", Scopes: []string{config.ScopeQueueRead}, Secret: "reader-secret-value"})
+	handler := authTestHandler(s)
+	for range 21 {
+		requestFrom(handler, "192.0.2.12:4000", "wrong-secret")
+	}
+	if rec := requestFrom(handler, "192.0.2.12:4000", "wrong-secret"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("exhausted IP = %d, want 429", rec.Code)
+	}
+	if rec := requestFrom(handler, "192.0.2.13:4000", "wrong-secret"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("other IP = %d, want 401", rec.Code)
+	}
+	if rec := requestFrom(handler, "192.0.2.13:4000", "reader-secret-value"); rec.Code != http.StatusNoContent {
+		t.Fatalf("other IP valid token = %d, want 204", rec.Code)
+	}
+}
+
+func TestForwardedForIgnoredByDefault(t *testing.T) {
+	s := scopeServer(t, config.APITokenConfig{Name: "reader", Scopes: []string{config.ScopeQueueRead}, Secret: "reader-secret-value"})
+	handler := authTestHandler(s)
+	// Each request carries a different forwarded address. With trust off the
+	// limiter keys on RemoteAddr, so the 21st request is over budget.
+	for i := range 20 {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/queue", nil)
+		req.RemoteAddr = "192.0.2.14:4000"
+		req.Header.Set("Authorization", "Bearer wrong-secret")
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("203.0.113.%d", i+1))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d = %d, want 401", i+1, rec.Code)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/queue", nil)
+	req.RemoteAddr = "192.0.2.14:4000"
+	req.Header.Set("Authorization", "Bearer wrong-secret")
+	req.Header.Set("X-Forwarded-For", "203.0.113.200")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("X-Forwarded-For changed the limiter key while trust is off: %d", rec.Code)
+	}
+}
+
+func TestForwardedForHonoredWhenTrusted(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.TrustForwardedFor = true
+	cfg.Server.Tokens = []config.APITokenConfig{{Name: "reader", Scopes: []string{config.ScopeQueueRead}, Secret: "reader-secret-value"}}
+	s := New(cfg, nil, nil, testLogger())
+	handler := authTestHandler(s)
+
+	request := func(remote, forwarded, token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/queue", nil)
+		req.RemoteAddr = remote
+		req.Header.Set("X-Forwarded-For", forwarded)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for range 20 {
+		if rec := request("192.0.2.20:4000", "203.0.113.5", "wrong-secret"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("failure = %d, want 401", rec.Code)
+		}
+	}
+	if rec := request("192.0.2.20:4000", "203.0.113.5", "wrong-secret"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("same forwarded key = %d, want 429", rec.Code)
+	}
+	if rec := request("192.0.2.20:4000", "203.0.113.6", "wrong-secret"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("different forwarded key = %d, want 401", rec.Code)
+	}
+	if rec := request("192.0.2.21:4000", "203.0.113.5", "wrong-secret"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("same forwarded key from another peer = %d, want 429", rec.Code)
+	}
+}
+
+func TestAuthFailureLimiterMapBounded(t *testing.T) {
+	now := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	limiter := newAuthFailureLimiter()
+	limiter.now = func() time.Time { return now }
+	limiter.max = 4
+	for i := range 100 {
+		limiter.fail(fmt.Sprintf("192.0.2.%d", i))
+	}
+	if got := len(limiter.buckets); got > limiter.max {
+		t.Fatalf("buckets = %d, want <= %d", got, limiter.max)
+	}
+	now = now.Add(limiter.idle + time.Second)
+	limiter.fail("198.51.100.1")
+	if got := len(limiter.buckets); got != 1 {
+		t.Fatalf("idle buckets were not evicted: %d left", got)
+	}
+}
+
+func TestFailedWebSignInLimitedAndCounted(t *testing.T) {
+	s, handler := webTestServer(t, "http://localhost:8080")
+	s.metrics = metrics.New(metrics.Sources{}, metrics.BuildInfo{})
+	post := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, webSessionRoute, strings.NewReader(`{"token":"wrong-secret"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	for range 20 {
+		if rec := post(); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("failure = %d, want 401", rec.Code)
+		}
+	}
+	rec := post()
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("failure 21 = %d, want 429", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("429 has no Retry-After header")
+	}
+	if got := counterValue(t, s.metrics, `mayfly_auth_failures_total{via="web"}`); got != 21 {
+		t.Fatalf("mayfly_auth_failures_total{web} = %v, want 21", got)
+	}
+}
+
+func authTestHandler(s *Server) http.Handler {
+	return s.authorizedRoute(apiRoute{
+		pattern: "GET /api/v1/queue",
+		scope:   config.ScopeQueueRead,
+		handler: func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) },
+	})
+}
+
+func requestFrom(handler http.Handler, remote, token string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/queue", nil)
+	req.RemoteAddr = remote
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// counterValue reads one series from the registry in Prometheus text form.
+func counterValue(t *testing.T, m *metrics.Metrics, series string) float64 {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	m.Handler().ServeHTTP(rec, req)
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if !strings.HasPrefix(line, series+" ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			t.Fatalf("metric line = %q", line)
+		}
+		value, err := strconv.ParseFloat(fields[1], 64)
+		if err != nil {
+			t.Fatalf("metric value %q: %v", fields[1], err)
+		}
+		return value
+	}
+	t.Fatalf("series %s not found in registry", series)
+	return 0
 }
 
 // auditLines decodes the JSON log lines captured during one test.

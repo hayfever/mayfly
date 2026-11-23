@@ -22,6 +22,20 @@ const (
 // admin scope, so an existing deployment keeps one working credential.
 const DefaultTokenName = "default"
 
+// MinTokenSecretLength is the shortest accepted API token secret. A shorter
+// secret is rejected at load: constant-time comparison does not help a value
+// that can be guessed.
+const MinTokenSecretLength = 32
+
+// validateTokenSecret checks one resolved secret. The error names the config
+// location, never the value.
+func validateTokenSecret(where, secret string) error {
+	if secret != "" && len(secret) < MinTokenSecretLength {
+		return fmt.Errorf("%s: token secret must be at least %d characters", where, MinTokenSecretLength)
+	}
+	return nil
+}
+
 // apiScopes lists every scope in documentation order.
 var apiScopes = []string{
 	ScopeAdmin,

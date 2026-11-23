@@ -19,12 +19,13 @@ Set `version: 1` in every file. A file without the key is read as version 1, and
 | `addr` | `:8080` | HTTP listen address |
 | `public_url` | `http://localhost:8080` | URL used in session links and WebSocket URLs |
 | `internal_url` | `public_url` | URL that session pods use to reach the control plane; use a cluster Service URL in Kubernetes |
-| `token_env` | `MAYFLY_API_TOKEN` | Environment variable holding the single admin token. Used only when `tokens` is empty. If no token resolves, `mayflyd` exits with code 2 |
+| `token_env` | `MAYFLY_API_TOKEN` | Environment variable holding the single admin token. Used only when `tokens` is empty. If no token resolves, `mayflyd` exits with code 2. The secret must be at least 32 characters |
 | `tokens` | `[]` | Named API tokens with explicit scopes. A non-empty list replaces `token_env`. See [security.md](security.md#api-authentication) |
 | `tokens[].name` | — | Token name. Unique. The name appears in the audit log, never the secret |
 | `tokens[].scopes` | — | At least one of `admin`, `sessions:read`, `sessions:write`, `queue:read`, `queue:write`, `schedules:read`, `schedules:write`. `admin` grants every scope |
-| `tokens[].secret_env` | — | Environment variable that holds the token secret. Required and unique per token. A missing variable stops startup |
+| `tokens[].secret_env` | — | Environment variable that holds the token secret. Required and unique per token. A missing variable stops startup. The secret must be at least 32 characters |
 | `tokens[].expires_at` | — | Optional RFC 3339 time. A token at or past this time is refused with `401` |
+| `trust_forwarded_for` | `false` | Key the failed-authentication limiter on the first `X-Forwarded-For` hop. Set it only behind a proxy that overwrites the header. See [security.md](security.md#api-authentication) |
 | `attach_ticket_ttl` | `60s` | Lifetime of one-time WebSocket attach tickets |
 | `max_body_bytes` | `4194304` | Maximum JSON body for session creation |
 | `webhook_max_body_bytes` | `1048576` | Maximum webhook body when the trigger sets no `max_body_bytes`. Must be positive and at most `16777216` |

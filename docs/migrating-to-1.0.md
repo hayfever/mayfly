@@ -74,13 +74,27 @@ Automation that calls the API with a bearer token needs no change.
 
 ## Audit log line
 
-A mutating, authenticated `/api/v1` request writes one audit line. The line now
+A mutating, authenticated `/api/v1` request writes one audit line. The line
 carries a `via` field: `bearer` for an `Authorization` header, or `web` for a
-session cookie.
+session cookie. A failed authentication on a scoped route now writes one line
+with `token_name` set to `unknown` and status `401`; a failure over the per-IP
+budget has status `429`.
+
+Audit lines are written through a dedicated logger and no longer depend on
+`MAYFLY_LOG_LEVEL`. With `MAYFLY_LOG_LEVEL=warn` or `error`, the request log
+gets quieter but the audit trail does not.
 
 A log consumer that matches an exact key set must accept `via`. A consumer that
-reads named fields needs no change. The field set is documented in
-[Audit log](security.md#audit-log).
+reads named fields needs no change. The message `audit` and the field set are
+documented in [Audit log](security.md#audit-log) and stay stable through 1.x.
+
+## Token length
+
+A resolved API token secret must be at least 32 characters. Shorten nothing:
+replace a short value with at least 32 random characters before you upgrade.
+A shorter value stops startup with an error that names the config key and
+environment variable. Run `mayflyd --config <path>` once to check before you
+deploy.
 
 ## Skill cache
 

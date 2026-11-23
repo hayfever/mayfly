@@ -84,9 +84,13 @@ type ServerConfig struct {
 	TokenEnv string `yaml:"token_env"`
 	// Tokens declares named bearer tokens with explicit scopes. A non-empty
 	// list replaces TokenEnv.
-	Tokens          []APITokenConfig `yaml:"tokens"`
-	AttachTicketTTL Duration         `yaml:"attach_ticket_ttl"`
-	MaxBodyBytes    int64            `yaml:"max_body_bytes"`
+	Tokens []APITokenConfig `yaml:"tokens"`
+	// TrustForwardedFor makes the auth-failure limiter key on the first
+	// X-Forwarded-For hop. Set it only when a trusted proxy overwrites that
+	// header; otherwise a client chooses its own limiter key.
+	TrustForwardedFor bool     `yaml:"trust_forwarded_for"`
+	AttachTicketTTL   Duration `yaml:"attach_ticket_ttl"`
+	MaxBodyBytes      int64    `yaml:"max_body_bytes"`
 	// WebhookMaxBodyBytes bounds a webhook body when its trigger sets no
 	// max_body_bytes. Webhook bodies are smaller than admin JSON bodies.
 	WebhookMaxBodyBytes int64 `yaml:"webhook_max_body_bytes"`
@@ -773,12 +777,18 @@ func (c *Config) resolveSecrets() error {
 	}
 	if len(c.Server.Tokens) == 0 {
 		c.AdminToken = os.Getenv(c.Server.TokenEnv)
+		if err := validateTokenSecret("server.token_env ("+c.Server.TokenEnv+")", c.AdminToken); err != nil {
+			return err
+		}
 	} else {
 		for i := range c.Server.Tokens {
 			token := &c.Server.Tokens[i]
 			token.Secret = os.Getenv(token.SecretEnv)
 			if token.Secret == "" {
 				return fmt.Errorf("server.tokens[%d] (%s): environment variable %s is not set", i, token.Name, token.SecretEnv)
+			}
+			if err := validateTokenSecret(fmt.Sprintf("server.tokens[%d] (%s) secret_env %s", i, token.Name, token.SecretEnv), token.Secret); err != nil {
+				return err
 			}
 		}
 	}

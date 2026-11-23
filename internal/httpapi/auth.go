@@ -5,8 +5,11 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hayfever/mayfly/internal/config"
 )
@@ -150,7 +153,7 @@ func (s *Server) authorizedRoute(route apiRoute) http.HandlerFunc {
 		}
 		info, ok := s.authenticateRequest(r)
 		if !ok {
-			writeError(w, http.StatusUnauthorized, codeUnauthenticated, "missing or invalid bearer token")
+			s.refuseAuth(w, r, "unknown", authFailureVia(r), path, auditTarget(r))
 			return
 		}
 		token := info.token
@@ -191,6 +194,51 @@ func (s *Server) authorizedRoute(route apiRoute) http.HandlerFunc {
 		route.handler(recorder, r)
 		done = true
 	}
+}
+
+// authFailureVia names the credential a failed request presented. A bearer
+// header decides on its own, as it does for authentication; a web session
+// cookie is the only other credential a scoped route accepts.
+func authFailureVia(r *http.Request) string {
+	if bearerToken(r) != "" {
+		return authViaBearer
+	}
+	if _, err := r.Cookie(webSessionCookie); err == nil {
+		return authViaWeb
+	}
+	return authViaBearer
+}
+
+// refuseAuth records one failed authentication and writes its response. It
+// audits the failure, counts it, and applies the per-client failure limiter.
+// Only failures reach this path, so a valid credential is never limited.
+func (s *Server) refuseAuth(w http.ResponseWriter, r *http.Request, tokenName, via, route, target string) {
+	s.metrics.AuthFailure(via)
+	allowed, retry := s.authFailures.fail(s.authLimiterKey(r))
+	status := http.StatusUnauthorized
+	if !allowed {
+		status = http.StatusTooManyRequests
+	}
+	s.writeAudit(r, tokenName, via, route, target, status)
+	if !allowed {
+		w.Header().Set("Retry-After", retryAfterSeconds(retry))
+		writeError(w, status, codeRateLimited, "too many failed authentication attempts")
+		return
+	}
+	message := "missing or invalid bearer token"
+	if via == authViaWeb {
+		message = "missing or invalid web session"
+	}
+	writeError(w, status, codeUnauthenticated, message)
+}
+
+// retryAfterSeconds renders a wait as whole seconds, rounded up.
+func retryAfterSeconds(wait time.Duration) string {
+	seconds := int(math.Ceil(wait.Seconds()))
+	if seconds < 1 {
+		seconds = 1
+	}
+	return strconv.Itoa(seconds)
 }
 
 // isMutating reports whether a method changes state and needs an audit line.

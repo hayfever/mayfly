@@ -34,6 +34,7 @@ func TestUnauthenticatedRouteAudit(t *testing.T) {
 	}
 
 	for _, route := range server.apiRoutes() {
+		server.authFailures = newAuthFailureLimiter()
 		method, pattern, ok := strings.Cut(route.pattern, " ")
 		if !ok {
 			t.Fatalf("route %q has no method", route.pattern)

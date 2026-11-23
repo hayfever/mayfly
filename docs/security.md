@@ -287,6 +287,10 @@ The `/api/v1/auth/session` routes take no token scope. `POST` exchanges a token 
 
 The control plane compares every configured token with the presented bearer value in constant time. It never logs a token secret. The token name appears in the audit log.
 
+A resolved token secret must be at least 32 characters. A shorter value stops startup with an error that names the config key and environment variable, never the value.
+
+Failed authentication is limited per client. One client key may fail 10 times per minute with a burst of 20. A failure over that budget gets `429` with code `rate_limited` and a `Retry-After` header. The limiter keys on the `RemoteAddr` host by default. Set `server.trust_forwarded_for: true` only when a trusted proxy overwrites `X-Forwarded-For`; otherwise a client can pick its own limiter key. Successful authentication never consults the limiter, even when the client is over budget. The limiter state is in memory, holds at most 4096 keys, forgets a key after 10 idle minutes, and does not survive a restart.
+
 A request without a token, or with an unknown or expired token, gets `401` with code `unauthenticated`. A valid token without the scope of the route gets `403` with code `forbidden`. The attach WebSocket uses a one-time ticket instead of a bearer token.
 
 ## Web UI session

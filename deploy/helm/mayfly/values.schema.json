@@ -202,6 +202,10 @@
             "public_url": { "type": "string" },
             "internal_url": { "type": "string" },
             "token_env": { "type": "string" },
+            "trust_forwarded_for": {
+              "type": "boolean",
+              "description": "Key the failed-authentication limiter on the first X-Forwarded-For hop. Set it only behind a trusted proxy that overwrites the header."
+            },
             "tokens": {
               "type": "array",
               "description": "Named API tokens with explicit scopes. A non-empty list replaces token_env.",

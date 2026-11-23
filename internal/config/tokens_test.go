@@ -45,8 +45,10 @@ func TestNoTokenResolvesToEmptySet(t *testing.T) {
 }
 
 func TestLoadNamedTokens(t *testing.T) {
-	t.Setenv("MAYFLY_CI_TOKEN", "ci-secret")
-	t.Setenv("MAYFLY_READ_TOKEN", "read-secret")
+	ciSecret := strings.Repeat("c", MinTokenSecretLength)
+	readSecret := strings.Repeat("r", MinTokenSecretLength)
+	t.Setenv("MAYFLY_CI_TOKEN", ciSecret)
+	t.Setenv("MAYFLY_READ_TOKEN", readSecret)
 	cfg, err := loadTokenConfig(t, `
 runtime:
   image: example/agent:1
@@ -70,7 +72,7 @@ server:
 	if len(tokens) != 2 {
 		t.Fatalf("tokens = %d, want 2", len(tokens))
 	}
-	if tokens[0].Name != "ci" || tokens[0].Secret != "ci-secret" {
+	if tokens[0].Name != "ci" || tokens[0].Secret != ciSecret {
 		t.Fatalf("first token = %+v", tokens[0])
 	}
 	if tokens[0].ExpiresAt == nil || !tokens[0].ExpiresAt.Equal(time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)) {
@@ -85,8 +87,8 @@ server:
 }
 
 func TestNamedTokensReplaceTokenEnv(t *testing.T) {
-	t.Setenv("MAYFLY_API_TOKEN", "legacy-secret")
-	t.Setenv("MAYFLY_CI_TOKEN", "ci-secret")
+	t.Setenv("MAYFLY_API_TOKEN", strings.Repeat("l", MinTokenSecretLength))
+	t.Setenv("MAYFLY_CI_TOKEN", strings.Repeat("c", MinTokenSecretLength))
 	cfg, err := loadTokenConfig(t, `
 runtime:
   image: example/agent:1
@@ -112,8 +114,8 @@ server:
 }
 
 func TestLoadRejectsBadTokenConfig(t *testing.T) {
-	t.Setenv("MAYFLY_CI_TOKEN", "ci-secret")
-	t.Setenv("MAYFLY_OTHER_TOKEN", "other-secret")
+	t.Setenv("MAYFLY_CI_TOKEN", strings.Repeat("c", MinTokenSecretLength))
+	t.Setenv("MAYFLY_OTHER_TOKEN", strings.Repeat("o", MinTokenSecretLength))
 	cases := []struct {
 		name string
 		raw  string
@@ -122,6 +124,11 @@ func TestLoadRejectsBadTokenConfig(t *testing.T) {
 		{
 			name: "duplicate name",
 			raw: `
+runtime:
+  image: example/agent:1
+llm:
+  base_url: http://localhost:4000/v1
+  model: gpt-4.1-mini
 server:
   tokens:
     - {name: ci, scopes: [queue:read], secret_env: MAYFLY_CI_TOKEN}
@@ -159,6 +166,11 @@ server:
 		{
 			name: "shared secret env",
 			raw: `
+runtime:
+  image: example/agent:1
+llm:
+  base_url: http://localhost:4000/v1
+  model: gpt-4.1-mini
 server:
   tokens:
     - {name: ci, scopes: [queue:read], secret_env: MAYFLY_CI_TOKEN}
@@ -182,6 +194,75 @@ server:
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestLoadRejectsShortTokenSecret(t *testing.T) {
+	const short = "short-token-value"
+	t.Setenv("MAYFLY_CI_TOKEN", short)
+	_, err := loadTokenConfig(t, `
+runtime:
+  image: example/agent:1
+llm:
+  base_url: http://localhost:4000/v1
+  model: gpt-4.1-mini
+server:
+  tokens:
+    - {name: ci, scopes: [queue:read], secret_env: MAYFLY_CI_TOKEN}
+`)
+	if err == nil {
+		t.Fatal("Load accepted a short token secret")
+	}
+	if !strings.Contains(err.Error(), "at least 32") {
+		t.Fatalf("error = %v, want a minimum-length message", err)
+	}
+	if strings.Contains(err.Error(), short) {
+		t.Fatalf("error contains the token secret: %v", err)
+	}
+}
+
+func TestLoadRejectsShortAdminTokenSecret(t *testing.T) {
+	const short = "short-admin-value"
+	t.Setenv("MAYFLY_API_TOKEN", short)
+	_, err := loadTokenConfig(t, `
+runtime:
+  image: example/agent:1
+llm:
+  base_url: http://localhost:4000/v1
+  model: gpt-4.1-mini
+server:
+  token_env: MAYFLY_API_TOKEN
+`)
+	if err == nil {
+		t.Fatal("Load accepted a short admin token secret")
+	}
+	if !strings.Contains(err.Error(), "at least 32") {
+		t.Fatalf("error = %v, want a minimum-length message", err)
+	}
+	if strings.Contains(err.Error(), short) {
+		t.Fatalf("error contains the token secret: %v", err)
+	}
+}
+
+func TestLoadAcceptsMinimumLengthTokenSecret(t *testing.T) {
+	secret := strings.Repeat("s", 32)
+	t.Setenv("MAYFLY_CI_TOKEN", secret)
+	cfg, err := loadTokenConfig(t, `
+runtime:
+  image: example/agent:1
+llm:
+  base_url: http://localhost:4000/v1
+  model: gpt-4.1-mini
+server:
+  tokens:
+    - {name: ci, scopes: [queue:read], secret_env: MAYFLY_CI_TOKEN}
+`)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	tokens := cfg.APITokens()
+	if len(tokens) != 1 || tokens[0].Secret != secret {
+		t.Fatalf("tokens = %+v", tokens)
 	}
 }
 
