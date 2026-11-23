@@ -382,7 +382,7 @@ Each HTTP request writes one structured log line with its request id. The contro
 
 ## Non-goals for this version
 
-- Multi-tenant SaaS with per-user isolation.
+- Multi-tenant SaaS with per-user isolation. Through 1.x, run one install per client. [specs/multi-tenancy.md](specs/multi-tenancy.md) describes that interim model and a later design.
 - Long-running agent workspaces that outlive a session. `sessions.persistent_workspace` keeps a workspace across container restarts within one session only.
 - Replacing commercial SRE agents.
 - Workflow DAGs. A schedule runs one source chain and starts at most one session; there is no multi-step orchestration.
