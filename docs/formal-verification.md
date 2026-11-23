@@ -314,9 +314,12 @@ The negative cfgs each remove one guarantee:
 | `AuthHardening_short_token_buggy.cfg` | `RejectShortTokens = FALSE` | `ShortTokenRejected` |
 | `AuthHardening_limit_success_buggy.cfg` | `LimitSuccessBeforeAuth = TRUE` | `SuccessfulAuthNeverLimited` |
 
-Each cfg must print the named invariant, not merely fail to parse. The last cfg
-models the bug of checking the failure bucket before authentication: a client
-over budget is refused even with a valid credential.
+Each cfg must print the named invariant, not merely fail to parse. The runs
+stop quickly: level-drops-audit 29 generated states (25 distinct),
+no-fail-audit 6 (6), no-limiter 134 (60), short-token 18 (18), and
+limit-success 138 (57). The last cfg models the bug of checking the failure
+bucket before authentication: a client over budget is refused even with a
+valid credential.
 
 The model abstracts these details:
 
