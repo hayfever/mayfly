@@ -209,9 +209,11 @@ The model abstracts these details:
   `Manager.PostMessage` caps the real text at 32 KiB, and the hub never
   truncates a human message. The positive cfg keeps `HumanSizes` within
   `MaxEvent` so `EventCapEnforced` stays meaningful for the thread copy.
-  `Consume` removes the oldest message when the runtime reads it, while the
-  real hub keeps the copy until a later post drops it or eviction removes the
-  thread copy.
+  `Consume` removes the oldest inbox entry when the runtime reads it. The
+  real hub has no consume path: it keeps the inbox copy until a later human
+  post exceeds the inbox byte or count cap and drops the oldest inbox entry.
+  Evicting an event from the thread never removes an unconsumed inbox
+  message.
 - `MaxInbox` is a constant separate from `MaxEvents`, so a cfg can shrink one
   cap. The Go hub uses `sessions.event_buffer` for both.
 - `InboxBudget` is separate from `Budget`, because the two Go budgets are
