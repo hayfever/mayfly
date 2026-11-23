@@ -19,6 +19,10 @@ data:
       max_ttl: 2h
       idle_timeout: 15m
       close_grace: 90s
+      event_buffer: 5000
+      event_buffer_bytes: 8388608
+      max_event_bytes: 65536
+      inbox_buffer_bytes: 8388608
       max_concurrent: 50
       max_restarts: 2
       persistent_workspace: true
