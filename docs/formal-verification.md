@@ -7,7 +7,7 @@ configuration space. Each has a script or command and a CI job.
 
 | Check | Script | CI job |
 |---|---|---|
-| TLC on `SessionResume.tla`, `HubRetention.tla`, and `QueuePoison.tla` | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
+| TLC on `SessionResume.tla`, `HubRetention.tla`, `QueuePoison.tla`, and `AuthHardening.tla` | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
 | TLC with two sessions | `hack/tlc.sh --deep` | `tlc-deep` in verify.yml, nightly and on demand |
 | Every fuzz target | `hack/fuzz.sh` | `fuzz-nightly` in verify.yml |
 | Chart RBAC property check | `MAYFLY_REQUIRE_HELM=1 go test ./test/chart/...` | `chart` step of the `test` job in [ci.yml](../.github/workflows/ci.yml) |
@@ -274,6 +274,66 @@ The model abstracts these details:
   test environment provides.
 - `Retry` and `Delete` on the dead-letter admin API are outside the model.
 
+## Auth hardening model
+
+`spec/tla/AuthHardening.tla` models the public authentication boundary in
+`internal/httpapi` for #46 and #47. It covers a refused credential, a valid
+credential, an authenticated mutating request, and a token loaded with a short
+secret. The model is small: two client addresses, a burst of two failures, and
+a map cap of one.
+
+| TLA+ action | Go code it models |
+|---|---|
+| `FailedAuth` | `authorizedRoute` when `authenticateRequest` fails, `refuseAuth`, `authFailureLimiter.fail`, and the failed branch of `createWebSession` (`internal/httpapi/auth.go`, `websession.go`, `authlimiter.go`). The action writes an audit line when `AuditFailedAuth` is on and counts `mayfly_auth_failures_total{via}` |
+| `Success` | a request whose bearer token or session cookie resolves. `authorizedRoute` authenticates before it consults the limiter, so a valid credential always proceeds |
+| `Mutating` | a `POST`, `PUT`, `PATCH`, or `DELETE` after authentication, and the `s.writeAudit` call in `authorizedRoute`. The audit logger is independent of `MAYFLY_LOG_LEVEL` |
+| `LoadShortToken` | `Config.resolveSecrets` and `validateTokenSecret` in `internal/config`. The action is disabled when `RejectShortTokens` is on |
+| `Stutter` | no Go function; no further request at the modeled bound |
+
+| Property | Meaning | Tests that sample it |
+|---|---|---|
+| `TypeOK` | Every variable stays in its declared domain | none; model well-formedness |
+| `AuditAlwaysEmitted` | A mutating request is audited even when the process level is `warn` or `error` | `TestAuditLineIndependentOfProcessLogLevel`, existing audit tests |
+| `FailedAuthAudited` | A refused authentication writes an audit line with `token_name` `unknown` | `TestFailedBearerAuthAuditsAndCounts`, `TestWebLoginAudit`, `TestFailedWebSignInLimitedAndCounted` |
+| `SuccessfulAuthNeverLimited` | A valid credential is never refused by the failure limiter | `TestSuccessfulAuthNeverLimited` |
+| `LimiterBounded` | The per-client map never exceeds its key cap | `TestAuthFailureLimiterMapBounded` |
+| `ShortTokenRejected` | A resolved secret shorter than 32 characters is refused at load | `TestLoadRejectsShortTokenSecret`, `TestLoadRejectsShortAdminTokenSecret`, `TestLoadAcceptsMinimumLengthTokenSecret`, `FuzzTokenSecretValidation` |
+| `FailedAuthBounded` | Without a success, one address cannot spend more than one burst of failed attempts | `TestFailedAuthLimiterBlocksAfterBurst`, `TestFailedAuthLimiterSeparatesIPs` |
+
+`AuthHardening.cfg` sets `IPs = {"a", "b"}`, `Burst = 2`, `MaxOps = 4`, and
+`MaxKeys = 1`, and checks every invariant. It holds 732 generated states, 204
+distinct, and finishes in under one second.
+
+The negative cfgs each remove one guarantee:
+
+| Cfg | Constant | Expected violation |
+|---|---|---|
+| `AuthHardening_level_drops_audit_buggy.cfg` | `AuditIndependentOfLevel = FALSE` | `AuditAlwaysEmitted` |
+| `AuthHardening_no_fail_audit_buggy.cfg` | `AuditFailedAuth = FALSE` | `FailedAuthAudited` |
+| `AuthHardening_no_limiter_buggy.cfg` | `LimitFailedAuth = FALSE` | `FailedAuthBounded` |
+| `AuthHardening_short_token_buggy.cfg` | `RejectShortTokens = FALSE` | `ShortTokenRejected` |
+| `AuthHardening_limit_success_buggy.cfg` | `LimitSuccessBeforeAuth = TRUE` | `SuccessfulAuthNeverLimited` |
+
+Each cfg must print the named invariant, not merely fail to parse. The last cfg
+models the bug of checking the failure bucket before authentication: a client
+over budget is refused even with a valid credential.
+
+The model abstracts these details:
+
+- Time is an action, not a duration. `Burst` is the whole modeled failure
+  window; refill over a minute, the 10-minute idle TTL, and wall-clock expiry
+  are not modeled. `Track` keeps the map cap but ignores recency order.
+- Two addresses and a cap of one key exercise eviction. Real limits are 4096
+  keys and one bucket per source.
+- No HTTP stack, headers, cookies, or token bytes. Credential validity is a
+  nondeterministic action. `via` and the response text are outside the model.
+- An audit record is one boolean per request, not a JSON line. Metrics are
+  folded into the failure action; the model does not check Prometheus output.
+- A success does not reset the failure budget. The real limiter does not reset
+  on success either, so this is faithful; the model simply cannot show refill.
+- The 429 response is modeled as a refused attempt. The `Retry-After` value is
+  outside the model.
+
 ## Fuzz targets for the bounds
 
 - `FuzzHubAppendBudget` (`internal/hub`) drives appends, restores, and replays,
@@ -305,6 +365,19 @@ The model abstracts these details:
 - `FuzzRunArtifactDecode` (`internal/workflow`) feeds arbitrary bytes to the
   source-run resume path. A torn, wrong-run, unknown-field, or newer-version
   artifact must return an error, never a panic. A 60-second run made 44,824
+  executions.
+- `FuzzTokenSecretValidation` (`internal/config`) feeds arbitrary name, scope,
+  and secret bytes to the token rules. It asserts that a secret shorter than
+  `MinTokenSecretLength` is rejected with the fixed error text, that a longer
+  secret is accepted, and that the error never varies with the secret. Seeds
+  sit at zero, 31, and 32 characters, and on a long value. A 60-second run made
+  5,038,767 executions.
+- `FuzzAuthLimiterKey` (`internal/httpapi`) feeds arbitrary `RemoteAddr` and
+  `X-Forwarded-For` bytes with both trust settings. It asserts that the limiter
+  key is stable and bounded, that trust off keys on the peer address, and that
+  trust on takes the first forwarded hop. A seed from the corpus carries an
+  overlong IPv6 host; the fuzz run found the missing length cap before commit,
+  and the seed stays as the regression. A 60-second run made 526,765
   executions.
 
 ## What is abstracted away
