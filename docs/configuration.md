@@ -29,6 +29,7 @@ Set `version: 1` in every file. A file without the key is read as version 1, and
 | `attach_ticket_ttl` | `60s` | Lifetime of one-time WebSocket attach tickets |
 | `max_body_bytes` | `4194304` | Maximum JSON body for session creation |
 | `webhook_max_body_bytes` | `1048576` | Maximum webhook body when the trigger sets no `max_body_bytes`. Must be positive and at most `16777216` |
+| `body_read_timeout` | `30s` | How long a handler waits for the request body after the headers arrive. A client that stalls the body gets `408 request_timeout` and the connection closes. Applies to `/api/v1` JSON bodies, `/hooks/{name}`, and the internal JSON endpoints. It does not bound WebSocket attach, event streams, the inbox stream, or the LLM proxy |
 | `shutdown_budget` | `25s` | Whole stop sequence after SIGTERM: HTTP drain, queue worker drain, then session manager shutdown. The stages get 20, 40, and 40 percent of the budget in that order, each on its own deadline. Keep the budget below the pod's `terminationGracePeriodSeconds`; the chart sets both. Minimum `3s` |
 | `metrics.enabled` | `true` | Serve the Prometheus endpoint. See [observability.md](observability.md) for every metric |
 | `metrics.address` | empty | Serve `/metrics` on a listener of its own, such as `:9090`. Empty serves it on `addr`. Must differ from `addr` |
@@ -45,6 +46,7 @@ Set `version: 1` in every file. A file without the key is read as version 1, and
 | `close_grace` | `90s` | Time to wait for finalize after close before force stop and fallback |
 | `event_buffer` | `5000` | Retained thread events per session in memory |
 | `event_buffer_bytes` | `8388608` | Retained thread byte budget per session, in addition to `event_buffer`. The oldest events are evicted first. A human message the runtime has not read stays in the inbox even when its thread copy is evicted |
+| `inbox_buffer_bytes` | `event_buffer_bytes` | Retained inbox byte budget per session, in addition to `event_buffer`. The oldest human messages are dropped first. A runtime event never removes an unconsumed inbox message. Keep it above one message (32 KiB), or a larger message is dropped |
 | `max_event_bytes` | `65536` | Cap on one runtime event. Longer text and payload strings are truncated rune-safely and end with `…[truncated]` |
 | `max_steps` | `24` | Maximum model/tool iterations per user message |
 | `max_history_messages` | `120` | Messages sent to the model; oldest are trimmed at a user boundary |
@@ -62,16 +64,16 @@ Set `version: 1` in every file. A file without the key is read as version 1, and
 
 ### Session memory
 
-The hub keeps one stream per active session in control-plane memory. The
-worst case for one session is `event_buffer_bytes` plus the inbox. The inbox
-holds at most `event_buffer` human messages, and one message is at most 32
-KiB. With the defaults that is 8 MiB + 5000 × 32 KiB, about 164 MiB. With
-`max_concurrent` = 50 the hub bound is about 8 GiB.
+The hub keeps one stream per active session in control-plane memory. Two
+independent budgets bound it: `event_buffer_bytes` for the retained thread and
+`inbox_buffer_bytes` for the human messages the runtime has not read. Both
+apply in addition to the `event_buffer` count cap. With the defaults that is
+8 MiB + 8 MiB, about 16 MiB per session. With `max_concurrent` = 50 the hub
+bound is about 800 MiB.
 
 The chart's 1 GiB memory limit covers normal load, not this bound. Raise the
-pod memory limit when you raise `event_buffer_bytes`, `event_buffer`, or
-`max_concurrent`. Lower `event_buffer` to cut the inbox term, because one
-human message can be 32 KiB.
+pod memory limit when you raise either byte budget or `max_concurrent`. A
+human message is at most 32 KiB, so keep `inbox_buffer_bytes` above that value.
 
 ## runtime
 

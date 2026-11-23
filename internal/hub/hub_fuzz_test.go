@@ -91,6 +91,137 @@ func FuzzSequenceInvariants(f *testing.F) {
 	})
 }
 
+// FuzzHubInboxBudget drives the inbox byte budget and count cap with a fuzzed
+// op stream. Whatever the human posts, redeliveries, and runtime events, the
+// retained inbox bytes stay within the byte budget and the count cap, the
+// byte accounting matches the retained events, and a runtime append or
+// restore never removes an inbox message.
+func FuzzHubInboxBudget(f *testing.F) {
+	f.Add([]byte{0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 1, 3, 2, 3, 3, 1})
+	f.Add([]byte{0, 31, 0, 31})
+	f.Add([]byte{0, 30, 0, 1, 3, 1})
+	f.Add([]byte{0, 2, 1, 9, 2, 9, 0, 3, 3, 1})
+	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 9, 1, 9})
+	f.Add([]byte{})
+
+	f.Fuzz(func(t *testing.T, ops []byte) {
+		const session = "fuzz"
+		const threadCap = 8
+		const threadBudget = 4096
+		const inboxCap = threadCap
+		const inboxBudget = 2048
+		h := New(threadCap, WithByteBudget(threadBudget), WithInboxByteBudget(inboxBudget))
+		h.Create(session)
+		var last int64
+		var posted []int64
+
+		check := func() {
+			t.Helper()
+			events, bytes := inboxSnapshot(h, session)
+			var sum int64
+			for _, ev := range events {
+				sum += eventBytes(ev)
+				if ev.Type != model.EventUserMessage {
+					t.Fatalf("inbox holds a %q event", ev.Type)
+				}
+			}
+			if sum != bytes {
+				t.Fatalf("inbox accounting = %d, retained events sum to %d", bytes, sum)
+			}
+			if bytes > inboxBudget {
+				t.Fatalf("inbox bytes = %d, over the %d-byte budget", bytes, inboxBudget)
+			}
+			if len(events) > inboxCap {
+				t.Fatalf("inbox holds %d entries, over the %d-entry cap", len(events), inboxCap)
+			}
+		}
+
+		for i := 0; i+1 < len(ops); i += 2 {
+			op, arg := ops[i]%4, int(ops[i+1])
+			switch op {
+			case 0:
+				text := strings.Repeat("h", arg*64+1)
+				got := h.Append(session, model.Event{Type: model.EventUserMessage, Text: text})
+				if got.Seq == 0 {
+					t.Fatalf("human post %d was dropped", i)
+				}
+				if got.Seq <= last {
+					t.Fatalf("append returned seq %d after %d", got.Seq, last)
+				}
+				last = got.Seq
+				posted = append(posted, got.Seq)
+			case 1:
+				before := inboxSeqs(h, session)
+				got := h.Append(session, model.Event{Type: model.EventToolResult, Text: strings.Repeat("e", arg*64+1)})
+				if got.Seq <= last {
+					t.Fatalf("append returned seq %d after %d", got.Seq, last)
+				}
+				last = got.Seq
+				after := inboxSeqs(h, session)
+				if !sameSeqs(before, after) {
+					t.Fatalf("a runtime append changed the inbox: %v -> %v", before, after)
+				}
+			case 2:
+				before := inboxSeqs(h, session)
+				got := h.Restore(session, model.Event{
+					Type:    model.EventAssistantMessage,
+					StepKey: fmt.Sprintf("step/%d", arg),
+					Text:    strings.Repeat("z", arg*64+1),
+				})
+				if got.Seq != 0 {
+					if got.Seq <= last {
+						t.Fatalf("restore returned seq %d after %d", got.Seq, last)
+					}
+					last = got.Seq
+				}
+				after := inboxSeqs(h, session)
+				if !sameSeqs(before, after) {
+					t.Fatalf("a restored event changed the inbox: %v -> %v", before, after)
+				}
+			case 3:
+				if len(posted) == 0 {
+					break
+				}
+				seq := posted[arg%len(posted)]
+				h.Redeliver(session, model.Event{
+					Seq:   seq,
+					Type:  model.EventUserMessage,
+					Actor: "user",
+					Text:  strings.Repeat("r", arg*64+1),
+				})
+			}
+			check()
+			if got := h.LastSeq(session); got < last {
+				t.Fatalf("LastSeq fell from %d to %d", last, got)
+			}
+			last = h.LastSeq(session)
+		}
+		check()
+	})
+}
+
+// inboxSeqs returns the retained inbox sequence numbers in order.
+func inboxSeqs(h *Hub, sessionID string) []int64 {
+	events, _ := inboxSnapshot(h, sessionID)
+	out := make([]int64, len(events))
+	for i, ev := range events {
+		out[i] = ev.Seq
+	}
+	return out
+}
+
+func sameSeqs(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // FuzzHubAppendBudget drives the hub's retention policy with a fuzzed op
 // stream. Whatever the sequence of runtime and restored events, the retained
 // thread must stay within the byte budget and the event count cap, the

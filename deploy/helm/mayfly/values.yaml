@@ -105,6 +105,13 @@ config:
     idle_timeout: 15m
     close_grace: 90s
     event_buffer: 5000
+    # Retained thread bytes and the cap on one runtime event. The defaults
+    # match the Go defaults; see docs/configuration.md.
+    event_buffer_bytes: 8388608
+    max_event_bytes: 65536
+    # Retained bytes for human messages the runtime has not read. Empty or 0
+    # follows event_buffer_bytes.
+    inbox_buffer_bytes: 8388608
     max_steps: 24
     max_history_messages: 120
     max_concurrent: 50

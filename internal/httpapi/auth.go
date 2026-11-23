@@ -302,3 +302,7 @@ func (r *statusRecorder) Write(p []byte) (int, error) {
 	}
 	return r.ResponseWriter.Write(p)
 }
+
+// Unwrap lets the response controller reach the connection, so a handler can
+// set a body read deadline through this wrapper.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }

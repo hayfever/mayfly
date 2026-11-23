@@ -27,8 +27,8 @@ type createRequest struct {
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	var req createRequest
-	if err := decodeJSONStrict(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
-		writeError(w, http.StatusBadRequest, codeInvalidRequest, "invalid JSON body")
+	if err := s.decodeJSONStrict(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
+		writeBodyError(w, err)
 		return
 	}
 	var ttl time.Duration
@@ -132,8 +132,8 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		Text  string `json:"text"`
 		Actor string `json:"actor"`
 	}
-	if err := decodeJSONStrict(w, r, 64<<10, &req); err != nil {
-		writeError(w, http.StatusBadRequest, codeInvalidRequest, "invalid JSON body")
+	if err := s.decodeJSONStrict(w, r, 64<<10, &req); err != nil {
+		writeBodyError(w, err)
 		return
 	}
 	event, err := s.mgr.PostMessage(r.PathValue("id"), req.Actor, req.Text)
@@ -148,8 +148,8 @@ func (s *Server) closeSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	if err := decodeJSONStrict(w, r, 4<<10, &req); err != nil {
-		writeError(w, http.StatusBadRequest, codeInvalidRequest, "invalid JSON body")
+	if err := s.decodeJSONStrict(w, r, 4<<10, &req); err != nil {
+		writeBodyError(w, err)
 		return
 	}
 	if req.Reason == "" {
@@ -167,8 +167,8 @@ func (s *Server) createTicket(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Actor string `json:"actor"`
 	}
-	if err := decodeJSONStrict(w, r, 4<<10, &req); err != nil {
-		writeError(w, http.StatusBadRequest, codeInvalidRequest, "invalid JSON body")
+	if err := s.decodeJSONStrict(w, r, 4<<10, &req); err != nil {
+		writeBodyError(w, err)
 		return
 	}
 	if _, ok := s.mgr.Get(id); !ok {

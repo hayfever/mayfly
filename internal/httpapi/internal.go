@@ -1,10 +1,10 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -31,7 +31,12 @@ func (s *Server) internalEvents(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Events []model.Event `json:"events"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxRuntimeEventsBodyBytes)).Decode(&req); err != nil {
+	body, err := s.readBody(w, r, maxRuntimeEventsBodyBytes)
+	if err != nil {
+		writeInternalBodyError(w, err)
+		return
+	}
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&req); err != nil {
 		writeInternalError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -55,13 +60,17 @@ func (s *Server) internalJournal(w http.ResponseWriter, r *http.Request) {
 		if limit <= 0 {
 			limit = 8 << 20
 		}
-		raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+		raw, err := s.readBody(w, r, limit)
 		if err != nil {
-			writeInternalError(w, http.StatusBadRequest, "read body")
-			return
-		}
-		if int64(len(raw)) > limit {
-			writeInternalError(w, http.StatusRequestEntityTooLarge, "journal entry is over journal.max_entry_bytes")
+			var overLimit *http.MaxBytesError
+			switch {
+			case errors.As(err, &overLimit):
+				writeInternalError(w, http.StatusRequestEntityTooLarge, "journal entry is over journal.max_entry_bytes")
+			case errors.Is(err, errBodyReadTimeout):
+				writeInternalError(w, http.StatusRequestTimeout, "request body read timed out")
+			default:
+				writeInternalError(w, http.StatusBadRequest, "read body")
+			}
 			return
 		}
 		var e journal.Entry
@@ -179,8 +188,8 @@ func (s *Server) internalToolCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req gateway.BeginRequest
-	if err := decodeJSON(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
-		writeInternalError(w, http.StatusBadRequest, "invalid JSON body")
+	if err := s.decodeJSON(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
+		writeInternalBodyError(w, err)
 		return
 	}
 	resp, err := s.gateway.Begin(r.Context(), id, req)
@@ -197,8 +206,8 @@ func (s *Server) internalToolComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req gateway.CompleteRequest
-	if err := decodeJSON(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
-		writeInternalError(w, http.StatusBadRequest, "invalid JSON body")
+	if err := s.decodeJSON(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
+		writeInternalBodyError(w, err)
 		return
 	}
 	if err := s.gateway.Complete(r.Context(), id, req); err != nil {
@@ -324,7 +333,12 @@ func (s *Server) internalFinalize(w http.ResponseWriter, r *http.Request) {
 		Reason string `json:"reason"`
 		Error  string `json:"error"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil {
+	body, err := s.readBody(w, r, 64<<10)
+	if err != nil {
+		writeInternalBodyError(w, err)
+		return
+	}
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&req); err != nil {
 		writeInternalError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}

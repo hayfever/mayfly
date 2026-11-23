@@ -22,9 +22,13 @@ func TestNewHubAppliesSessionLimits(t *testing.T) {
 	cfg := config.Default()
 	cfg.Sessions.EventBuffer = 100
 	cfg.Sessions.EventBufferBytes = 4096
+	cfg.Sessions.InboxBufferBytes = 2048
 	h := newHub(cfg)
 	if got := h.ByteBudget(); got != 4096 {
 		t.Fatalf("hub budget = %d, want the configured 4096", got)
+	}
+	if got := h.InboxByteBudget(); got != 2048 {
+		t.Fatalf("hub inbox budget = %d, want the configured 2048", got)
 	}
 	// The configured budget governs retention, not only the accessor: a hub
 	// left on the default would keep all twenty events.

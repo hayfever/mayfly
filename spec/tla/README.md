@@ -2,16 +2,19 @@
 
 `SessionResume.tla` models the Mayfly session lifecycle and resume protocol as
 implemented. `HubRetention.tla` models the in-memory hub: the per-event cap,
-the retained thread byte budget, the thread and inbox count caps, the inbox
-exemption, the dedup-key table, and the restore path. `QueuePoison.tla` models
-a queue with a poison job: claim, handler panic, Nack, lease expiry, restart,
-and burial at `max_attempts`. `AuthHardening.tla` models API authentication:
-always-on audit lines, failed-auth auditing and counting, the per-client
-failure limiter, and the 32-character token-secret floor. A cfg runs the module named by its basename up to
-the first underscore, so `HubRetention_evict_inbox_buggy.cfg` runs
-`HubRetention.tla`. [formal-verification.md](../../docs/formal-verification.md)
-maps each action to the Go code it models, lists the invariants, and states
-what the models abstract away.
+the retained thread byte budget, the thread and inbox byte and count caps, the
+inbox exemption, the dedup-key table, and the restore path.
+`BodyReadDeadline.tla` models a handler that reads a request body after a
+stalled set of headers, with and without the server's read deadline.
+`QueuePoison.tla` models a queue with a poison job: claim, handler panic, Nack,
+lease expiry, restart, and burial at `max_attempts`. `AuthHardening.tla` models
+API authentication: always-on audit lines, failed-auth auditing and counting,
+the per-client failure limiter, and the 32-character token-secret floor. A cfg
+runs the module named by its basename up to the first underscore, so
+`HubRetention_evict_inbox_buggy.cfg` runs `HubRetention.tla`.
+[formal-verification.md](../../docs/formal-verification.md) maps each action to
+the Go code it models, lists the invariants, and states what the models
+abstract away.
 
 ## Run it
 
@@ -30,10 +33,10 @@ temporary directory, never into the repository.
 
 ## Config convention
 
-- `SessionResume.cfg`, `HubRetention.cfg`, `QueuePoison.cfg`, and
-  `AuthHardening.cfg` are the positive configurations. Each must pass with no invariant violation;
-  `SessionResume.cfg` and `QueuePoison.cfg` must also prove their liveness
-  properties.
+- `SessionResume.cfg`, `HubRetention.cfg`, `BodyReadDeadline.cfg`,
+  `QueuePoison.cfg`, and `AuthHardening.cfg` are the positive configurations.
+  Each must pass with no invariant violation; `SessionResume.cfg` and
+  `QueuePoison.cfg` must also prove their liveness properties.
 - A configuration whose file name ends in `_buggy.cfg` is a negative check. It
   must produce an invariant violation, not a pass and not a parse error. The
   invariant name is in a comment line:
@@ -70,11 +73,14 @@ which runs only in the nightly `tlc-deep` job.
 | `SessionResume_interrupt_buggy.cfg` | `InterruptOnResume = FALSE`: a pending non-idempotent call is dispatched again |
 | `SessionResume_volatile_inbox_buggy.cfg` | `DurableInbox = FALSE`: an acknowledged message dies with the control-plane hub |
 | `SessionResume_redeliver_dup_buggy.cfg` | `RedeliverNewKey = TRUE`: adoption starts one accepted message under two turn keys |
-| `HubRetention.cfg` | Hub byte budget, event cap, contiguous suffix, inbox exemption, inbox cap, dedup keys, positive |
+| `HubRetention.cfg` | Hub thread and inbox byte budgets, event cap, contiguous suffix, inbox exemption and count cap, dedup keys, positive |
 | `HubRetention_evict_inbox_buggy.cfg` | `ExemptInbox = FALSE`: a runtime flood drops an unconsumed human message |
 | `HubRetention_no_cap_buggy.cfg` | `CapEvents = FALSE`: a retained event exceeds the per-event cap |
 | `HubRetention_inbox_overflow_buggy.cfg` | `CapInbox = FALSE`: the inbox grows past its count cap |
+| `HubRetention_inbox_no_byte_budget_buggy.cfg` | `CapInboxBytes = FALSE`: the inbox grows past its byte budget |
 | `HubRetention_key_leak_buggy.cfg` | `EvictKeys = FALSE`: a dedup key outlives its evicted event |
+| `BodyReadDeadline.cfg` | Body read deadline, positive |
+| `BodyReadDeadline_no_deadline_buggy.cfg` | `ApplyDeadline = FALSE`: a stalled body read never ends |
 | `QueuePoison.cfg` | Claim, recovered panic, Nack, burial, and healthy progress, positive |
 | `QueuePoison_no_recover_buggy.cfg` | `RecoverPanics = FALSE`: a handler panic crashes the worker |
 | `QueuePoison_no_claim_count_buggy.cfg` | `RecoverPanics = FALSE` and `CountAttemptOnClaim = FALSE`: a crash loop never reaches `max_attempts` |
@@ -86,10 +92,15 @@ which runs only in the nightly `tlc-deep` job.
 | `AuthHardening_limit_success_buggy.cfg` | `LimitSuccessBeforeAuth = TRUE`: an over-budget client is refused with a valid credential |
 | `deep/SessionResume_two_sessions.cfg` | Nightly only: two sessions, one turn each, one shared control-plane restart; safety invariants (6,127,026 distinct states, about 10.5 minutes with `-workers auto`) |
 
-`HubRetention.cfg` runs eight appends over sizes `{1, 2, 3}` with a two-event
-count cap, a four-byte budget, a two-entry inbox cap, and one dedup key, so
-both eviction paths, the event cap, the inbox cap, and key eviction are
-reachable (2458 distinct states).
+`HubRetention.cfg` runs eight appends over sizes `{1, 2, 3}` and human posts over
+`{1, 2}`, with a two-event count cap, a four-byte thread budget, a two-entry
+inbox cap, a three-byte inbox budget, and one dedup key, so both eviction paths,
+the event cap, the inbox byte and count caps, and key eviction are reachable
+(5859 distinct states).
+
+`BodyReadDeadline.cfg` uses a two-tick deadline and a five-tick bound. The
+positive run holds seven distinct states; the no-deadline negative cfg stops
+after eight.
 
 `QueuePoison.cfg` uses two jobs, one poison, and `MaxAttempts = 2`, so the
 positive run explores 38 states (15 distinct) and proves healthy progress.

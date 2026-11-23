@@ -1,13 +1,14 @@
 # Formal verification
 
 Two checks cover behavior that unit tests can only sample: TLA+ models of the
-session lifecycle, hub retention, and queue poison recovery, and native Go fuzz
-targets. A third check covers the chart RBAC over its whole namespace
-configuration space. Each has a script or command and a CI job.
+session lifecycle, hub retention, request-body deadlines, and queue poison
+recovery, and native Go fuzz targets. A third check covers the chart RBAC over
+its whole namespace configuration space. Each has a script or command and a CI
+job.
 
 | Check | Script | CI job |
 |---|---|---|
-| TLC on `SessionResume.tla`, `HubRetention.tla`, `QueuePoison.tla`, and `AuthHardening.tla` | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
+| TLC on `SessionResume.tla`, `HubRetention.tla`, `BodyReadDeadline.tla`, `QueuePoison.tla`, and `AuthHardening.tla` | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
 | TLC with two sessions | `hack/tlc.sh --deep` | `tlc-deep` in verify.yml, nightly and on demand |
 | Every fuzz target | `hack/fuzz.sh` | `fuzz-nightly` in verify.yml |
 | Chart RBAC property check | `MAYFLY_REQUIRE_HELM=1 go test ./test/chart/...` | `chart` step of the `test` job in [ci.yml](../.github/workflows/ci.yml) |
@@ -155,16 +156,16 @@ prevents.
 `spec/tla/HubRetention.tla` models one session stream in `internal/hub` and the
 per-event cap in `internal/session`. It covers the memory and ordering behavior
 that a hostile runtime can drive: one event's size, the retained thread's byte
-budget, the thread and inbox count caps, the inbox exemption, the dedup-key
+budget, the inbox's byte and count budgets, the inbox exemption, the dedup-key
 table, and the sequence contract.
 
 | TLA+ action | Go code it models |
 |---|---|
 | `RuntimeAppend` | `session.Manager.EmitRuntimeEvents` and `boundRuntimeEvent` (`internal/session/lifecycle.go`), then `hub.Hub.Append` and `hub.stream.append` (`internal/hub/hub.go`) |
 | `RestoreAppend` | `session.Manager.restoreJournalThread` (`internal/session/restart.go`) and `hub.Hub.Restore` (`internal/hub/hub.go`); the per-event cap applies before the append |
-| `HumanPost` | `session.Manager.PostMessage` (`internal/session/lifecycle.go`) and `hub.Hub.Append` |
+| `HumanPost` | `session.Manager.PostMessage` (`internal/session/lifecycle.go`), `hub.Hub.Append`, and `hub.stream.trimInboxLocked`: the count cap and `sessions.inbox_buffer_bytes` drop the oldest inbox entries |
 | `DedupRetry` | the reject branch of `hub.stream.append`: an event whose `StepKey` is remembered returns `Seq` 0 and changes no state |
-| `Consume` | the runtime's inbox cursor (`platformclient.Client.Inbox`, `internal/agent/runtime.go`); the hub keeps the inbox copy until its count cap drops it |
+| `Consume` | the runtime's inbox cursor (`platformclient.Client.Inbox`, `internal/agent/runtime.go`); the hub keeps the inbox copy until its byte or count cap drops it |
 | `Trim` | `hub.stream.trimLocked` and `evictOldestLocked`: drop the oldest event while over `sessions.event_buffer` or `sessions.event_buffer_bytes` |
 | `Stutter` | no Go function; a stream with no pending work |
 
@@ -175,36 +176,49 @@ table, and the sequence contract.
 | `EventCapEnforced` | No retained event exceeds `sessions.max_event_bytes`, whether it came from the runtime or the journal | `TestEmitRuntimeEventsTruncatesOversizedFields`, `TestRestoreJournalThreadBoundsOversizedEvents`, `FuzzEventBound` |
 | `RetainedWithinBudget` | Retained thread bytes never exceed `sessions.event_buffer_bytes` | `TestByteBudgetEvictsOldestEvents`, `FuzzHubAppendBudget` |
 | `ContiguousSuffix` | Retained sequences are a contiguous suffix ending at the latest sequence, so a replay shows a gap instead of a hole | `TestByteBudgetEvictsOldestEvents`, `FuzzHubAppendBudget`, `FuzzSequenceInvariants` |
-| `InboxNeverEvictedByRuntime` | A runtime append never removes an unconsumed human message from the inbox | `TestInboxSurvivesRuntimeEventFlood`, `FuzzHubAppendBudget` |
-| `InboxWithinCap` | The inbox holds at most `sessions.event_buffer` entries, and a later human post drops the oldest | `TestInboxCountCapDropsOldest` |
+| `InboxNeverEvictedByRuntime` | A runtime append never removes an unconsumed human message from the inbox | `TestInboxSurvivesRuntimeEventFlood`, `FuzzHubAppendBudget`, `FuzzHubInboxBudget` |
+| `InboxWithinCap` | The inbox holds at most `sessions.event_buffer` entries, and a later human post drops the oldest | `TestInboxCountCapDropsOldest`, `FuzzHubInboxBudget` |
+| `InboxWithinBudget` | Retained inbox bytes never exceed `sessions.inbox_buffer_bytes`, and a later human post drops the oldest | `TestInboxByteBudgetDropsOldest`, `TestRedeliverRespectsInboxByteBudget`, `FuzzHubInboxBudget` |
 | `KeysMatchRetained` | A remembered `StepKey` belongs to a retained event, so eviction frees the key | `TestEvictedStepKeyCanBeAppendedAgain` |
 | `NoDuplicateRetainedKey` | Two retained events never share a `StepKey` | `TestAppendDropsDuplicateStepKey` |
 
-The positive cfg uses eight appends over sizes `{1, 2, 3}`, a two-event thread
-cap, a four-byte budget, a two-entry inbox cap, and one dedup key: 19126 states
-generated, 2458 distinct, about a second.
+The positive cfg uses eight appends over sizes `{1, 2, 3}`, human posts over
+`{1, 2}`, a two-event thread cap, a four-byte thread budget, a two-entry inbox
+cap, a three-byte inbox budget, and one dedup key: 48404 states generated, 5859
+distinct, about two seconds including JVM startup.
 `HubRetention_evict_inbox_buggy.cfg` sets `ExemptInbox = FALSE`, so trimming the
 thread also consumes the matching inbox entry; TLC must report
-`InboxNeverEvictedByRuntime` (538 states generated, 112 distinct).
+`InboxNeverEvictedByRuntime` (498 states generated, 104 distinct).
 `HubRetention_no_cap_buggy.cfg` sets `CapEvents = FALSE`, so an event of size
-`MaxEvent+1` is retained; TLC must report `EventCapEnforced` (43 states
-generated, 24 distinct). `HubRetention_inbox_overflow_buggy.cfg` sets
+`MaxEvent+1` is retained; TLC must report `EventCapEnforced` (66 states
+generated, 31 distinct). `HubRetention_inbox_overflow_buggy.cfg` sets
 `CapInbox = FALSE`, so two human posts exceed a one-entry inbox; TLC must
-report `InboxWithinCap` (283 states generated, 94 distinct).
+report `InboxWithinCap` (224 states generated, 80 distinct).
+`HubRetention_inbox_no_byte_budget_buggy.cfg` sets `CapInboxBytes = FALSE`, so
+two human messages of two bytes exceed a two-byte inbox budget; TLC must report
+`InboxWithinBudget` (239 states generated, 81 distinct).
 `HubRetention_key_leak_buggy.cfg` sets `EvictKeys = FALSE`, so a key outlives
-its evicted event; TLC must report `KeysMatchRetained` (40 states generated, 21
+its evicted event; TLC must report `KeysMatchRetained` (41 states generated, 22
 distinct).
 
 The model abstracts these details:
 
 - Event sizes are abstract bytes from `Sizes`, not JSON or Go string lengths.
-- The inbox is a sequence of sequence numbers, not a separate slice copy. A
-  human message is one byte; `Manager.PostMessage` caps the text at 32 KiB.
-  `Consume` removes the oldest message when the runtime reads it, while the
-  real hub keeps the copy until a later post drops it or eviction removes the
-  thread copy.
+- The inbox is a sequence of sequence-number and size records, not a second
+  slice copy. A human post offers a size from `HumanSizes`;
+  `Manager.PostMessage` caps the real text at 32 KiB, and the hub never
+  truncates a human message. The positive cfg keeps `HumanSizes` within
+  `MaxEvent` so `EventCapEnforced` stays meaningful for the thread copy.
+  `Consume` removes the oldest inbox entry when the runtime reads it. The
+  real hub has no consume path: it keeps the inbox copy until a later human
+  post exceeds the inbox byte or count cap and drops the oldest inbox entry.
+  Evicting an event from the thread never removes an unconsumed inbox
+  message.
 - `MaxInbox` is a constant separate from `MaxEvents`, so a cfg can shrink one
   cap. The Go hub uses `sessions.event_buffer` for both.
+- `InboxBudget` is separate from `Budget`, because the two Go budgets are
+  configured separately. `TrimInboxBytes` drops entries from the head, which is
+  the behavior of `stream.trimInboxLocked`.
 - `Keys` is a finite set of abstract step keys, and no event holds more than
   one. A real `StepKey` is a string such as `11/1/assistant`.
 - `DedupRetry` spends one append step from `MaxAppends`, while the Go reject
@@ -213,6 +227,45 @@ The model abstracts these details:
   capped event that reaches `hub.Restore`, not the journal entry itself.
 - Subscribers and live fan-out are outside the model; it checks retention, not
   channel delivery.
+
+## Body-read deadline model
+
+`spec/tla/BodyReadDeadline.tla` models a client that sends request headers and
+then stalls the body, and a handler that reads the body. With `ApplyDeadline`
+the server sets the read deadline in `readBody`; when the stall reaches the
+deadline, the handler returns. Without it the handler can wait forever.
+
+| TLA+ action | Go code it models |
+|---|---|
+| `HeadersSent` | the server has read the headers and dispatched the handler; `cmd/mayflyd/main.go` bounds this phase with `ReadHeaderTimeout` |
+| `BodyArrives` | a body read completes before the deadline |
+| `Stall` | no body byte arrives while the handler waits in `io.ReadAll` inside `httpapi.readBody` (`internal/httpapi/body.go`) |
+| `DeadlineAborts` | `http.NewResponseController(w).SetReadDeadline` fires and the handler writes `408 request_timeout` |
+| `Stutter` | no request in flight |
+
+| Property | Meaning | Tests that sample it |
+|---|---|---|
+| `TypeOK` | The phase and clock stay in their domains | none; model well-formedness |
+| `NoUnboundedBodyRead` | A handler blocked on a request body never waits past `server.body_read_timeout` | `TestStalledWebhookBodyTimesOut`, `TestStalledAPIBodyTimesOut` |
+
+`BodyReadDeadline.cfg` uses a two-tick deadline and a five-tick bound: 15 states
+generated, seven distinct, under a second.
+`BodyReadDeadline_no_deadline_buggy.cfg` sets `ApplyDeadline = FALSE`, so the
+stall runs past the deadline; TLC must report `NoUnboundedBodyRead` (16 states
+generated, eight distinct).
+
+The model abstracts these details:
+
+- Time is an action, not a clock. `Stall` advances one abstract tick, and the
+  negative cfg bounds the run with `MaxTicks`.
+- A body that arrives is one action with no partial-progress state. Artifact
+  uploads make progress and keep their own behavior; they are outside the
+  model.
+- The model covers the read that a JSON, webhook, or internal handler performs.
+  WebSocket attach, event and inbox streams, and the LLM proxy set no body
+  deadline and are outside the model.
+- The model does not model connection close, keep-alive, or the 408 body. The
+  unit test accepts a 408 or a closed connection, as the issue allows.
 
 ## Queue poison-job model
 
@@ -342,6 +395,11 @@ The model abstracts these details:
 - `FuzzHubAppendBudget` (`internal/hub`) drives appends, restores, and replays,
   and asserts the byte budget, the count cap, the contiguous suffix, and that
   the inbox keeps its human message.
+- `FuzzHubInboxBudget` (`internal/hub`) drives human posts, redeliveries, and
+  runtime events, and asserts the inbox byte budget, the count cap, the byte
+  accounting, and that a runtime append or restore never changes the inbox.
+  The seeds include a message larger than the whole budget and a post count
+  past the count cap.
 - `FuzzPendingJSON` (`internal/journal`) decodes the durable pending-inbox
   record that adoption reads after a restart. Arbitrary bytes must not panic, a
   record that decodes must re-encode stably, and the seeds cover a valid

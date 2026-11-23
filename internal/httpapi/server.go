@@ -4,7 +4,6 @@ package httpapi
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
@@ -487,40 +486,6 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
-}
-
-func decodeJSON(w http.ResponseWriter, r *http.Request, max int64, dst any) error {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, max))
-	if err != nil {
-		return err
-	}
-	if len(body) == 0 {
-		return nil
-	}
-	return json.Unmarshal(body, dst)
-}
-
-// decodeJSONStrict decodes a public /api/v1 request body. An unknown field is
-// an error, so a client learns about a typo instead of having it ignored. The
-// internal runtime protocol keeps decodeJSON: its shapes are versioned with
-// the runtime image, not with this API.
-func decodeJSONStrict(w http.ResponseWriter, r *http.Request, max int64, dst any) error {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, max))
-	if err != nil {
-		return err
-	}
-	if len(body) == 0 {
-		return nil
-	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil {
-		return err
-	}
-	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("body must contain one JSON value")
-	}
-	return nil
 }
 
 func (s *Server) publicConfig(w http.ResponseWriter, r *http.Request) {

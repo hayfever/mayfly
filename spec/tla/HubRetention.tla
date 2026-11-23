@@ -6,8 +6,9 @@
 \*   - the retained thread keeps at most MaxEvents events and at most Budget
 \*     accounted bytes, and drops the oldest event first;
 \*   - a human message also enters the inbox, which runtime appends never
-\*     evict (ExemptInbox), which keeps at most MaxInbox entries (CapInbox),
-\*     and whose oldest message the runtime consumes;
+\*     evict (ExemptInbox), which keeps at most MaxInbox entries (CapInbox)
+\*     and at most InboxBudget accounted bytes (CapInboxBytes), and whose
+\*     oldest message the runtime consumes;
 \*   - a dedup key is remembered only while its event stays retained
 \*     (EvictKeys). A retry of a remembered key changes nothing; a retry after
 \*     eviction can append again;
@@ -17,8 +18,9 @@
 \* positive model truncates it to MaxEvent, which is the behavior of
 \* session.Manager.EmitRuntimeEvents. A restored append offers the same sizes
 \* and applies the same cap, which is the behavior of
-\* session.Manager.restoreJournalThread. A human message is small and is
-\* modeled as one byte because sessions.Manager.PostMessage bounds it.
+\* session.Manager.restoreJournalThread. A human post offers a size from
+\* HumanSizes; sessions.Manager.PostMessage caps the real text at 32 KiB and
+\* the hub never truncates it, so the size stays within MaxEvent here.
 \*
 \* Keys is a finite set of abstract step keys. NoKey marks an event without a
 \* dedup key.
@@ -28,7 +30,8 @@
 EXTENDS Naturals, Sequences
 
 CONSTANTS MaxEvents, MaxEvent, Budget, MaxAppends, Sizes, MaxInbox, Keys,
-          CapEvents, ExemptInbox, CapInbox, EvictKeys
+          InboxBudget, HumanSizes, CapEvents, ExemptInbox, CapInbox,
+          CapInboxBytes, EvictKeys
 
 NoKey == "no-key"
 
@@ -40,9 +43,10 @@ RECURSIVE SumBytes(_)
 SumBytes(t) ==
   IF Len(t) = 0 THEN 0 ELSE t[1].bytes + SumBytes(Tail(t))
 
+\* SeqSet collects the sequence number of every inbox entry.
 RECURSIVE SeqSet(_)
 SeqSet(s) ==
-  IF Len(s) = 0 THEN {} ELSE {Head(s)} \cup SeqSet(Tail(s))
+  IF Len(s) = 0 THEN {} ELSE {Head(s).seq} \cup SeqSet(Tail(s))
 
 RECURSIVE KeySet(_)
 KeySet(t) ==
@@ -60,7 +64,22 @@ KeepLast(s, n) ==
 \* Inbox sequences increase, and eviction removes the oldest thread entry, so
 \* a match can only be at the head.
 DropInbox(inb, s) ==
-  IF Len(inb) > 0 /\ Head(inb) = s THEN Tail(inb) ELSE inb
+  IF Len(inb) > 0 /\ Head(inb).seq = s THEN Tail(inb) ELSE inb
+
+\* TrimInboxBytes drops the oldest inbox entries until the byte budget holds.
+\* The inbox is bounded independently of the thread, so this trim touches no
+\* thread state.
+RECURSIVE TrimInboxBytes(_)
+TrimInboxBytes(inb) ==
+  IF Len(inb) = 0 THEN inb
+  ELSE IF CapInboxBytes /\ SumBytes(inb) > InboxBudget THEN TrimInboxBytes(Tail(inb))
+  ELSE inb
+
+\* InboxTrim applies the count cap first and the byte budget second. Both drop
+\* the oldest entry, so the result matches one loop over both limits.
+InboxTrim(inb) ==
+  LET capped == IF CapInbox THEN KeepLast(inb, MaxInbox) ELSE inb
+  IN TrimInboxBytes(capped)
 
 \* Trim drops the oldest thread events until both retention caps hold. The
 \* inbox is a separate sequence. With ExemptInbox, trimming the thread never
@@ -126,17 +145,18 @@ RestoreAppend ==
 
 HumanPost ==
   /\ appends < MaxAppends
-  /\ LET new == seq + 1
-         r == Trim(Append(thread, [seq |-> new, bytes |-> 1, key |-> NoKey]),
-                   inbox, keys)
-         posted == Append(r[2], new)
-     IN /\ seq' = new
-        /\ thread' = r[1]
-        /\ inbox' = IF CapInbox THEN KeepLast(posted, MaxInbox) ELSE posted
-        /\ keys' = r[3]
-        /\ appends' = appends + 1
-        /\ assigned' = Append(assigned, new)
-        /\ UNCHANGED runtimeDropped
+  /\ \E b \in HumanSizes:
+       LET new == seq + 1
+           r == Trim(Append(thread, [seq |-> new, bytes |-> b, key |-> NoKey]),
+                     inbox, keys)
+           posted == Append(r[2], [seq |-> new, bytes |-> b])
+       IN /\ seq' = new
+          /\ thread' = r[1]
+          /\ inbox' = InboxTrim(posted)
+          /\ keys' = r[3]
+          /\ appends' = appends + 1
+          /\ assigned' = Append(assigned, new)
+          /\ UNCHANGED runtimeDropped
 
 \* A retry of a remembered key changes no stream state. It consumes an append
 \* step so it cannot repeat forever. A retry whose event was evicted is
@@ -164,7 +184,7 @@ Spec == Init /\ [][Next]_vars
 TypeOK ==
   /\ seq \in Nat
   /\ thread \in Seq([seq : Nat, bytes : Nat, key : Keys \cup {NoKey}])
-  /\ inbox \in Seq(Nat)
+  /\ inbox \in Seq([seq : Nat, bytes : Nat])
   /\ appends \in Nat
   /\ assigned \in Seq(Nat)
   /\ runtimeDropped \subseteq Nat
@@ -175,8 +195,8 @@ EventCapEnforced ==
   \A i \in DOMAIN thread: thread[i].bytes <= MaxEvent
 
 \* Retained thread bytes, including the human messages still on the thread,
-\* fit the per-session budget. The inbox has its own count cap in Go and is
-\* not part of this budget.
+\* fit the per-session budget. The inbox has byte and count budgets of its
+\* own.
 RetainedWithinBudget == SumBytes(thread) <= Budget
 
 \* The retained thread is a contiguous suffix of the assigned sequence, and
@@ -193,6 +213,10 @@ InboxNeverEvictedByRuntime == runtimeDropped = {}
 \* The inbox count cap holds: a human post beyond MaxInbox drops the oldest
 \* entry.
 InboxWithinCap == Len(inbox) <= MaxInbox
+
+\* The inbox byte budget holds: a human post over InboxBudget drops the oldest
+\* entry, and a runtime append never touches the inbox.
+InboxWithinBudget == SumBytes(inbox) <= InboxBudget
 
 \* A remembered dedup key always belongs to a retained event, so eviction
 \* frees the key.

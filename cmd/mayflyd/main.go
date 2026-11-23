@@ -346,11 +346,13 @@ func main() {
 	cancelManager()
 }
 
-// newHub builds the in-memory thread bus from the session limits. The byte
-// budget applies in addition to the event count cap, and an unset budget
-// falls back to hub.DefaultByteBudget.
+// newHub builds the in-memory thread bus from the session limits. Both byte
+// budgets apply in addition to the event count cap, and an unset budget falls
+// back to the hub default.
 func newHub(cfg *config.Config) *hub.Hub {
-	return hub.New(cfg.Sessions.EventBuffer, hub.WithByteBudget(int64(cfg.Sessions.EventBufferBytes)))
+	return hub.New(cfg.Sessions.EventBuffer,
+		hub.WithByteBudget(int64(cfg.Sessions.EventBufferBytes)),
+		hub.WithInboxByteBudget(int64(cfg.Sessions.InboxBufferBytes)))
 }
 
 // startServices starts the service plugin workloads and returns the gateway's

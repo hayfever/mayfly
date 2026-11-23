@@ -94,6 +94,11 @@ type ServerConfig struct {
 	// WebhookMaxBodyBytes bounds a webhook body when its trigger sets no
 	// max_body_bytes. Webhook bodies are smaller than admin JSON bodies.
 	WebhookMaxBodyBytes int64 `yaml:"webhook_max_body_bytes"`
+	// BodyReadTimeout bounds how long one request body may take to arrive.
+	// Handlers set it per request instead of Server.ReadTimeout, so WebSocket
+	// attach and streamed responses keep working. Zero or less uses the
+	// default.
+	BodyReadTimeout Duration `yaml:"body_read_timeout"`
 	// ShutdownBudget bounds the whole stop sequence: HTTP drain, queue worker
 	// drain, and session manager shutdown. It must fit inside the pod's
 	// terminationGracePeriodSeconds with margin.
@@ -149,6 +154,11 @@ const DefaultEventBufferBytes = 8 << 20
 // nor the server sets a limit.
 const DefaultWebhookMaxBodyBytes = 1 << 20
 
+// DefaultBodyReadTimeout bounds how long a handler waits for a request body.
+// A server-wide ReadTimeout cannot be used: it would also bound WebSocket
+// attach and streamed responses.
+const DefaultBodyReadTimeout = 30 * time.Second
+
 // MaxWebhookBodyBytes is the largest webhook body limit a configuration may
 // set. A webhook body is a signed event, not a session bundle.
 const MaxWebhookBodyBytes = 16 << 20
@@ -188,14 +198,18 @@ func (c ServerConfig) ShutdownShares() (httpShare, workerShare, managerShare tim
 
 // SessionsConfig controls session defaults and runtime limits.
 type SessionsConfig struct {
-	Namespace          string   `yaml:"namespace"`
-	DefaultTTL         Duration `yaml:"default_ttl"`
-	MaxTTL             Duration `yaml:"max_ttl"`
-	IdleTimeout        Duration `yaml:"idle_timeout"`
-	CloseGrace         Duration `yaml:"close_grace"`
-	EventBuffer        int      `yaml:"event_buffer"`
-	EventBufferBytes   int      `yaml:"event_buffer_bytes"`
-	MaxEventBytes      int      `yaml:"max_event_bytes"`
+	Namespace        string   `yaml:"namespace"`
+	DefaultTTL       Duration `yaml:"default_ttl"`
+	MaxTTL           Duration `yaml:"max_ttl"`
+	IdleTimeout      Duration `yaml:"idle_timeout"`
+	CloseGrace       Duration `yaml:"close_grace"`
+	EventBuffer      int      `yaml:"event_buffer"`
+	EventBufferBytes int      `yaml:"event_buffer_bytes"`
+	MaxEventBytes    int      `yaml:"max_event_bytes"`
+	// InboxBufferBytes bounds the retained human messages per session, in
+	// addition to the event_buffer count cap. Zero or less follows
+	// event_buffer_bytes.
+	InboxBufferBytes   int      `yaml:"inbox_buffer_bytes"`
 	MaxSteps           int      `yaml:"max_steps"`
 	MaxHistoryMessages int      `yaml:"max_history_messages"`
 	MaxConcurrent      int      `yaml:"max_concurrent"`
@@ -506,6 +520,7 @@ func Default() *Config {
 			// A webhook body carries one signed event, so its default is
 			// smaller than the admin JSON limit.
 			WebhookMaxBodyBytes: DefaultWebhookMaxBodyBytes,
+			BodyReadTimeout:     Duration(DefaultBodyReadTimeout),
 			ShutdownBudget:      Duration(DefaultShutdownBudget),
 		},
 		Sessions: SessionsConfig{
@@ -517,6 +532,7 @@ func Default() *Config {
 			EventBuffer:         5000,
 			EventBufferBytes:    DefaultEventBufferBytes,
 			MaxEventBytes:       DefaultMaxEventBytes,
+			InboxBufferBytes:    DefaultEventBufferBytes,
 			MaxSteps:            24,
 			MaxHistoryMessages:  120,
 			MaxConcurrent:       50,
@@ -652,6 +668,9 @@ func (c *Config) applyDefaults() {
 	if c.Server.ShutdownBudget.Std() <= 0 {
 		c.Server.ShutdownBudget = Duration(DefaultShutdownBudget)
 	}
+	if c.Server.BodyReadTimeout.Std() <= 0 {
+		c.Server.BodyReadTimeout = Duration(DefaultBodyReadTimeout)
+	}
 	if c.LLM.MaxBodyBytes <= 0 {
 		c.LLM.MaxBodyBytes = 16 << 20
 	}
@@ -666,6 +685,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Sessions.EventBufferBytes <= 0 {
 		c.Sessions.EventBufferBytes = DefaultEventBufferBytes
+	}
+	if c.Sessions.InboxBufferBytes <= 0 {
+		c.Sessions.InboxBufferBytes = c.Sessions.EventBufferBytes
 	}
 	if c.Sessions.MaxEventBytes <= 0 {
 		c.Sessions.MaxEventBytes = DefaultMaxEventBytes
