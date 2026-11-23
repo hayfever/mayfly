@@ -291,8 +291,8 @@ func (s *Server) createWebSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req webLoginRequest
-	if err := decodeJSONStrict(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
-		writeError(w, http.StatusBadRequest, codeInvalidRequest, "invalid JSON body")
+	if err := s.decodeJSONStrict(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
+		writeBodyError(w, err)
 		return
 	}
 	now := s.now()

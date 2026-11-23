@@ -31,6 +31,7 @@ Responses:
 | 400 | The request is not valid. | `Error` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
+| 408 | The request body did not arrive within `server.body_read_timeout` after the headers. The server answers and closes the connection. | `Error` |
 | 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 500 | The runtime did not start. If the session record already exists, `error.details.session_id` names it. | `Error` |
 
@@ -150,6 +151,7 @@ Responses:
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
+| 408 | The request body did not arrive within `server.body_read_timeout` after the headers. The server answers and closes the connection. | `Error` |
 | 409 | The request conflicts with the current state. | `Error` |
 | 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 500 | An internal failure. The message never carries internals. | `Error` |
@@ -174,6 +176,7 @@ Responses:
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
+| 408 | The request body did not arrive within `server.body_read_timeout` after the headers. The server answers and closes the connection. | `Error` |
 | 409 | The request conflicts with the current state. | `Error` |
 | 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 500 | An internal failure. The message never carries internals. | `Error` |
@@ -198,6 +201,7 @@ Responses:
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
+| 408 | The request body did not arrive within `server.body_read_timeout` after the headers. The server answers and closes the connection. | `Error` |
 | 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 500 | An internal failure. The message never carries internals. | `Error` |
 
@@ -474,6 +478,7 @@ Responses:
 | 400 | The request is not valid. | `Error` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 403 | The token does not carry the scope the operation requires, or a mutating request that used the session cookie failed the CSRF check. | `Error` |
+| 408 | The request body did not arrive within `server.body_read_timeout` after the headers. The server answers and closes the connection. | `Error` |
 | 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 
 ### getWebSession
@@ -551,6 +556,7 @@ Responses:
 | 400 | The request is not valid. | `Error` |
 | 401 | The caller is not authenticated: a missing, unknown, or expired token, an invalid webhook signature, or an invalid attach ticket. | `Error` |
 | 404 | The object or route does not exist. | `Error` |
+| 408 | The request body did not arrive within `server.body_read_timeout` after the headers. The server answers and closes the connection. | `Error` |
 | 413 | The body or artifact is over the configured limit. On `POST /hooks/{name}`, the limit is `server.webhook_max_body_bytes` or the trigger's `max_body_bytes`. | `Error` |
 | 429 | A rate limit or capacity limit is reached, including too many failed authentications from one client. `Retry-After` is set. | `Error` |
 | 500 | An internal failure. The message never carries internals. | `Error` |
@@ -601,6 +607,7 @@ Every failed request returns `Error` with one of these `error.code` values:
 | `method_not_allowed` |
 | `conflict` |
 | `payload_too_large` |
+| `request_timeout` |
 | `rate_limited` |
 | `unavailable` |
 | `internal` |

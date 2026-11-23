@@ -19,6 +19,7 @@ const (
 	codeMethodNotAllowed = "method_not_allowed"
 	codeConflict         = "conflict"
 	codePayloadTooLarge  = "payload_too_large"
+	codeRequestTimeout   = "request_timeout"
 	codeRateLimited      = "rate_limited"
 	codeUnavailable      = "unavailable"
 	codeInternal         = "internal"

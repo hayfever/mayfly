@@ -148,6 +148,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "429":
@@ -187,6 +189,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -357,6 +361,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
         "409":
           $ref: "#/components/responses/Conflict"
         "429":
@@ -400,6 +406,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
         "409":
           $ref: "#/components/responses/Conflict"
         "429":
@@ -447,6 +455,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -783,6 +793,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
         "429":
           $ref: "#/components/responses/RateLimited"
     get:
@@ -936,6 +948,14 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    RequestTimeout:
+      description: >
+        The request body did not arrive within `server.body_read_timeout`
+        after the headers. The server answers and closes the connection.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     RateLimited:
       description: >
         A rate limit or capacity limit is reached, including too many failed
@@ -982,6 +1002,7 @@ components:
             - method_not_allowed
             - conflict
             - payload_too_large
+            - request_timeout
             - rate_limited
             - unavailable
             - internal

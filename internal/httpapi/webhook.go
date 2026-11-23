@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -21,8 +20,12 @@ func (s *Server) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, codeNotFound, "unknown trigger")
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.WebhookBodyLimit(cfg)))
+	body, err := s.readBody(w, r, s.cfg.WebhookBodyLimit(cfg))
 	if err != nil {
+		if errors.Is(err, errBodyReadTimeout) {
+			writeError(w, http.StatusRequestTimeout, codeRequestTimeout, "request body read timed out")
+			return
+		}
 		writeError(w, http.StatusRequestEntityTooLarge, codePayloadTooLarge, "webhook body is too large")
 		return
 	}

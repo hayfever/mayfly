@@ -818,3 +818,15 @@ func TestSessionByteLimits(t *testing.T) {
 		t.Fatalf("zero limits did not fall back to defaults")
 	}
 }
+
+func TestBodyReadTimeoutDefaults(t *testing.T) {
+	cfg := Default()
+	if got := cfg.Server.BodyReadTimeout.Std(); got != DefaultBodyReadTimeout {
+		t.Fatalf("default body read timeout = %s", got)
+	}
+	cfg.Server.BodyReadTimeout = 0
+	cfg.applyDefaults()
+	if got := cfg.Server.BodyReadTimeout.Std(); got != DefaultBodyReadTimeout {
+		t.Fatalf("zero body read timeout = %s, want the default", got)
+	}
+}

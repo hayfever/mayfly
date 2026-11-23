@@ -94,6 +94,11 @@ type ServerConfig struct {
 	// WebhookMaxBodyBytes bounds a webhook body when its trigger sets no
 	// max_body_bytes. Webhook bodies are smaller than admin JSON bodies.
 	WebhookMaxBodyBytes int64 `yaml:"webhook_max_body_bytes"`
+	// BodyReadTimeout bounds how long one request body may take to arrive.
+	// Handlers set it per request instead of Server.ReadTimeout, so WebSocket
+	// attach and streamed responses keep working. Zero or less uses the
+	// default.
+	BodyReadTimeout Duration `yaml:"body_read_timeout"`
 	// ShutdownBudget bounds the whole stop sequence: HTTP drain, queue worker
 	// drain, and session manager shutdown. It must fit inside the pod's
 	// terminationGracePeriodSeconds with margin.
@@ -148,6 +153,11 @@ const DefaultEventBufferBytes = 8 << 20
 // DefaultWebhookMaxBodyBytes bounds a webhook body when neither the trigger
 // nor the server sets a limit.
 const DefaultWebhookMaxBodyBytes = 1 << 20
+
+// DefaultBodyReadTimeout bounds how long a handler waits for a request body.
+// A server-wide ReadTimeout cannot be used: it would also bound WebSocket
+// attach and streamed responses.
+const DefaultBodyReadTimeout = 30 * time.Second
 
 // MaxWebhookBodyBytes is the largest webhook body limit a configuration may
 // set. A webhook body is a signed event, not a session bundle.
@@ -506,6 +516,7 @@ func Default() *Config {
 			// A webhook body carries one signed event, so its default is
 			// smaller than the admin JSON limit.
 			WebhookMaxBodyBytes: DefaultWebhookMaxBodyBytes,
+			BodyReadTimeout:     Duration(DefaultBodyReadTimeout),
 			ShutdownBudget:      Duration(DefaultShutdownBudget),
 		},
 		Sessions: SessionsConfig{
@@ -651,6 +662,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Server.ShutdownBudget.Std() <= 0 {
 		c.Server.ShutdownBudget = Duration(DefaultShutdownBudget)
+	}
+	if c.Server.BodyReadTimeout.Std() <= 0 {
+		c.Server.BodyReadTimeout = Duration(DefaultBodyReadTimeout)
 	}
 	if c.LLM.MaxBodyBytes <= 0 {
 		c.LLM.MaxBodyBytes = 16 << 20

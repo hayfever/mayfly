@@ -29,6 +29,7 @@ Set `version: 1` in every file. A file without the key is read as version 1, and
 | `attach_ticket_ttl` | `60s` | Lifetime of one-time WebSocket attach tickets |
 | `max_body_bytes` | `4194304` | Maximum JSON body for session creation |
 | `webhook_max_body_bytes` | `1048576` | Maximum webhook body when the trigger sets no `max_body_bytes`. Must be positive and at most `16777216` |
+| `body_read_timeout` | `30s` | How long a handler waits for the request body after the headers arrive. A client that stalls the body gets `408 request_timeout` and the connection closes. Applies to `/api/v1` JSON bodies, `/hooks/{name}`, and the internal JSON endpoints. It does not bound WebSocket attach, event streams, the inbox stream, or the LLM proxy |
 | `shutdown_budget` | `25s` | Whole stop sequence after SIGTERM: HTTP drain, queue worker drain, then session manager shutdown. The stages get 20, 40, and 40 percent of the budget in that order, each on its own deadline. Keep the budget below the pod's `terminationGracePeriodSeconds`; the chart sets both. Minimum `3s` |
 | `metrics.enabled` | `true` | Serve the Prometheus endpoint. See [observability.md](observability.md) for every metric |
 | `metrics.address` | empty | Serve `/metrics` on a listener of its own, such as `:9090`. Empty serves it on `addr`. Must differ from `addr` |
