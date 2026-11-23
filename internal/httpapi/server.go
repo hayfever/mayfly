@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -89,6 +90,7 @@ type Server struct {
 	broker      *broker.Broker
 	gateway     *gateway.Gateway
 	logger      *slog.Logger
+	audit       *slog.Logger
 	tokens      []config.APITokenConfig
 	triggers    map[string]config.TriggerConfig
 	limiters    map[string]*ratelimit.Limiter
@@ -123,6 +125,7 @@ func New(cfg *config.Config, mgr *session.Manager, q queue.Store, logger *slog.L
 		mgr:         mgr,
 		queue:       q,
 		logger:      logger,
+		audit:       NewAuditLogger(os.Stderr),
 		tokens:      cfg.APITokens(),
 		triggers:    triggersByName,
 		limiters:    limiters,
@@ -174,6 +177,16 @@ func WithGateway(g *gateway.Gateway) Option {
 func WithMetrics(m *metrics.Metrics) Option {
 	return func(s *Server) {
 		s.metrics = m
+	}
+}
+
+// WithAuditLogger gives the server the logger that writes audit lines. The
+// handler must not filter by level; NewAuditLogger provides one.
+func WithAuditLogger(logger *slog.Logger) Option {
+	return func(s *Server) {
+		if logger != nil {
+			s.audit = logger
+		}
 	}
 }
 

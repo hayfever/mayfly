@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -516,10 +515,9 @@ func TestWebSessionStoresOnlyAHash(t *testing.T) {
 
 func TestWebLoginAudit(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	cfg := config.Default()
 	cfg.Server.Tokens = []config.APITokenConfig{{Name: "web", Scopes: []string{config.ScopeAdmin}, Secret: "web-secret"}}
-	s := New(cfg, nil, nil, logger)
+	s := New(cfg, nil, nil, testLogger(), WithAuditLogger(NewAuditLogger(&buf)))
 	handler := s.Handler()
 
 	post := func(body string) {

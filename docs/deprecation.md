@@ -41,7 +41,7 @@ The promise does not cover the text output. Wording, columns, alignment, orderin
 
 - `/internal/v1`, the session runtime protocol. It is versioned with the runtime image, and both ends ship together.
 - The web UI. It is not an API, and its routes, markup, and assets change without notice.
-- Log text, log fields, and metric names. Read the API for state, not the log.
+- Log text, log fields, and metric names. Read the API for state, not the log. The exception is the `audit` line: its `msg` value and the field names in [security.md](security.md#audit-log) stay stable through 1.x. A minor release can add a field.
 - Error `message` text. Match on `error.code`, never on the message.
 - Go packages. Packages live under `internal/`, a command directory, or `examples/`. None is a supported library.
 - The behavior of a dependency. A provider API change can change what a session sees.

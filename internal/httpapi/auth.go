@@ -222,7 +222,7 @@ func auditTarget(r *http.Request) string {
 // token secret never appears in a log line. via records whether the caller used
 // a bearer header or the web session cookie.
 func (s *Server) writeAudit(r *http.Request, tokenName, via, route, target string, status int) {
-	s.logger.Info("audit",
+	s.audit.Info("audit",
 		"token_name", tokenName,
 		"via", via,
 		"method", r.Method,

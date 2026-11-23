@@ -142,10 +142,11 @@ func TestMissingTokenCode(t *testing.T) {
 
 func TestAuditLineForMutatingRequest(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	// audit capture is separate from the process logger after #46.
+	logger := testLogger()
 	cfg := config.Default()
 	cfg.Server.Tokens = []config.APITokenConfig{{Name: "ci", Scopes: []string{config.ScopeSchedulesWrite}, Secret: "ci-secret-value"}}
-	s := New(cfg, nil, nil, logger)
+	s := New(cfg, nil, nil, logger, WithAuditLogger(NewAuditLogger(&buf)))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/schedules/{name}/run", s.authorizedRoute(apiRoute{
@@ -191,10 +192,11 @@ func TestAuditLineForMutatingRequest(t *testing.T) {
 
 func TestAuditLineForForbiddenRequest(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	// audit capture is separate from the process logger after #46.
+	logger := testLogger()
 	cfg := config.Default()
 	cfg.Server.Tokens = []config.APITokenConfig{{Name: "reader", Scopes: []string{config.ScopeSessionsRead}, Secret: "reader-secret"}}
-	s := New(cfg, nil, nil, logger)
+	s := New(cfg, nil, nil, logger, WithAuditLogger(NewAuditLogger(&buf)))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /api/v1/sessions/{id}", s.authorizedRoute(apiRoute{
@@ -217,10 +219,11 @@ func TestAuditLineForForbiddenRequest(t *testing.T) {
 
 func TestAuditSkipsReadRequests(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	// audit capture is separate from the process logger after #46.
+	logger := testLogger()
 	cfg := config.Default()
 	cfg.Server.Tokens = []config.APITokenConfig{{Name: "reader", Scopes: []string{config.ScopeQueueRead}, Secret: "reader-secret"}}
-	s := New(cfg, nil, nil, logger)
+	s := New(cfg, nil, nil, logger, WithAuditLogger(NewAuditLogger(&buf)))
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/queue", s.authorizedRoute(apiRoute{
 		pattern: "GET /api/v1/queue",
@@ -237,10 +240,11 @@ func TestAuditSkipsReadRequests(t *testing.T) {
 
 func TestAuditTargetFromHandler(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	// audit capture is separate from the process logger after #46.
+	logger := testLogger()
 	cfg := config.Default()
 	cfg.Server.Tokens = []config.APITokenConfig{{Name: "writer", Scopes: []string{config.ScopeSessionsWrite}, Secret: "writer-secret"}}
-	s := New(cfg, nil, nil, logger)
+	s := New(cfg, nil, nil, logger, WithAuditLogger(NewAuditLogger(&buf)))
 	handler := s.authorizedRoute(apiRoute{
 		pattern: "POST /api/v1/sessions",
 		scope:   config.ScopeSessionsWrite,
@@ -292,10 +296,11 @@ func TestRequestIDHandling(t *testing.T) {
 
 func TestHandlerScopeEnforcement(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	// audit capture is separate from the process logger after #46.
+	logger := testLogger()
 	cfg := config.Default()
 	cfg.Server.Tokens = []config.APITokenConfig{{Name: "reader", Scopes: []string{config.ScopeSessionsRead, config.ScopeSchedulesRead}, Secret: "reader-secret"}}
-	handler := New(cfg, nil, nil, logger).Handler()
+	handler := New(cfg, nil, nil, logger, WithAuditLogger(NewAuditLogger(&buf))).Handler()
 
 	if rec := serve(t, handler, http.MethodGet, "/api/v1/schedules", ""); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("missing token status = %d", rec.Code)
@@ -323,6 +328,42 @@ func TestHandlerScopeEnforcement(t *testing.T) {
 	}
 	if lines[0]["request_id"] == "" {
 		t.Fatalf("audit line has no request id: %+v", lines[0])
+	}
+}
+
+// TestAuditLineIndependentOfProcessLogLevel is the #46 acceptance test. The
+// process logger is at warn or error, as MAYFLY_LOG_LEVEL=warn or error sets
+// it, and a mutating request still writes exactly one audit line.
+func TestAuditLineIndependentOfProcessLogLevel(t *testing.T) {
+	for _, level := range []slog.Level{slog.LevelWarn, slog.LevelError} {
+		t.Run(level.String(), func(t *testing.T) {
+			var processBuf, auditBuf bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&processBuf, &slog.HandlerOptions{Level: level}))
+			const secret = "ci-secret-value-for-audit"
+			cfg := config.Default()
+			cfg.Server.Tokens = []config.APITokenConfig{{Name: "ci", Scopes: []string{config.ScopeSchedulesWrite}, Secret: secret}}
+			s := New(cfg, nil, nil, logger, WithAuditLogger(NewAuditLogger(&auditBuf)))
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /api/v1/schedules/{name}/run", s.authorizedRoute(apiRoute{
+				pattern: "POST /api/v1/schedules/{name}/run",
+				scope:   config.ScopeSchedulesWrite,
+				handler: func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusAccepted) },
+			}))
+			rec := serve(t, s.observeRequests(mux), http.MethodPost, "/api/v1/schedules/nightly/run", secret)
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+			}
+			lines := auditLines(t, &auditBuf)
+			if len(lines) != 1 {
+				t.Fatalf("audit lines = %d, want 1 at process level %s: %s", len(lines), level, auditBuf.String())
+			}
+			if strings.Contains(auditBuf.String(), secret) {
+				t.Fatalf("audit line contains the token secret: %s", auditBuf.String())
+			}
+			if strings.Contains(processBuf.String(), `"msg":"audit"`) {
+				t.Fatalf("audit line was written through the process logger: %s", processBuf.String())
+			}
+		})
 	}
 }
 
