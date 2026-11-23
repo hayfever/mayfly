@@ -145,7 +145,7 @@ func TestKeepAliveSucceedsAfterBodyDeadline(t *testing.T) {
 	}
 	defer conn.Close()
 
-	send := func() *http.Response {
+	send := func() int {
 		t.Helper()
 		body := `{"prompt":"x"}`
 		req := fmt.Sprintf("POST /hooks/generic HTTP/1.1\r\nHost: example\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
@@ -161,16 +161,14 @@ func TestKeepAliveSucceedsAfterBodyDeadline(t *testing.T) {
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
-		return resp
+		return resp.StatusCode
 	}
 
-	first := send()
-	if first.StatusCode >= 500 {
-		t.Fatalf("first status = %d", first.StatusCode)
+	if first := send(); first >= 500 {
+		t.Fatalf("first status = %d", first)
 	}
 	time.Sleep(500 * time.Millisecond)
-	second := send()
-	if second.StatusCode >= 500 {
-		t.Fatalf("second keep-alive request status = %d; the body read deadline was probably left on the connection", second.StatusCode)
+	if second := send(); second >= 500 {
+		t.Fatalf("second keep-alive request status = %d; the body read deadline was probably left on the connection", second)
 	}
 }

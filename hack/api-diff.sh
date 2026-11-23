@@ -60,7 +60,12 @@ if ! git cat-file -e "$base:$spec" 2>/dev/null; then
 fi
 
 echo "api-diff: comparing $spec at $base with the working tree"
+# A new value in a response enum is additive (a new error code is one).
+# oasdiff treats it as ERR by default; we report it as WARN so --fail-on ERR
+# still catches removals and other breaks. A client must ignore a code it
+# does not know.
 go run "github.com/oasdiff/oasdiff@$oasdiff_version" breaking \
   --fail-on ERR \
+  --severity-levels hack/api-diff-severity.txt \
   --color never \
   "$base:$spec" "$spec"

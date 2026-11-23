@@ -20,6 +20,8 @@ Deprecation is not a breaking change. Removal is, and it needs the major version
 
 The webhook receiver contract includes the trigger types (`generic`, `github`, `slack`, `datadog`) and their signature checks.
 
+A new error `code` is additive: a client must ignore a code it does not know. Removing or renaming a code is a break.
+
 ## CLI
 
 The `mayfly` command is a public surface from 1.0.0, with one exception: its text output is not.
