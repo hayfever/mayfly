@@ -11,6 +11,7 @@ data:
       public_url: "http://localhost:8080"
       internal_url: "http://mayfly.mayfly.svc.cluster.local:8080"
       token_env: MAYFLY_API_TOKEN
+      trust_forwarded_for: false
       attach_ticket_ttl: 60s
     sessions:
       namespace: mayfly

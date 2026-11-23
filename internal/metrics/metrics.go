@@ -39,6 +39,10 @@ const (
 	ComponentSession = "session"
 	ComponentHTTP    = "http"
 	ComponentOther   = "other"
+	// AuthViaBearer and AuthViaWeb label a refused API credential. The set is
+	// closed: another value is dropped rather than creating a series.
+	AuthViaBearer = "bearer"
+	AuthViaWeb    = "web"
 )
 
 // queueScrapeTimeout bounds the queue read that one scrape starts, so a slow
@@ -91,6 +95,7 @@ type Metrics struct {
 	sessionsFinished *prometheus.CounterVec
 	queueAttempts    *prometheus.CounterVec
 	panics           *prometheus.CounterVec
+	authFailures     *prometheus.CounterVec
 	httpRequests     *prometheus.CounterVec
 	httpDuration     *prometheus.HistogramVec
 	llmRequests      *prometheus.CounterVec
@@ -118,6 +123,10 @@ func New(src Sources, build BuildInfo) *Metrics {
 			Name: "mayfly_panics_total",
 			Help: "Panics recovered by this process, by component.",
 		}, []string{"component"}),
+		authFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mayfly_auth_failures_total",
+			Help: "Refused API credentials, by authentication method.",
+		}, []string{"via"}),
 		httpRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mayfly_http_requests_total",
 			Help: "HTTP requests served, by route template, method, and status code.",
@@ -157,6 +166,7 @@ func New(src Sources, build BuildInfo) *Metrics {
 		m.sessionsFinished,
 		m.queueAttempts,
 		m.panics,
+		m.authFailures,
 		m.httpRequests,
 		m.httpDuration,
 		m.llmRequests,
@@ -231,6 +241,18 @@ func (m *Metrics) Panic(component string) {
 		component = ComponentOther
 	}
 	m.panics.WithLabelValues(component).Inc()
+}
+
+// AuthFailure records one refused API credential. via is AuthViaBearer or
+// AuthViaWeb; another value is dropped so the label set stays closed.
+func (m *Metrics) AuthFailure(via string) {
+	if m == nil {
+		return
+	}
+	switch via {
+	case AuthViaBearer, AuthViaWeb:
+		m.authFailures.WithLabelValues(via).Inc()
+	}
 }
 
 // HTTPRequest records one served request. route must be a route template.

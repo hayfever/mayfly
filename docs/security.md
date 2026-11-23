@@ -287,6 +287,10 @@ The `/api/v1/auth/session` routes take no token scope. `POST` exchanges a token 
 
 The control plane compares every configured token with the presented bearer value in constant time. It never logs a token secret. The token name appears in the audit log.
 
+A resolved token secret must be at least 32 characters. A shorter value stops startup with an error that names the config key and environment variable, never the value.
+
+Failed authentication is limited per client. One client key may fail 10 times per minute with a burst of 20. A failure over that budget gets `429` with code `rate_limited` and a `Retry-After` header. The limiter keys on the `RemoteAddr` host by default. Set `server.trust_forwarded_for: true` only when a trusted proxy overwrites `X-Forwarded-For`; otherwise a client can pick its own limiter key. Successful authentication never consults the limiter, even when the client is over budget. The limiter state is in memory, holds at most 4096 keys, forgets a key after 10 idle minutes, and does not survive a restart.
+
 A request without a token, or with an unknown or expired token, gets `401` with code `unauthenticated`. A valid token without the scope of the route gets `403` with code `forbidden`. The attach WebSocket uses a one-time ticket instead of a bearer token.
 
 ## Web UI session
@@ -311,18 +315,24 @@ Sign-in is protected the same way. `POST /api/v1/auth/session` accepts only an `
 
 ## Audit log
 
+The control plane writes audit lines through a dedicated logger that ignores `MAYFLY_LOG_LEVEL`. The setting filters the request and process logs only; an audit line is emitted even when the process log is at `warn` or `error`.
+
 The control plane writes one audit line for every authenticated, mutating `/api/v1` request: `POST`, `PUT`, `PATCH`, and `DELETE`. This includes a request that a valid token is not allowed to make, which is logged with status `403`. The operator actions in this API are all mutating requests.
 
-The line uses the message `audit` at info level. Its fields are:
+The line is JSON on stderr, uses the message `audit`, and has a `level` of `INFO`. Its fields are:
 
-- `token_name`: the configured token name. The secret never appears.
+- `token_name`: the configured token name, or `unknown` when no token matched. The secret never appears.
 - `via`: `bearer` for an `Authorization` header, or `web` for a browser session cookie.
 - `method` and `route`: the HTTP method and the route pattern, for example `/api/v1/sessions/{id}`.
 - `target`: the session id, schedule name, or job id. A failed request can have an empty target.
 - `status`: the response status.
 - `request_id`: the caller `X-Request-Id`, or a generated id. The response echoes it in `X-Request-Id`.
 
-Read requests are not audited. A request with an unknown token is not audited, because it has no token name. A failed `POST /api/v1/auth/session` is audited with `token_name` set to `unknown`, and a successful one with the token name and status `201`.
+Read requests that authenticate are not audited. A failed authentication on a scoped route is audited with `token_name` set to `unknown`, `via` set to the credential that failed, and status `401`. A failure refused by the per-IP limiter has status `429`.
+
+A failed `POST /api/v1/auth/session` is audited with `token_name` set to `unknown`, or to the name of an expired token, and status `401`. A successful sign-in is audited with the token name and status `201`.
+
+The message `audit` and the field names above are an operator contract through 1.x. A minor release can add a field; an existing field keeps its name and meaning. The token secret never appears in an audit line, a metric label, or an error message.
 
 ## Trigger authentication
 

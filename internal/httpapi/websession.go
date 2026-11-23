@@ -302,8 +302,7 @@ func (s *Server) createWebSession(w http.ResponseWriter, r *http.Request) {
 		if found {
 			name = token.Name
 		}
-		s.writeAudit(r, name, authViaWeb, webSessionRoute, "", http.StatusUnauthorized)
-		writeError(w, http.StatusUnauthorized, codeUnauthenticated, "missing or invalid API token")
+		s.refuseAuth(w, r, name, authViaWeb, webSessionRoute, "")
 		return
 	}
 	ttl := webSessionTTL
@@ -314,8 +313,7 @@ func (s *Server) createWebSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if ttl < time.Second {
 		// The token expires before a session cookie is useful.
-		s.writeAudit(r, token.Name, authViaWeb, webSessionRoute, "", http.StatusUnauthorized)
-		writeError(w, http.StatusUnauthorized, codeUnauthenticated, "missing or invalid API token")
+		s.refuseAuth(w, r, token.Name, authViaWeb, webSessionRoute, "")
 		return
 	}
 	// Replace a previous session instead of leaving it live until it expires.

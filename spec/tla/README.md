@@ -5,7 +5,9 @@ implemented. `HubRetention.tla` models the in-memory hub: the per-event cap,
 the retained thread byte budget, the thread and inbox count caps, the inbox
 exemption, the dedup-key table, and the restore path. `QueuePoison.tla` models
 a queue with a poison job: claim, handler panic, Nack, lease expiry, restart,
-and burial at `max_attempts`. A cfg runs the module named by its basename up to
+and burial at `max_attempts`. `AuthHardening.tla` models API authentication:
+always-on audit lines, failed-auth auditing and counting, the per-client
+failure limiter, and the 32-character token-secret floor. A cfg runs the module named by its basename up to
 the first underscore, so `HubRetention_evict_inbox_buggy.cfg` runs
 `HubRetention.tla`. [formal-verification.md](../../docs/formal-verification.md)
 maps each action to the Go code it models, lists the invariants, and states
@@ -28,8 +30,8 @@ temporary directory, never into the repository.
 
 ## Config convention
 
-- `SessionResume.cfg`, `HubRetention.cfg`, and `QueuePoison.cfg` are the positive
-  configurations. Each must pass with no invariant violation;
+- `SessionResume.cfg`, `HubRetention.cfg`, `QueuePoison.cfg`, and
+  `AuthHardening.cfg` are the positive configurations. Each must pass with no invariant violation;
   `SessionResume.cfg` and `QueuePoison.cfg` must also prove their liveness
   properties.
 - A configuration whose file name ends in `_buggy.cfg` is a negative check. It
@@ -76,6 +78,12 @@ which runs only in the nightly `tlc-deep` job.
 | `QueuePoison.cfg` | Claim, recovered panic, Nack, burial, and healthy progress, positive |
 | `QueuePoison_no_recover_buggy.cfg` | `RecoverPanics = FALSE`: a handler panic crashes the worker |
 | `QueuePoison_no_claim_count_buggy.cfg` | `RecoverPanics = FALSE` and `CountAttemptOnClaim = FALSE`: a crash loop never reaches `max_attempts` |
+| `AuthHardening.cfg` | Always-on audit, failed-auth audit and limiter, token floor, positive |
+| `AuthHardening_level_drops_audit_buggy.cfg` | `AuditIndependentOfLevel = FALSE`: a warn or error process level drops the audit line |
+| `AuthHardening_no_fail_audit_buggy.cfg` | `AuditFailedAuth = FALSE`: a 401 writes no audit line |
+| `AuthHardening_no_limiter_buggy.cfg` | `LimitFailedAuth = FALSE`: one address guesses without bound |
+| `AuthHardening_short_token_buggy.cfg` | `RejectShortTokens = FALSE`: a short secret loads |
+| `AuthHardening_limit_success_buggy.cfg` | `LimitSuccessBeforeAuth = TRUE`: an over-budget client is refused with a valid credential |
 | `deep/SessionResume_two_sessions.cfg` | Nightly only: two sessions, one turn each, one shared control-plane restart; safety invariants (6,127,026 distinct states, about 10.5 minutes with `-workers auto`) |
 
 `HubRetention.cfg` runs eight appends over sizes `{1, 2, 3}` with a two-event
@@ -85,6 +93,12 @@ reachable (2458 distinct states).
 
 `QueuePoison.cfg` uses two jobs, one poison, and `MaxAttempts = 2`, so the
 positive run explores 38 states (15 distinct) and proves healthy progress.
+
+`AuthHardening.cfg` uses two addresses, a burst of two failures, four actions,
+and a one-key map cap, so the limiter bound and its eviction path are reachable.
+The positive run explores 732 states (204 distinct) in under one second. Each
+`AuthHardening_*_buggy.cfg` removes one guarantee and stops on the invariant
+named in its `expect-violation` line.
 
 `SessionResume.cfg` holds 34,840 distinct states and finishes in about 18
 seconds; `SessionResume_resume.cfg` holds 2,429 and finishes in about a

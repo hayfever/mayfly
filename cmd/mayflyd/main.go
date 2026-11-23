@@ -274,6 +274,7 @@ func main() {
 		httpapi.WithGateway(toolGateway),
 		httpapi.WithReadyCheck(readyCheck),
 		httpapi.WithMetrics(registry),
+		httpapi.WithAuditLogger(httpapi.NewAuditLogger(os.Stderr)),
 	)
 	server := &http.Server{
 		Addr:              cfg.Server.Addr,
@@ -438,15 +439,21 @@ func instrumentQueue(registry *metrics.Metrics, next queue.Handler) queue.Handle
 
 func newLogger() *slog.Logger {
 	level := slog.LevelInfo
-	switch strings.ToLower(os.Getenv("MAYFLY_LOG_LEVEL")) {
+	raw := strings.ToLower(os.Getenv("MAYFLY_LOG_LEVEL"))
+	switch raw {
 	case "debug":
 		level = slog.LevelDebug
+	case "info", "":
 	case "warn":
 		level = slog.LevelWarn
 	case "error":
 		level = slog.LevelError
 	}
-	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	if raw != "" && raw != "debug" && raw != "info" && raw != "warn" && raw != "error" {
+		logger.Warn("unknown MAYFLY_LOG_LEVEL; using info", "value", raw)
+	}
+	return logger
 }
 
 func envOr(key, fallback string) string {

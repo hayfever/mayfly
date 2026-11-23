@@ -26,6 +26,7 @@ On the main port, `/metrics` is part of the public API listener, so it requires 
 | `mayfly_queue_jobs` | gauge | `state` | Queued jobs by state: `pending`, `leased`, `dead`. Read from the queue store at scrape time; a failed read leaves the gauge unset |
 | `mayfly_queue_job_attempts_total` | counter | `result` | Job attempts this process ran: `succeeded`, `failed`, `retry_later` |
 | `mayfly_panics_total` | counter | `component` | Panics a recover kept from ending the process: `queue` for a job handler, `session` for background session work, `http` for a WebSocket reader. An unknown component is recorded as `other` |
+| `mayfly_auth_failures_total` | counter | `via` | Refused API credentials: `bearer` for an `Authorization` header, `web` for a browser sign-in or session cookie |
 | `mayfly_http_requests_total` | counter | `route`, `method`, `code` | Requests served. `method` is a standard HTTP method or `OTHER` |
 | `mayfly_http_request_duration_seconds` | histogram | `route`, `method` | Request duration |
 | `mayfly_llm_requests_total` | counter | `model`, `result` | Model calls the broker proxied upstream: `ok`, `error` |
@@ -68,7 +69,9 @@ A panic in a source fan-out projection has no logger. The source package turns i
 
 ## Audit lines
 
-A mutating, authenticated `/api/v1` request writes one line with the message `audit` in addition to its request line. The audit line records the token name, the `via` value (`bearer` or `web`), the method, route, target, status, and request id. [security.md](security.md#audit-log) lists every field and the cases that are not audited.
+A mutating, authenticated `/api/v1` request writes one line with the message `audit` in addition to its request line. A failed authentication on a scoped route, and a failed web sign-in, also write one line. The audit line records the token name, the `via` value (`bearer` or `web`), the method, route, target, status, and request id. [security.md](security.md#audit-log) lists every field and the cases that are not audited.
+
+Audit lines use a dedicated logger that ignores `MAYFLY_LOG_LEVEL`. They stay on stderr and remain visible when the process log is at `warn` or `error`.
 
 ## Helm
 

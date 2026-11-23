@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -83,23 +84,25 @@ func (t *ticketStore) consume(token, sessionID string) (string, bool) {
 
 // Server is the HTTP layer.
 type Server struct {
-	cfg         *config.Config
-	mgr         *session.Manager
-	queue       queue.Store
-	broker      *broker.Broker
-	gateway     *gateway.Gateway
-	logger      *slog.Logger
-	tokens      []config.APITokenConfig
-	triggers    map[string]config.TriggerConfig
-	limiters    map[string]*ratelimit.Limiter
-	mcpServers  map[string]config.MCPServerConfig
-	tickets     *ticketStore
-	webSessions *webSessionStore
-	web         fs.FS
-	upgrader    websocket.Upgrader
-	schedules   *ScheduleService
-	readyCheck  func() error
-	metrics     *metrics.Metrics
+	cfg          *config.Config
+	mgr          *session.Manager
+	queue        queue.Store
+	broker       *broker.Broker
+	gateway      *gateway.Gateway
+	logger       *slog.Logger
+	audit        *slog.Logger
+	authFailures *authFailureLimiter
+	tokens       []config.APITokenConfig
+	triggers     map[string]config.TriggerConfig
+	limiters     map[string]*ratelimit.Limiter
+	mcpServers   map[string]config.MCPServerConfig
+	tickets      *ticketStore
+	webSessions  *webSessionStore
+	web          fs.FS
+	upgrader     websocket.Upgrader
+	schedules    *ScheduleService
+	readyCheck   func() error
+	metrics      *metrics.Metrics
 }
 
 // New builds the HTTP server. queue may be nil in tests that do not exercise
@@ -118,18 +121,27 @@ func New(cfg *config.Config, mgr *session.Manager, q queue.Store, logger *slog.L
 	for _, m := range cfg.MCP.Servers {
 		mcpServers[m.Name] = m
 	}
+	audit := NewAuditLogger(os.Stderr)
+	if logger != nil {
+		// Reuse the process destination but not its level filter. main passes
+		// an explicit stderr audit logger; this keeps a direct construction
+		// from inventing a second stream.
+		audit = slog.New(auditHandler{logger.Handler()})
+	}
 	server := &Server{
-		cfg:         cfg,
-		mgr:         mgr,
-		queue:       q,
-		logger:      logger,
-		tokens:      cfg.APITokens(),
-		triggers:    triggersByName,
-		limiters:    limiters,
-		mcpServers:  mcpServers,
-		tickets:     newTicketStore(),
-		webSessions: newWebSessionStore(),
-		web:         sub,
+		cfg:          cfg,
+		mgr:          mgr,
+		queue:        q,
+		logger:       logger,
+		audit:        audit,
+		authFailures: newAuthFailureLimiter(),
+		tokens:       cfg.APITokens(),
+		triggers:     triggersByName,
+		limiters:     limiters,
+		mcpServers:   mcpServers,
+		tickets:      newTicketStore(),
+		webSessions:  newWebSessionStore(),
+		web:          sub,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
@@ -174,6 +186,16 @@ func WithGateway(g *gateway.Gateway) Option {
 func WithMetrics(m *metrics.Metrics) Option {
 	return func(s *Server) {
 		s.metrics = m
+	}
+}
+
+// WithAuditLogger gives the server the logger that writes audit lines. The
+// handler must not filter by level; NewAuditLogger provides one.
+func WithAuditLogger(logger *slog.Logger) Option {
+	return func(s *Server) {
+		if logger != nil {
+			s.audit = logger
+		}
 	}
 }
 

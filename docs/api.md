@@ -29,7 +29,7 @@ Every failed request to `/api/v1` or `/hooks/{name}` returns one envelope:
 | `method_not_allowed` | 405 | The route exists with another method; `Allow` names the method |
 | `conflict` | 409 | The session is closed, a stored queue job cannot be decoded by this build, or a tool call key was reused with another tool or other arguments |
 | `payload_too_large` | 413 | Body or artifact over the configured limit |
-| `rate_limited` | 429 | Trigger rate limit, `queue.max_jobs` reached, `sessions.max_concurrent` reached on the admin API, or a plugin rate limit; `Retry-After` is set |
+| `rate_limited` | 429 | Trigger rate limit, `queue.max_jobs` reached, `sessions.max_concurrent` reached on the admin API, a plugin rate limit, or too many failed authentications from one client; `Retry-After` is set |
 | `unavailable` | 503 | A dependency is not available: the queue rejected the write, the queue store is down, or schedules are not configured |
 | `internal` | 500 | A server fault. The message carries no internals; the details are in the control-plane log |
 
