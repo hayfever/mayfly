@@ -60,7 +60,7 @@ A `Tenant` object names one client and owns its configuration and quota. Tokens,
 
 ### Namespace and RBAC
 
-One namespace per tenant, labeled `mayfly.dev/tenant`. The control plane holds RBAC across the tenant namespaces, and the session ServiceAccount stays inside its tenant namespace. Namespace labels drive policy selection and cleanup, not authorization alone.
+One namespace per tenant, labeled `mayfly.dev/tenant`. The control plane holds RBAC across the tenant namespaces, and the session ServiceAccount stays inside its tenant namespace.
 
 ### Secrets
 
@@ -72,11 +72,11 @@ A compromised control plane can still reach every tenant: it can read tenant Sec
 
 ### Network and quota
 
-Each tenant namespace gets a default-deny NetworkPolicy, an egress allowlist, a `ResourceQuota`, and a session cap. The session cap becomes the per-tenant form of `sessions.max_concurrent`. NetworkPolicy stays CIDR-based, as it is today.
+Each tenant namespace gets a default-deny NetworkPolicy, an egress allowlist, a `ResourceQuota`, and a session cap. The session cap becomes the per-tenant form of `sessions.max_concurrent`.
 
 ### Usage ledger
 
-Per-tenant usage goes in a ledger. Do not add a tenant label to Prometheus metrics: labels stay bounded, as they are today. The ledger records sessions, model calls, tool calls, and artifact bytes per tenant.
+Per-tenant usage goes in a ledger. Do not add a tenant label to Prometheus metrics: labels stay bounded, as they are today.
 
 ### Tokens and joins
 
@@ -100,7 +100,7 @@ Run the multi-tenant install next to the old ones. Move one client at a time.
 4. Copy the client's artifacts to the tenant prefix.
 5. Repoint the stable hook URL to the new install.
 
-Keep the old release as a fallback for a few days. Then run `helm uninstall` in the old namespace. Start with the smallest clients, a few per week, and keep the old installs until the new path has handled real traffic.
+Keep the old release as a fallback for a few days. Then run `helm uninstall` in the old namespace. Start with the smallest clients, a few per week.
 
 ## Out of scope and open questions
 
@@ -108,7 +108,6 @@ Not part of this plan:
 
 - Billing, invoicing, and per-tenant model budgets.
 - A self-serve signup, provisioning, or upgrade flow.
-- Hostname-based egress allowlists. NetworkPolicy remains CIDR-based.
 - Multi-replica control planes.
 - Per-user isolation inside one tenant.
 
