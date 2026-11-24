@@ -501,6 +501,34 @@ func TestParseContentBoundaries(t *testing.T) {
 	}
 }
 
+// TestDecodeImageRejectsByEncodedLength pins the order inside decodeImage: a
+// payload whose decoded size cannot fit is rejected from its encoded length,
+// before base64 decoding. The boundary case proves the length is exact for
+// padded base64, not the raw DecodedLen upper bound.
+func TestDecodeImageRejectsByEncodedLength(t *testing.T) {
+	limits := content.Limits{MaxImageBytes: 5, MaxResultImageBytes: 5, MaxSessionImageBytes: 8}
+
+	// Five bytes encode to eight characters with two padding bytes, so
+	// base64.StdEncoding.DecodedLen reports six.
+	part, reason := decodeImage("image/png", base64.StdEncoding.EncodeToString([]byte("12345")), limits, 0)
+	if reason != "" || len(part.Data) != 5 {
+		t.Fatalf("boundary image = %d bytes, reason %q", len(part.Data), reason)
+	}
+
+	// A megabyte of non-base64 text cannot fit, so the size check answers and
+	// DecodeString never runs.
+	_, reason = decodeImage("image/png", strings.Repeat("!", 1<<20), limits, 0)
+	if !strings.Contains(reason, "per-image limit") {
+		t.Fatalf("oversize invalid base64 reason = %q", reason)
+	}
+
+	// Invalid base64 that fits the length bound still names base64.
+	_, reason = decodeImage("image/png", "!!!", limits, 0)
+	if reason != "data is not valid base64" {
+		t.Fatalf("invalid base64 reason = %q", reason)
+	}
+}
+
 // TestHTTPImageOverSSE delivers a legal 5 MiB image through a
 // text/event-stream response. Its base64 form is about 6.7 MiB, so the old
 // 4 MiB SSE token bound could not carry it.

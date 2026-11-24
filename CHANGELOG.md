@@ -22,6 +22,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 ### Fixed
 
 - A Streamable HTTP MCP server that answers with `text/event-stream` can deliver a legal image tool result: the SSE decoder, the HTTP JSON body, and the stdio line share an 8 MiB response bound instead of a 4 MiB SSE line bound (#71).
+- An image tool result whose encoded base64 length cannot fit the configured limits is rejected before the base64 decode, so an oversized payload never allocates its decoded buffer and the caller still gets the existing rejected-image text part (#71).
 - A client that sends headers and then stalls the request body no longer pins a handler goroutine and connection. The handler sets a read deadline, answers `408 request_timeout`, and closes the connection. This covers `/api/v1` JSON bodies, `/hooks/{name}`, and the internal JSON endpoints; WebSocket attach, streams, the LLM proxy, and artifact uploads keep their own behavior (#48).
 - The inbox of unread human messages is bounded by bytes as well as entries, so an authenticated sender cannot queue about 164 MiB per session. A later human post drops the oldest message, and a runtime event still cannot evict an unconsumed one (#44).
 - Audit lines no longer depend on `MAYFLY_LOG_LEVEL`. A dedicated always-enabled logger writes them to stderr, so `warn` or `error` quiets the request log without dropping the audit trail. An unknown `MAYFLY_LOG_LEVEL` now logs one warning and keeps the info fallback (#46).

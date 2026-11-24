@@ -317,6 +317,19 @@ func decodeImage(mime, data string, limits content.Limits, consumed int64) (cont
 	if data == "" {
 		return content.Part{}, "data is missing"
 	}
+	// Reject on the encoded length first, so an image that cannot fit is
+	// never decoded. The length is exact for valid standard base64, so an
+	// image exactly at a limit still passes; DecodeString below rejects
+	// invalid input.
+	size := decodedBase64Len(data)
+	if size > limits.MaxImageBytes {
+		return content.Part{}, fmt.Sprintf("%s is %d bytes, over the %d-byte per-image limit",
+			normalized, size, limits.MaxImageBytes)
+	}
+	if consumed+size > limits.MaxResultImageBytes {
+		return content.Part{}, fmt.Sprintf("images total %d bytes, over the %d-byte per-result limit",
+			consumed+size, limits.MaxResultImageBytes)
+	}
 	raw, err := base64.StdEncoding.DecodeString(data)
 	if err != nil {
 		return content.Part{}, "data is not valid base64"
@@ -330,6 +343,30 @@ func decodeImage(mime, data string, limits content.Limits, consumed int64) (cont
 			consumed+int64(len(raw)), limits.MaxResultImageBytes)
 	}
 	return part, ""
+}
+
+// decodedBase64Len returns the number of bytes data decodes to, without
+// allocating the decoded buffer. Line breaks are ignored, as DecodeString
+// ignores them. Input that is not valid standard base64 gives an estimate
+// only; DecodeString makes the final decision after the size check.
+func decodedBase64Len(data string) int64 {
+	var total, pad int64
+	for i := range len(data) {
+		switch data[i] {
+		case '\r', '\n':
+			continue
+		case '=':
+			pad++
+		}
+		total++
+	}
+	if total%4 != 0 {
+		return total / 4 * 3
+	}
+	if pad > 2 {
+		pad = 2
+	}
+	return total/4*3 - pad
 }
 
 // Cancel tells the server that it will not receive a result for the request
