@@ -433,6 +433,14 @@ The model abstracts these details:
   secret is accepted, and that the error never varies with the secret. Seeds
   sit at zero, 31, and 32 characters, and on a long value. A 60-second run made
   5,038,767 executions.
+- `FuzzToolResultContent` (`internal/mcp`) feeds arbitrary `tools/call`
+  content arrays to the MCP parser with small image limits. It asserts no
+  panic, that every accepted image has an allowed MIME type and stays within
+  the per-image and per-result limits, and that the text rendering used by
+  events, traces, and text-only callers never contains an accepted image's
+  base64 or a data URI. Seeds cover an empty array, text only, an allowed
+  image, a mixed text and image result, a disallowed MIME type, invalid
+  base64, an oversize image, audio, a resource block, and malformed JSON.
 - `FuzzAuthLimiterKey` (`internal/httpapi`) feeds arbitrary `RemoteAddr` and
   `X-Forwarded-For` bytes with both trust settings. It asserts that the limiter
   key is stable and bounded, that trust off keys on the peer address, and that
