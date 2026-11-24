@@ -23,6 +23,21 @@ archives:
 checksum:
   name_template: checksums.txt
 
+# Sign checksums.txt with keyless cosign. The bundle carries the signature and
+# the short-lived certificate, so a verifier trusts only the workflow identity
+# and the GitHub OIDC issuer. release.yml installs cosign on the goreleaser
+# job, which also needs id-token: write.
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - --yes
+      - --bundle=${signature}
+      - ${artifact}
+    output: true
+
 changelog:
   sort: asc
   filters:
@@ -32,5 +47,10 @@ changelog:
       - "^ci:"
 
 release:
-  draft: false
+  # The GitHub release stays a draft until release.yml's publish job proves
+  # that the images, chart, and signatures exist. A release candidate keeps
+  # `prerelease: auto` and never takes the `latest` marker, which stays on the
+  # newest final release.
+  draft: true
   prerelease: auto
+  make_latest: auto
