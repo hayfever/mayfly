@@ -1,17 +1,168 @@
 name: release
 
+# A v* tag runs the full release. The gate job first proves that the tagged
+# commit has a green ci run and a successful 20-run e2e-stability gate; every
+# other job needs it. A workflow_dispatch with dry_run gates the given SHA and
+# publishes nothing. See docs/release.md.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Run only the gate against `sha` and publish nothing
+        required: false
+        type: boolean
+        default: false
+      sha:
+        description: Full commit SHA to gate (defaults to the dispatched ref)
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  goreleaser:
+  gate:
+    name: gate
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      release: ${{ steps.target.outputs.release }}
+      sha: ${{ steps.target.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+          check-latest: true
+      - name: resolve the target commit
+        id: target
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_SHA: ${{ inputs.sha }}
+          REF: ${{ github.ref }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # A tag push releases that tag. docs/release.md tells operators to
+          # run `git tag -a`, and an annotated tag push sets GITHUB_SHA to the
+          # tag object, not the commit it names. Peel it before any API query,
+          # or the gate looks up the tag object SHA and finds no ci run.
+          #
+          # A dispatch with dry_run gates the given SHA and stops. A dispatch
+          # without dry_run releases only from a v* tag ref; from a branch
+          # there is no version to release.
+          release=false
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            sha="${INPUT_SHA:-$GITHUB_SHA}"
+            if [[ "$DRY_RUN" != "true" ]]; then
+              if [[ "$REF" != refs/tags/v* ]]; then
+                echo "::error::a release runs from a v* tag; set dry_run to test the gate on a commit" >&2
+                exit 1
+              fi
+              release=true
+            fi
+            if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::sha must be a full 40-character commit SHA, got '$sha'" >&2
+              exit 1
+            fi
+            # A 40-hex input is normally a commit. If the checkout holds the
+            # object and it is a tag, peel it. If the object is absent, the
+            # API must resolve the SHA as a commit.
+            if ! peeled="$(git rev-parse --verify --quiet "${sha}^{commit}")"; then
+              if ! peeled="$(gh api "repos/${REPO}/commits/${sha}" --jq .sha 2>/dev/null)"; then
+                echo "::error::${sha} is neither a tag nor a commit in ${REPO}" >&2
+                exit 1
+              fi
+            fi
+            sha="$peeled"
+          else
+            if ! sha="$(git rev-parse --verify --quiet "${GITHUB_SHA}^{commit}")"; then
+              echo "::error::cannot resolve ${GITHUB_SHA} to a commit; check out the tag" >&2
+              exit 1
+            fi
+            release=true
+          fi
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::the resolved commit must be a full 40-character SHA, got '$sha'" >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+      - name: collect the workflow history
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/gate"
+          mkdir -p "$dir"
+          # ci runs on a push to the commit, so head_sha selects it.
+          gh api --paginate --jq '.workflow_runs[]' \
+            "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" > "$dir/ci.ndjson"
+          # An e2e-stability dispatch can run on main while its run-name names
+          # the gated commit, so list the workflow's runs and let release-gate
+          # match head_sha or the exact sha=<40-hex> token. Fails closed when
+          # the API is unreadable.
+          gh api --paginate --jq '.workflow_runs[]' \
+            "repos/${REPO}/actions/workflows/e2e-stability.yml/runs?per_page=100" \
+            > "$dir/stability.ndjson"
+          cat "$dir/ci.ndjson" "$dir/stability.ndjson" > "$dir/candidates.ndjson"
+          jq -s . "$dir/candidates.ndjson" > "$dir/candidates.json"
+          # The list reports one entry per run with its latest attempt. When a
+          # successful attempt was followed by a failed rerun, the earlier
+          # success still gates the commit (#52). Read attempts 1..n-1 of every
+          # unsuccessful ci and e2e-stability run with more than one attempt.
+          # The stability selector here is a superset; release-gate applies the
+          # exact head_sha/run-name match.
+          : > "$dir/attempts.ndjson"
+          while IFS=' ' read -r id attempt conclusion; do
+            for ((n = 1; n < attempt; n++)); do
+              gh api "repos/${REPO}/actions/runs/${id}/attempts/${n}" >> "$dir/attempts.ndjson"
+            done
+          done < <(jq -r --arg sha "$SHA" '
+            .[] | select(.run_attempt > 1 and .conclusion != "success")
+            | select(
+                (.name == "ci" or ((.path // "") | endswith("/ci.yml")))
+                or (((.name == "e2e-stability") or ((.path // "") | endswith("/e2e-stability.yml")))
+                    and (.head_sha == $sha or ((.display_title // "") | contains($sha))))
+              )
+            | "\(.id) \(.run_attempt) \(.conclusion)"' "$dir/candidates.json")
+          jq -s . "$dir/candidates.ndjson" "$dir/attempts.ndjson" > "$dir/runs.json"
+          # Jobs are needed for a stability run only: the job names carry the
+          # `runs` input (e2e (1/bbolt) to e2e (20/redis)).
+          : > "$dir/jobs.ndjson"
+          while IFS= read -r id; do
+            gh api --paginate --jq '.jobs[]' \
+              "repos/${REPO}/actions/runs/${id}/jobs?filter=all&per_page=100" \
+              >> "$dir/jobs.ndjson"
+          done < <(jq -r --arg sha "$SHA" '
+            .[] | select(.name == "e2e-stability" or ((.path // "") | endswith("/e2e-stability.yml")))
+            | select(.head_sha == $sha or ((.display_title // "") | contains($sha)))
+            | .id' "$dir/candidates.json" | sort -u)
+          jq -s . "$dir/jobs.ndjson" > "$dir/jobs.json"
+      - name: decide
+        run: |
+          set -o pipefail
+          go run ./hack/release-gate \
+            -sha "${{ steps.target.outputs.sha }}" \
+            -runs "$RUNNER_TEMP/gate/runs.json" \
+            -jobs "$RUNNER_TEMP/gate/jobs.json" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  goreleaser:
+    name: goreleaser
+    runs-on: ubuntu-latest
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
     permissions:
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -28,6 +179,12 @@ jobs:
             echo "::error::Go $v is older than 1.27.4 (GO-2026-6859)"
             exit 1
           fi
+      - uses: sigstore/cosign-installer@v4.1.3
+        with:
+          cosign-release: v3.1.4
+      # .goreleaser.yaml signs checksums.txt with cosign and creates the
+      # GitHub release as a draft. The publish job makes it public only after
+      # the images, chart, and signatures exist.
       - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
@@ -36,14 +193,17 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Builds, scans, tags, then signs each image. Keyless signing uses the
+  # Builds, scans, signs, then tags each image. Keyless signing uses the
   # workflow's GitHub OIDC identity, so a signature proves which workflow and
   # tag built the image. The build pushes the manifest by digest without a
-  # tag. Trivy scans both architectures, and only a clean scan creates the
-  # version tags. A failed scan therefore leaves no tag and nothing signed;
-  # the untagged manifest is not a release artifact.
+  # tag. Trivy scans both architectures. Only a clean scan signs the digest,
+  # and only a signed digest gets the version tags, so a failed scan or
+  # signature leaves no tag. The untagged manifest is not a release artifact.
   images:
+    name: images (${{ matrix.image }})
     runs-on: ubuntu-latest
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
     permissions:
       contents: read
       packages: write
@@ -88,8 +248,8 @@ jobs:
           file: ./Dockerfile
           target: ${{ matrix.target }}
           platforms: linux/amd64,linux/arm64
-          # Push the manifest and layers by digest without a tag. The tag
-          # step below runs only after a clean scan.
+          # Push the manifest and layers by digest without a tag. The sign and
+          # tag steps below run only after a clean scan.
           outputs: type=image,name=${{ steps.image-name.outputs.value }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
@@ -123,7 +283,16 @@ jobs:
           echo "::error::Trivy found a HIGH or CRITICAL vulnerability with a fix in ${IMAGE}@${DIGEST}."
           echo "::error::No version tag was created and nothing was signed. The untagged manifest is not a release artifact."
           exit 1
-      - name: tag
+      - uses: sigstore/cosign-installer@v4.1.3
+        with:
+          cosign-release: v3.1.4
+      - name: sign the digest
+        env:
+          IMAGE: ${{ steps.image-name.outputs.value }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+      - name: tag the signed digest
         env:
           IMAGE: ${{ steps.image-name.outputs.value }}
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -136,19 +305,12 @@ jobs:
             fi
           done <<< "$TAGS"
           docker buildx imagetools create "${args[@]}" "${IMAGE}@${DIGEST}"
-      - uses: sigstore/cosign-installer@v4.1.3
-        with:
-          cosign-release: v3.1.4
-      - name: sign
-        env:
-          IMAGE: ${{ steps.image-name.outputs.value }}
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          cosign sign --yes "${IMAGE}@${DIGEST}"
 
   chart:
+    name: chart
     runs-on: ubuntu-latest
-    needs: [goreleaser, images]
+    needs: [gate, goreleaser, images]
+    if: needs.gate.outputs.release == 'true'
     permissions:
       contents: write
       packages: write
@@ -192,3 +354,46 @@ jobs:
         run: |
           owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
           cosign sign --yes "ghcr.io/${owner}/charts/mayfly@${DIGEST}"
+
+  # The release is a draft until every artifact exists. This job runs only
+  # when goreleaser, both images, and the chart succeeded, so a failed scan,
+  # signature, or chart push leaves the GitHub release as a draft.
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    needs: [gate, goreleaser, images, chart]
+    if: needs.gate.outputs.release == 'true'
+    permissions:
+      contents: write
+    steps:
+      - name: publish the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          state="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')"
+          case "$state" in
+            true|false) ;;
+            *)
+              echo "::error::could not read the draft state of $GITHUB_REF_NAME (got '$state')" >&2
+              exit 1
+              ;;
+          esac
+          # An RC tag contains `-` and must not take the latest marker; a final
+          # tag must. --latest=false is explicit so a rerun of publish cannot
+          # leave an RC marked latest.
+          latest=false
+          if [[ "$GITHUB_REF_NAME" != *-* ]]; then
+            latest=true
+          fi
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest="$latest"
+          state="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')"
+          if [[ "$state" != "false" ]]; then
+            echo "::error::$GITHUB_REF_NAME is still a draft" >&2
+            exit 1
+          fi
+          marked="$(gh release view "$GITHUB_REF_NAME" --json isLatest --jq '.isLatest')"
+          if [[ "$marked" != "$latest" ]]; then
+            echo "::error::$GITHUB_REF_NAME has isLatest=$marked, want $latest" >&2
+            exit 1
+          fi
+          echo "published $GITHUB_REF_NAME (latest=$latest)"
