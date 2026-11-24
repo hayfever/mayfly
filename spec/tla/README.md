@@ -15,7 +15,10 @@ daylight-saving transition: the spring-forward fire at the transition instant,
 the single fall-back fire at the first occurrence, and slot keys as UTC
 instants. `ReleaseGating.tla` models the release pipeline: the gate, the draft
 GitHub release, the image scan, signature, and tag order, the chart, the final
-publish, and the rule that an RC never takes the `latest` marker. A cfg runs
+publish, and the rule that an RC never takes the `latest` marker.
+`TokenBudget.tla` models a per-session LLM token budget: the admit check, the
+in-flight cap, the durable reservation, the charge, the exhaustion close, and
+the recovery that seeds the counter from the session record. A cfg runs
 the module named by its basename up to the first underscore, so
 `HubRetention_evict_inbox_buggy.cfg` runs `HubRetention.tla`.
 [formal-verification.md](../../docs/formal-verification.md) maps each action to
@@ -41,10 +44,12 @@ temporary directory, never into the repository.
 
 - `SessionResume.cfg`, `HubRetention.cfg`, `BodyReadDeadline.cfg`,
   `QueuePoison.cfg`, `AuthHardening.cfg`, `CronTimezone.cfg`,
-  `CronTimezone_fall.cfg`, and `ReleaseGating.cfg` are the positive
+  `CronTimezone_fall.cfg`, `ReleaseGating.cfg`, `TokenBudget.cfg`, and
+  `TokenBudget_crash.cfg` are the positive
   configurations.
-  Each must pass with no invariant violation; `SessionResume.cfg` and
-  `QueuePoison.cfg` must also prove their liveness properties.
+  Each must pass with no invariant violation; `SessionResume.cfg`,
+  `QueuePoison.cfg`, `TokenBudget.cfg`, and `TokenBudget_crash.cfg` must
+  also prove their liveness properties.
 - A configuration whose file name ends in `_buggy.cfg` is a negative check. It
   must produce an invariant violation, not a pass and not a parse error. The
   invariant name is in a comment line:
@@ -107,6 +112,13 @@ which runs only in the nightly `tlc-deep` job.
 | `ReleaseGating_draft_false_buggy.cfg` | `DraftUntilComplete = FALSE`: the release is public before the images, chart, and signatures exist |
 | `ReleaseGating_tag_before_sign_buggy.cfg` | `SignBeforeTag = FALSE`: an image tag names an unsigned digest |
 | `ReleaseGating_rc_latest_buggy.cfg` | `LatestPrerelease = TRUE`: publish marks a release candidate as `latest` |
+| `TokenBudget.cfg` | Admit below budget, one call in flight, charges and reservations persisted; proves that reaching the budget closes the session |
+| `TokenBudget_crash.cfg` | The same with two control-plane crashes, positive |
+| `TokenBudget_no_inflight_cap_buggy.cfg` | `InflightCap = 2`: two calls admitted at `Budget - 1` exceed the budget by two responses |
+| `TokenBudget_check_after_buggy.cfg` | `CheckBefore = FALSE`: the counter is tested after the charge, so a call is admitted over budget |
+| `TokenBudget_volatile_counter_buggy.cfg` | `PersistCharge = FALSE`: a restart loses every settled charge |
+| `TokenBudget_no_pending_buggy.cfg` | `DurablePending = FALSE`: a charge in flight has no durable coverage |
+| `deep/TokenBudget_three_callers.cfg` | Nightly only: three callers, budget 16, two crashes; safety invariants (4,894 distinct states) |
 | `deep/SessionResume_two_sessions.cfg` | Nightly only: two sessions, one turn each, one shared control-plane restart; safety invariants (6,127,026 distinct states, about 10.5 minutes with `-workers auto`) |
 
 `HubRetention.cfg` runs eight appends over sizes `{1, 2, 3}` and human posts over
@@ -132,6 +144,13 @@ named in its `expect-violation` line.
 one-hour transition, and one scheduled civil minute. Each holds 8 generated
 states (4 distinct) and stops in under a second. Each negative cfg stops after
 4 states (3 distinct) on the invariant named in its `expect-violation` line.
+
+`TokenBudget.cfg` holds 31 distinct states (92 generated) in under a second
+and proves `ClosedAfterExhaust`; `TokenBudget_crash.cfg` holds 249 (748
+generated). The negative cfgs stop on the invariant named in their
+`expect-violation` line: no-in-flight-cap 73 (222 generated), check-after 45
+(123), volatile-counter 39 (76), and no-pending 11 (14). The nightly
+three-caller cfg holds 4,894 (15,153 generated).
 
 `ReleaseGating.cfg` is the smallest model: the positive run holds 134
 generated states (52 distinct) in under a second. Its `prerelease` variable
