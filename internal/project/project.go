@@ -41,9 +41,6 @@ const (
 	DefaultTTL = 30 * time.Minute
 	// MaxTTL bounds a schedule's session lifetime.
 	MaxTTL = 24 * time.Hour
-	// DefaultTimezone is the canonical zone for a schedule without a
-	// timezone field. "UTC" and "Etc/UTC" both resolve to it.
-	DefaultTimezone = "Etc/UTC"
 )
 
 // resolveTimezone validates an optional IANA zone name. An empty name is the
