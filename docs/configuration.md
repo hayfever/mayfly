@@ -112,6 +112,7 @@ human message is at most 32 KiB, so keep `inbox_buffer_bytes` above that value.
 | `timeout` | `180s` | Time allowed for the upstream connection and response headers. A stalled provider is dropped at this point; streamed bodies continue until the session disconnects |
 | `headers` | `{}` | Extra upstream headers |
 | `max_body_bytes` | `16777216` | Maximum broker request size |
+| `tool_result_images` | `true` | The provider accepts image content parts in tool messages. Set `false` for a text-only model; the runtime then sends a labeled placeholder and reports `images_omitted` |
 
 For multiple providers, point `base_url` at LiteLLM and use its model aliases. See [providers.md](providers.md).
 
@@ -349,6 +350,17 @@ mcp:
 | `idempotent_tools` | Tools that are safe to repeat after a container restart. Empty means every tool is non-idempotent. Must be a subset of `tools` when `tools` is set |
 
 HTTP server URLs in session configuration point at the control plane proxy. Session pods never see the upstream URL or its headers.
+
+Image content in tool results is bounded at three scopes, and one gateway request is bounded separately:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `mcp.max_image_bytes` | `5242880` | One image. A larger image is rejected with an error result |
+| `mcp.max_result_image_bytes` | `5242880` | All images in one tool result. Must be at least `max_image_bytes` |
+| `mcp.max_session_image_bytes` | `8388608` | All images one session may deliver. Must be at least `max_image_bytes` |
+| `mcp.max_request_bytes` | `16777216` | One tool gateway request body. Must fit one result after base64 expansion |
+
+A zero value applies the default; it never means unlimited. Startup fails when the limits cannot fit the configured journal entry or request body. See [mcp-and-skills.md](mcp-and-skills.md#image-tool-results).
 
 With the built-in harness, every `mcp_*` tool call goes through the tool gateway, which records it in the ledger and writes the call audit record. `* /internal/v1/mcp/{server}` remains for alternate harnesses. See [mcp-and-skills.md](mcp-and-skills.md#tool-calls-through-the-gateway).
 

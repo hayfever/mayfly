@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hayfever/mayfly/internal/content"
 	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/llm"
@@ -61,6 +62,11 @@ type Runtime struct {
 	// then exits without finalizing so the control plane starts a replacement
 	// that resumes from the journal.
 	fatalCh chan error
+
+	// imageMu guards imagesBudget, which is initialized from the conversation
+	// on first use and then charged for every image the model may see.
+	imageMu      sync.Mutex
+	imagesBudget *content.Budget
 }
 
 // New prepares a runtime. It does not start any network or process activity.
@@ -98,18 +104,19 @@ func New(cfg sessioncfg.Config, token string, logger *slog.Logger) (*Runtime, er
 		return nil, err
 	}
 	return &Runtime{
-		cfg:      cfg,
-		token:    token,
-		logger:   logger,
-		platform: platform,
-		gateway:  platform,
-		llm:      llm.New(cfg.LLMBaseURL, token, cfg.Model),
-		conv:     conv,
-		journal:  platform,
-		trace:    trace,
-		events:   events,
-		system:   systemPrompt(cfg),
-		fatalCh:  make(chan error, 1),
+		cfg:          cfg,
+		token:        token,
+		logger:       logger,
+		platform:     platform,
+		gateway:      platform,
+		llm:          llm.New(cfg.LLMBaseURL, token, cfg.Model),
+		conv:         conv,
+		journal:      platform,
+		trace:        trace,
+		events:       events,
+		system:       systemPrompt(cfg),
+		fatalCh:      make(chan error, 1),
+		imagesBudget: content.NewBudget(cfg.ContentLimits().MaxSessionImageBytes, conv.ImageBytes()),
 	}, nil
 }
 
@@ -123,7 +130,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 		"plugins", len(r.cfg.Plugins),
 	)
 
-	r.mcp = mcp.Start(ctx, r.cfg.MCPServers, r.logger)
+	r.mcp = mcp.Start(ctx, r.cfg.MCPServers, r.logger, r.cfg.ContentLimits())
 	for _, err := range r.mcp.Errors() {
 		r.events.Emit(ctx, model.EventSystem, "mayfly", "MCP server unavailable: "+err.Error(), nil)
 	}
@@ -778,7 +785,8 @@ func (r *Runtime) executeTool(ctx context.Context, turn int64, step int, call ll
 	if err != nil {
 		return stepRun{}, err
 	}
-	out := truncate(outcome.Content, maxToolOutput)
+	outcome, images, omitted := r.adjustToolResult(outcome)
+	out := outcome.Content
 	isErr := outcome.IsError
 	if outcome.Interrupted {
 		// The gateway refused to repeat a non-idempotent call that a restart
@@ -790,26 +798,33 @@ func (r *Runtime) executeTool(ctx context.Context, turn int64, step int, call ll
 		Actor: "agent",
 		Text:  truncate(out, 8<<10),
 		Data: model.ToolResultData{
-			Tool:        name,
-			CallID:      call.ID,
-			Error:       isErr,
-			Interrupted: outcome.Interrupted,
+			Tool:          name,
+			CallID:        call.ID,
+			Error:         isErr,
+			Interrupted:   outcome.Interrupted,
+			Images:        images,
+			ImagesOmitted: omitted,
 		},
 	}
 	r.trace.Write("tool_result", map[string]any{
-		"tool":        name,
-		"call_id":     call.ID,
-		"arguments":   args,
-		"is_error":    isErr,
-		"executed":    outcome.Executed,
-		"replayed":    outcome.Replayed,
-		"interrupted": outcome.Interrupted,
-		"output":      out,
-		"duration_ms": time.Since(started).Milliseconds(),
+		"tool":           name,
+		"call_id":        call.ID,
+		"arguments":      args,
+		"is_error":       isErr,
+		"executed":       outcome.Executed,
+		"replayed":       outcome.Replayed,
+		"interrupted":    outcome.Interrupted,
+		"images":         images,
+		"images_omitted": omitted,
+		"output":         out,
+		"duration_ms":    time.Since(started).Milliseconds(),
 	})
-	msg := llm.Message{Role: "tool", ToolCallID: call.ID, Content: out}
+	msg := llm.Message{Role: "tool", ToolCallID: call.ID, Content: out, Parts: outcome.Parts}
 	if isErr && !strings.HasPrefix(out, "ERROR:") {
 		msg.Content = "ERROR: " + out
+		if len(msg.Parts) > 0 {
+			msg.Parts = append([]content.Part{content.TextPart("ERROR:")}, msg.Parts...)
+		}
 	}
 	raw, err := json.Marshal(toolStepOutput{
 		Message:     msg,
@@ -827,6 +842,75 @@ func (r *Runtime) executeTool(ctx context.Context, turn int64, step int, call ll
 		errMsg = truncate(msg.Content, 2<<10)
 	}
 	return stepRun{name: "tool:" + name, message: msg, output: raw, errMsg: errMsg}, nil
+}
+
+// adjustToolResult enforces the model's image capability and the session
+// budget, and caps text. Image bytes never pass through a text truncate. The
+// returned counts are the images the model will see and the images replaced
+// by a labeled placeholder.
+func (r *Runtime) adjustToolResult(res toolResult) (toolResult, int, int) {
+	if len(res.Parts) == 0 {
+		res.Content = truncate(res.Content, maxToolOutput)
+		return res, 0, 0
+	}
+	limits := r.cfg.ContentLimits()
+	parts, bytes, rejected := content.Sanitize(res.Parts, limits)
+	if rejected {
+		res.IsError = true
+	}
+	if !content.HasImage(parts) {
+		res.Content = truncate(content.Text(parts), maxToolOutput)
+		res.Parts = nil
+		return res, 0, 0
+	}
+	images := content.ImageCount(parts)
+	if !r.cfg.ModelAcceptsImages() {
+		parts = content.WithoutImages(parts, "the assigned model does not accept image content")
+		res.Content = truncate(content.Text(parts), maxToolOutput)
+		res.Parts = nil
+		return res, 0, images
+	}
+	if !r.imageBudget().Accept(bytes) {
+		parts = content.WithoutImages(parts, fmt.Sprintf(
+			"the session image limit of %d bytes is reached", limits.MaxSessionImageBytes))
+		res.Content = truncate(content.Text(parts), maxToolOutput)
+		res.Parts = nil
+		res.IsError = true
+		return res, 0, images
+	}
+	parts = content.TruncateText(parts, maxToolOutput)
+	res.Parts = parts
+	res.Content = truncate(content.Text(parts), maxToolOutput)
+	return res, content.ImageCount(parts), 0
+}
+
+// imageBudget returns the session image budget, initializing it from the
+// conversation for a runtime a test built without New.
+func (r *Runtime) imageBudget() *content.Budget {
+	r.imageMu.Lock()
+	defer r.imageMu.Unlock()
+	if r.imagesBudget == nil {
+		r.imagesBudget = r.conversationImageBudget()
+	}
+	return r.imagesBudget
+}
+
+// resetImageBudget recomputes the budget from the conversation after a
+// truncation. The budget counts stored bytes, so removed images free room.
+func (r *Runtime) resetImageBudget() {
+	r.imageMu.Lock()
+	defer r.imageMu.Unlock()
+	r.imagesBudget = r.conversationImageBudget()
+}
+
+// conversationImageBudget builds a budget charged for the images already in
+// the conversation. The caller holds imageMu.
+func (r *Runtime) conversationImageBudget() *content.Budget {
+	used := int64(0)
+	if r.conv != nil {
+		used = r.conv.ImageBytes()
+	}
+	return content.NewBudget(r.cfg.ContentLimits().MaxSessionImageBytes, used)
 }
 
 // prepareResume truncates a partially applied conversation and returns the
@@ -865,6 +949,8 @@ func (r *Runtime) prepareResume(ctx context.Context) (int64, *model.Event, error
 		if err := r.conv.Truncate(lastConv); err != nil {
 			return 0, nil, err
 		}
+		// The budget counts stored bytes, so it must follow the truncation.
+		r.resetImageBudget()
 	}
 	r.logger.Info("resuming journaled turn", "turn", last, "steps", len(entries), "conversation_bytes", r.conv.Size())
 	return last - 1, &ev, nil

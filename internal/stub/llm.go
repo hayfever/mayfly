@@ -53,9 +53,40 @@ type llmToolCall struct {
 	Function llmFunctionCall `json:"function"`
 }
 
+// llmContent accepts either a string or an array of content parts, as a
+// multimodal request carries. It keeps only the text.
+type llmContent struct {
+	text string
+}
+
+func (c *llmContent) UnmarshalJSON(raw []byte) error {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		c.text = text
+		return nil
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return err
+	}
+	var b strings.Builder
+	for _, part := range parts {
+		if part.Type == "text" {
+			b.WriteString(part.Text)
+		}
+	}
+	c.text = b.String()
+	return nil
+}
+
+func (c llmContent) MarshalJSON() ([]byte, error) { return json.Marshal(c.text) }
+
 type llmMessage struct {
 	Role       string        `json:"role"`
-	Content    string        `json:"content"`
+	Content    llmContent    `json:"content"`
 	ToolCalls  []llmToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string        `json:"tool_call_id,omitempty"`
 }
@@ -98,7 +129,7 @@ func handleLLM(w http.ResponseWriter, r *http.Request) {
 	firstUser := ""
 	for _, msg := range req.Messages {
 		if msg.Role == "user" && firstUser == "" {
-			firstUser = msg.Content
+			firstUser = msg.Content.text
 		}
 		for _, call := range msg.ToolCalls {
 			callNames[call.ID] = call.Function.Name
@@ -171,7 +202,7 @@ func handleLLM(w http.ResponseWriter, r *http.Request) {
 		writeLLMStream(w, req.Model, calls, content, finish)
 		return
 	}
-	msg := llmMessage{Role: "assistant", Content: content, ToolCalls: calls}
+	msg := llmMessage{Role: "assistant", Content: llmContent{text: content}, ToolCalls: calls}
 	writeStubJSON(w, map[string]any{
 		"id":      "chatcmpl-stub",
 		"object":  "chat.completion",

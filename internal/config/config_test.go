@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/hayfever/mayfly/internal/content"
 )
 
 func TestLoadExampleLocal(t *testing.T) {
@@ -842,5 +844,59 @@ func TestBodyReadTimeoutDefaults(t *testing.T) {
 	cfg.applyDefaults()
 	if got := cfg.Server.BodyReadTimeout.Std(); got != DefaultBodyReadTimeout {
 		t.Fatalf("zero body read timeout = %s, want the default", got)
+	}
+}
+
+func TestMCPImageLimits(t *testing.T) {
+	cfg := Default()
+	if cfg.MCP.ContentLimits().MaxImageBytes != content.DefaultMaxImageBytes ||
+		cfg.MCP.ContentLimits().MaxResultImageBytes != content.DefaultMaxResultImageBytes ||
+		cfg.MCP.ContentLimits().MaxSessionImageBytes != content.DefaultMaxSessionImageBytes {
+		t.Fatalf("defaults = %+v", cfg.MCP)
+	}
+	if cfg.MCP.RequestBytes() != 16<<20 {
+		t.Fatalf("request bytes = %d", cfg.MCP.RequestBytes())
+	}
+
+	cfg = Default()
+	cfg.MCP.MaxImageBytes = 0
+	cfg.MCP.MaxResultImageBytes = 0
+	cfg.MCP.MaxSessionImageBytes = 0
+	cfg.MCP.MaxRequestBytes = 0
+	cfg.applyDefaults()
+	if cfg.MCP.MaxImageBytes != content.DefaultMaxImageBytes ||
+		cfg.MCP.MaxResultImageBytes != content.DefaultMaxResultImageBytes ||
+		cfg.MCP.MaxSessionImageBytes != content.DefaultMaxSessionImageBytes ||
+		cfg.MCP.MaxRequestBytes != 16<<20 {
+		t.Fatalf("zero limits were not defaulted: %+v", cfg.MCP)
+	}
+
+	for name, mutate := range map[string]func(*Config){
+		"result below image": func(c *Config) { c.MCP.MaxResultImageBytes = c.MCP.MaxImageBytes - 1 },
+		"session below image": func(c *Config) {
+			c.MCP.MaxSessionImageBytes = c.MCP.MaxImageBytes - 1
+		},
+		"request too small": func(c *Config) { c.MCP.MaxRequestBytes = 1024 },
+		"journal entry too small": func(c *Config) {
+			c.Journal.MaxEntryBytes = 1024
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := Default()
+			mutate(cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("expected a validation error")
+			}
+		})
+	}
+}
+
+func TestToolResultImagesDefault(t *testing.T) {
+	if !Bool(nil, true) {
+		t.Fatal("nil must mean true")
+	}
+	cfg := Default()
+	if cfg.LLM.ToolResultImages != nil {
+		t.Fatalf("unexpected default: %v", *cfg.LLM.ToolResultImages)
 	}
 }

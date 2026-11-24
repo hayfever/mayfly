@@ -1265,6 +1265,12 @@ components:
           type: boolean
         interrupted:
           type: boolean
+        images:
+          type: integer
+          description: Image parts the model receives in this tool result.
+        images_omitted:
+          type: integer
+          description: Image parts replaced by a labeled text placeholder because the model does not accept image content.
     StatusEventData:
       type: object
       description: Payload of a `status` event.

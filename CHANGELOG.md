@@ -16,6 +16,8 @@ All notable changes are recorded here. The project follows semantic versioning o
 - `spec/tla/BodyReadDeadline.tla` checks that a stalled request body cannot keep a handler waiting past the read deadline (#48).
 - `spec/tla/HubRetention.tla` checks the per-event cap, the thread and inbox byte budgets, the contiguous retained suffix, the inbox exemption and byte and count caps, and the dedup-key table. `hack/tlc.sh` runs a cfg's module by its basename prefix, and five `_buggy.cfg` files prove the invariants bite (#44).
 
+- MCP tool results keep `image` content blocks and pass them to the model as provider content parts, for a model that accepts them. Text and image parts travel through the tool gateway ledger, the runtime conversation, and the artifact bundle. `mcp.max_image_bytes` (5 MiB), `mcp.max_result_image_bytes` (5 MiB), and `mcp.max_session_image_bytes` (8 MiB) bound the content, and only PNG, JPEG, GIF, and WebP are accepted. An invalid or oversized image becomes a visible error result instead of an omit placeholder. `llm.tool_result_images` (default true) declares provider support; when false, each image becomes a labeled placeholder and the `tool_result` event reports `images_omitted`. Audit records and traces never contain image bytes. Audio has no supported tool-result content part and remains a labeled placeholder (#71).
+
 ### Fixed
 
 - A client that sends headers and then stalls the request body no longer pins a handler goroutine and connection. The handler sets a read deadline, answers `408 request_timeout`, and closes the connection. This covers `/api/v1` JSON bodies, `/hooks/{name}`, and the internal JSON endpoints; WebSocket attach, streams, the LLM proxy, and artifact uploads keep their own behavior (#48).

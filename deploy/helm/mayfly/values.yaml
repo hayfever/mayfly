@@ -149,6 +149,10 @@ config:
     model: gpt-4.1-mini
     allow_models: [gpt-4.1-mini]
     timeout: 180s
+    # Set false when the provider rejects image content parts in tool
+    # messages. The runtime then replaces each image with a labeled text
+    # placeholder and reports images_omitted on the tool_result event.
+    tool_result_images: true
   artifacts:
     store: local
     local:
@@ -196,6 +200,13 @@ config:
     max_inflight_calls: 256
   mcp:
     servers: []
+    # Image content in MCP tool results. Each key is a byte count; zero uses
+    # the built-in default. A result over a limit is recorded as an error,
+    # never truncated mid-image.
+    max_image_bytes: 5242880
+    max_result_image_bytes: 5242880
+    max_session_image_bytes: 8388608
+    max_request_bytes: 16777216
   triggers: []
 
 skills:

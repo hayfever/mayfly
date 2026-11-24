@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/hayfever/mayfly/internal/content"
 )
 
 // BeginRequest is one runtime request to call a granted tool. Arguments are
@@ -31,17 +33,22 @@ type BeginRequest struct {
 type CompleteRequest struct {
 	Key     string `json:"key"`
 	Content string `json:"content"`
-	IsError bool   `json:"is_error,omitempty"`
+	// Parts carries structured output, including image data. It is present
+	// only when the result has image parts.
+	Parts   []content.Part `json:"parts,omitempty"`
+	IsError bool           `json:"is_error,omitempty"`
 }
 
 // Result is a recorded tool result. Replayed marks a result the ledger
 // already held; Interrupted marks a non-idempotent call a container restart
 // cut short, which the gateway did not run again.
 type Result struct {
-	Content     string `json:"content"`
-	IsError     bool   `json:"is_error"`
-	Replayed    bool   `json:"replayed"`
-	Interrupted bool   `json:"interrupted"`
+	Content string `json:"content"`
+	// Parts carries structured output, including image data.
+	Parts       []content.Part `json:"parts,omitempty"`
+	IsError     bool           `json:"is_error"`
+	Replayed    bool           `json:"replayed"`
+	Interrupted bool           `json:"interrupted"`
 }
 
 // Dispatch tells the runtime to call a local tool itself. Key is the ledger

@@ -40,6 +40,11 @@ type ToolResultData struct {
 	CallID      string `json:"call_id"`
 	Error       bool   `json:"error"`
 	Interrupted bool   `json:"interrupted,omitempty"`
+	// Images counts the image parts the model receives.
+	Images int `json:"images,omitempty"`
+	// ImagesOmitted counts the image parts replaced by a labeled text
+	// placeholder because the model does not accept image content.
+	ImagesOmitted int `json:"images_omitted,omitempty"`
 }
 
 // StatusData describes a session lifecycle change.

@@ -418,8 +418,8 @@ type delayedLedger struct {
 	hold time.Duration
 }
 
-func (l *delayedLedger) Complete(ctx context.Context, session, key, content string, isError, interrupted bool) (journal.Call, error) {
-	rec, err := l.Ledger.Complete(ctx, session, key, content, isError, interrupted)
+func (l *delayedLedger) Complete(ctx context.Context, session, key string, result journal.Result) (journal.Call, error) {
+	rec, err := l.Ledger.Complete(ctx, session, key, result)
 	if err == nil && l.hold > 0 {
 		time.Sleep(l.hold)
 	}

@@ -188,6 +188,44 @@ and keep the old behavior.
 
 `run_command` is not a sandbox. The container is the boundary.
 
+## Image tool results
+
+A `tools/call` result keeps its `text` and `image` content blocks. An image
+reaches the model as a provider content part, for a model that accepts one.
+The gateway and the runtime enforce these bounds:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `mcp.max_image_bytes` | `5242880` | One image. An image over the limit is rejected with an error result |
+| `mcp.max_result_image_bytes` | `5242880` | All images in one tool result. This keeps the base64 form under the default journal step bound |
+| `mcp.max_session_image_bytes` | `8388608` | All images one session may deliver. This keeps a model request under the default `llm.max_body_bytes` after base64 expansion |
+| `mcp.max_request_bytes` | `16777216` | One tool gateway request body, including the complete report of a local call |
+
+Only `image/png`, `image/jpeg`, `image/gif`, and `image/webp` are accepted.
+Missing or invalid base64, a disallowed type, and an image over a limit become
+a text error part, and the result is marked an error. The gateway admits the
+images before it records the call, so an over-budget result never lands in the
+ledger or the conversation.
+
+The gateway stores image parts in its ledger under the call key, so a resume
+replays the result. The runtime stores them in `conversation.jsonl`, which
+travels in the artifact bundle, so a later turn and a resumed turn still send
+the image. The gateway's per-session admission count is in memory and starts
+empty after a control-plane restart; the runtime recomputes its own count from
+the conversation, so the model-visible bound survives. The tool_result event text and the trace log carry only the MIME
+type, byte size, and SHA-256 of each image, never the bytes. The gateway audit
+record still has no result field.
+
+`llm.tool_result_images` (default `true`) declares that the assigned provider
+accepts image content parts in a tool message. Set it to `false` for a
+text-only model. The runtime then replaces each image with a labeled text
+placeholder and sets `images_omitted` on the tool_result event; it never
+pretends the model saw the image.
+
+Audio has no tool-result content part in the OpenAI-style client, so an audio
+block becomes a labeled placeholder that names its type and size. It is not
+sent to a provider.
+
 ## Protocol support
 
-Implemented MCP features: `initialize`, `notifications/initialized`, `tools/list` with pagination, `tools/call`, and `ping`. Sampling, roots, resources, prompts, and server-initiated requests are not implemented. Tool content is flattened to text; image and audio blocks are replaced with a placeholder.
+Implemented MCP features: `initialize`, `notifications/initialized`, `tools/list` with pagination, `tools/call`, and `ping`. Sampling, roots, resources, prompts, and server-initiated requests are not implemented. Resource and unknown content blocks are flattened to their JSON text.

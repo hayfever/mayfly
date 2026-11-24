@@ -236,7 +236,7 @@ func TestCallRefusesUngrantedMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ts.Close()
-	if _, _, err := ts.Call(context.Background(), "mcp_linear_search", json.RawMessage(`{}`)); err == nil {
+	if _, err := ts.Call(context.Background(), "mcp_linear_search", json.RawMessage(`{}`)); err == nil {
 		t.Fatal("an ungranted MCP tool was called")
 	} else if !strings.Contains(err.Error(), "not granted") {
 		t.Fatalf("error = %v", err)

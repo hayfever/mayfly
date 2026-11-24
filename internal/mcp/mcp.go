@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/hayfever/mayfly/internal/content"
 	"github.com/hayfever/mayfly/internal/version"
 )
 
@@ -59,6 +61,7 @@ type Client struct {
 	transport transport
 	nextID    int64
 	mu        sync.Mutex
+	limits    content.Limits
 }
 
 // Tool is a tool exposed by an MCP server.
@@ -165,7 +168,34 @@ func (c *Client) ListTools(ctx context.Context) ([]Tool, error) {
 	return out, nil
 }
 
-// CallTool invokes a tool and flattens its content into text.
+// ToolResult is one tools/call result. Parts preserves text and image blocks
+// in order. Text is the only rendering that leaves for a log or a text-only
+// caller.
+type ToolResult struct {
+	Parts   []content.Part
+	IsError bool
+}
+
+// Text renders the result as newline-joined text. Image parts become a line
+// with their type, size, and digest, never their bytes.
+func (r ToolResult) Text() string { return content.Text(r.Parts) }
+
+// HasImage reports whether the result carries image content.
+func (r ToolResult) HasImage() bool { return content.HasImage(r.Parts) }
+
+// TextResult returns a text-only result.
+func TextResult(text string, isError bool) ToolResult {
+	return ToolResult{Parts: []content.Part{content.TextPart(text)}, IsError: isError}
+}
+
+// SetContentLimits bounds the image content this client accepts. A zero limit
+// uses the content package defaults.
+func (c *Client) SetContentLimits(limits content.Limits) {
+	c.limits = limits.WithDefaults()
+}
+
+// CallTool invokes a tool and flattens its content into text. A caller that
+// must forward images uses CallToolResult.
 func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage) (string, bool, error) {
 	out, isErr, _, err := c.CallToolMeta(ctx, name, args, nil)
 	return out, isErr, err
@@ -175,6 +205,19 @@ func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage
 // when meta is nil. The returned id is the JSON-RPC id of the request, which
 // Cancel accepts.
 func (c *Client) CallToolMeta(ctx context.Context, name string, args json.RawMessage, meta map[string]any) (string, bool, int64, error) {
+	res, id, err := c.CallToolResultMeta(ctx, name, args, meta)
+	return res.Text(), res.IsError, id, err
+}
+
+// CallToolResult invokes a tool and returns its structured content.
+func (c *Client) CallToolResult(ctx context.Context, name string, args json.RawMessage) (ToolResult, error) {
+	res, _, err := c.CallToolResultMeta(ctx, name, args, nil)
+	return res, err
+}
+
+// CallToolResultMeta is CallToolResult with request metadata and the JSON-RPC
+// id Cancel accepts.
+func (c *Client) CallToolResultMeta(ctx context.Context, name string, args json.RawMessage, meta map[string]any) (ToolResult, int64, error) {
 	if len(args) == 0 {
 		args = json.RawMessage(`{}`)
 	}
@@ -187,7 +230,7 @@ func (c *Client) CallToolMeta(ctx context.Context, name string, args json.RawMes
 	}
 	raw, id, err := c.call(ctx, "tools/call", params)
 	if err != nil {
-		return "", false, id, err
+		return ToolResult{}, id, err
 	}
 	var result struct {
 		Content           []json.RawMessage `json:"content"`
@@ -195,36 +238,92 @@ func (c *Client) CallToolMeta(ctx context.Context, name string, args json.RawMes
 		IsError           bool              `json:"isError"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return "", false, id, fmt.Errorf("%s: decode tools/call: %w", c.name, err)
+		return ToolResult{}, id, fmt.Errorf("%s: decode tools/call: %w", c.name, err)
 	}
-	var parts []string
-	for _, item := range result.Content {
+	out := parseContent(result.Content, c.limits)
+	if len(result.StructuredContent) > 0 && string(result.StructuredContent) != "null" {
+		out.Parts = append(out.Parts, content.TextPart(string(result.StructuredContent)))
+	}
+	if len(out.Parts) == 0 {
+		out.Parts = append(out.Parts, content.TextPart(string(raw)))
+	}
+	out.IsError = result.IsError || out.IsError
+	return out, id, nil
+}
+
+// parseContent converts MCP content blocks into parts. An image that fails
+// the MIME, base64, or size rules becomes a text error and marks the result
+// an error: a caller must never see the bytes half-delivered. Audio has no
+// supported tool-result content part, so it becomes a labeled placeholder.
+func parseContent(items []json.RawMessage, limits content.Limits) ToolResult {
+	limits = limits.WithDefaults()
+	var out ToolResult
+	var images int64
+	for _, item := range items {
 		var block struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			MIMEType string `json:"mimeType"`
+			Data     string `json:"data"`
 		}
 		if err := json.Unmarshal(item, &block); err != nil {
-			parts = append(parts, string(item))
+			out.Parts = append(out.Parts, content.TextPart(string(item)))
 			continue
 		}
 		switch block.Type {
 		case "text":
-			parts = append(parts, block.Text)
-		case "image", "audio":
-			parts = append(parts, "["+block.Type+" content omitted]")
-		case "resource":
-			parts = append(parts, string(item))
+			out.Parts = append(out.Parts, content.TextPart(block.Text))
+		case "image":
+			part, reason := decodeImage(block.MIMEType, block.Data, limits, images)
+			if reason != "" {
+				out.Parts = append(out.Parts, content.TextPart("ERROR: tool result image was rejected: "+reason))
+				out.IsError = true
+				continue
+			}
+			images += int64(len(part.Data))
+			out.Parts = append(out.Parts, part)
+		case "audio":
+			size := int64(base64.StdEncoding.DecodedLen(len(block.Data)))
+			mime := block.MIMEType
+			if mime == "" {
+				mime = "unknown"
+			}
+			out.Parts = append(out.Parts, content.TextPart(fmt.Sprintf(
+				"[audio %s, ~%d bytes omitted: tool-result audio is not supported]", mime, size)))
 		default:
-			parts = append(parts, string(item))
+			out.Parts = append(out.Parts, content.TextPart(string(item)))
 		}
 	}
-	if len(result.StructuredContent) > 0 && string(result.StructuredContent) != "null" {
-		parts = append(parts, string(result.StructuredContent))
+	return out
+}
+
+// decodeImage validates one MCP image block and returns the part or the
+// reason it was rejected.
+func decodeImage(mime, data string, limits content.Limits, consumed int64) (content.Part, string) {
+	normalized, ok := content.NormalizeMIMEType(mime)
+	if normalized == "" {
+		return content.Part{}, "mimeType is missing"
 	}
-	if len(parts) == 0 {
-		parts = append(parts, string(raw))
+	if !ok {
+		return content.Part{}, fmt.Sprintf("%q is not an allowed MIME type (allowed: %s)",
+			mime, strings.Join(content.AllowedMIMETypes(), ", "))
 	}
-	return strings.Join(parts, "\n"), result.IsError, id, nil
+	if data == "" {
+		return content.Part{}, "data is missing"
+	}
+	raw, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return content.Part{}, "data is not valid base64"
+	}
+	part := content.ImagePart(normalized, raw)
+	if reason := content.ValidateImage(part, limits); reason != "" {
+		return content.Part{}, reason
+	}
+	if consumed+int64(len(raw)) > limits.MaxResultImageBytes {
+		return content.Part{}, fmt.Sprintf("images total %d bytes, over the %d-byte per-result limit",
+			consumed+int64(len(raw)), limits.MaxResultImageBytes)
+	}
+	return part, ""
 }
 
 // Cancel tells the server that it will not receive a result for the request

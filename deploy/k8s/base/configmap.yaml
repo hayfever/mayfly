@@ -82,6 +82,10 @@ data:
       dirs: [/etc/mayfly-skills]
     mcp:
       servers: []
+      max_image_bytes: 5242880
+      max_result_image_bytes: 5242880
+      max_session_image_bytes: 8388608
+      max_request_bytes: 16777216
     triggers:
       - name: generic
         type: generic

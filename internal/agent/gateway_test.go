@@ -62,6 +62,7 @@ type callOutcome struct {
 	run    stepRun
 	events []model.Event
 	tools  gateway.DiscoveryTool
+	trace  string
 }
 
 // runTool executes one tool step against the fake gateway and reads the local
@@ -112,7 +113,8 @@ func runTool(t *testing.T, gw *fakeGateway, dispatch localDispatch, call llm.Too
 		t.Fatalf("executeTool: %v", err)
 	}
 	_ = events.Close()
-	return callOutcome{run: run, events: readEvents(t, eventsPath), tools: grantedTool}
+	traceText, _ := os.ReadFile(filepath.Join(dir, "traces.jsonl"))
+	return callOutcome{run: run, events: readEvents(t, eventsPath), tools: grantedTool, trace: string(traceText)}
 }
 
 func readEvents(t *testing.T, path string) []model.Event {
@@ -160,12 +162,12 @@ func TestExecuteToolDispatch(t *testing.T) {
 	}
 	var gotKey, gotToken string
 	var gotArgs json.RawMessage
-	dispatch := func(_ context.Context, tool gateway.DiscoveryTool, args json.RawMessage, key, token string) (string, bool, error) {
+	dispatch := func(_ context.Context, tool gateway.DiscoveryTool, args json.RawMessage, key, token string) (toolResult, error) {
 		if tool.Name != grantedTool.Name {
 			t.Errorf("dispatched %q", tool.Name)
 		}
 		gotKey, gotToken, gotArgs = key, token, args
-		return `{"echo":"hi"}`, false, nil
+		return toolResult{Content: `{"echo":"hi"}`}, nil
 	}
 	out := runTool(t, gw, dispatch, echoCall())
 
@@ -206,9 +208,9 @@ func TestExecuteToolReplayed(t *testing.T) {
 			return gateway.BeginResponse{Result: &gateway.Result{Content: "cached", Replayed: true}}, nil
 		},
 	}
-	dispatch := func(context.Context, gateway.DiscoveryTool, json.RawMessage, string, string) (string, bool, error) {
+	dispatch := func(context.Context, gateway.DiscoveryTool, json.RawMessage, string, string) (toolResult, error) {
 		t.Error("a replayed result must not run the tool")
-		return "", false, nil
+		return toolResult{}, nil
 	}
 	out := runTool(t, gw, dispatch, echoCall())
 
@@ -236,9 +238,9 @@ func TestExecuteToolInterrupted(t *testing.T) {
 			}}, nil
 		},
 	}
-	dispatch := func(context.Context, gateway.DiscoveryTool, json.RawMessage, string, string) (string, bool, error) {
+	dispatch := func(context.Context, gateway.DiscoveryTool, json.RawMessage, string, string) (toolResult, error) {
 		t.Error("an interrupted result must not run the tool")
-		return "", false, nil
+		return toolResult{}, nil
 	}
 	out := runTool(t, gw, dispatch, echoCall())
 
@@ -320,8 +322,8 @@ func TestGatewayRetryBudget(t *testing.T) {
 				return gateway.BeginResponse{Dispatch: &gateway.Dispatch{Key: "s1/3/4", TimeoutMS: 1000}}, nil
 			},
 		}
-		dispatch := func(context.Context, gateway.DiscoveryTool, json.RawMessage, string, string) (string, bool, error) {
-			return "ok", false, nil
+		dispatch := func(context.Context, gateway.DiscoveryTool, json.RawMessage, string, string) (toolResult, error) {
+			return toolResult{Content: "ok"}, nil
 		}
 		out := runTool(t, gw, dispatch, echoCall())
 		if attempts != 3 {
@@ -359,8 +361,8 @@ func TestGatewayRetryBudget(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = tools.Close() })
 		r.tools = tools
-		r.dispatch = func(context.Context, gateway.DiscoveryTool, json.RawMessage, string, string) (string, bool, error) {
-			return "ok", false, nil
+		r.dispatch = func(context.Context, gateway.DiscoveryTool, json.RawMessage, string, string) (toolResult, error) {
+			return toolResult{Content: "ok"}, nil
 		}
 		_, err = r.executeTool(context.Background(), 3, 4, echoCall())
 		if err == nil || !isFatal(err) {

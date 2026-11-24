@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/hayfever/mayfly/internal/content"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
@@ -24,7 +25,7 @@ type Manager struct {
 
 // StartServer starts one configured stdio MCP server and lists its tools. An
 // HTTP server has no place here: the gateway owns its client.
-func StartServer(ctx context.Context, def sessioncfg.MCPServer, timeout time.Duration, logger *slog.Logger) (*Client, []Tool, error) {
+func StartServer(ctx context.Context, def sessioncfg.MCPServer, timeout time.Duration, logger *slog.Logger, limits content.Limits) (*Client, []Tool, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
@@ -40,6 +41,7 @@ func StartServer(ctx context.Context, def sessioncfg.MCPServer, timeout time.Dur
 	if err != nil {
 		return nil, nil, err
 	}
+	client.SetContentLimits(limits)
 	if err := client.Initialize(ctx); err != nil {
 		_ = client.Close()
 		return nil, nil, err
@@ -56,7 +58,7 @@ func StartServer(ctx context.Context, def sessioncfg.MCPServer, timeout time.Dur
 // Start connects all stdio servers sequentially. An HTTP entry is skipped: the
 // gateway holds its client. Individual failures do not abort the session; they
 // are reported through Errors.
-func Start(ctx context.Context, defs []sessioncfg.MCPServer, logger *slog.Logger) *Manager {
+func Start(ctx context.Context, defs []sessioncfg.MCPServer, logger *slog.Logger, limits content.Limits) *Manager {
 	m := &Manager{
 		clients: map[string]*Client{},
 		byName:  map[string]Tool{},
@@ -73,7 +75,7 @@ func Start(ctx context.Context, defs []sessioncfg.MCPServer, logger *slog.Logger
 		if def.InitTimeoutSeconds > 0 {
 			timeout = time.Duration(def.InitTimeoutSeconds) * time.Second
 		}
-		client, tools, err := StartServer(ctx, def, timeout, logger)
+		client, tools, err := StartServer(ctx, def, timeout, logger, limits)
 		if err != nil {
 			logger.Warn("mcp server unavailable", "server", def.Name, "error", err)
 			m.errs = append(m.errs, fmt.Errorf("%s: %w", def.Name, err))
@@ -114,16 +116,16 @@ func (m *Manager) Tools() []Tool {
 func (m *Manager) Errors() []error { return m.errs }
 
 // Call invokes a tool by its namespaced name.
-func (m *Manager) Call(ctx context.Context, name string, args json.RawMessage) (string, bool, error) {
+func (m *Manager) Call(ctx context.Context, name string, args json.RawMessage) (ToolResult, error) {
 	tool, ok := m.byName[name]
 	if !ok {
-		return "", false, fmt.Errorf("unknown MCP tool %q", name)
+		return ToolResult{}, fmt.Errorf("unknown MCP tool %q", name)
 	}
 	client, ok := m.clients[tool.Server]
 	if !ok {
-		return "", false, fmt.Errorf("MCP server %q is not connected", tool.Server)
+		return ToolResult{}, fmt.Errorf("MCP server %q is not connected", tool.Server)
 	}
-	return client.CallTool(ctx, tool.RemoteName, args)
+	return client.CallToolResult(ctx, tool.RemoteName, args)
 }
 
 // Close shuts down every client.

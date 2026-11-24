@@ -230,6 +230,12 @@ func (r *Runtime) applyExisting(entry journal.Entry, apply func(json.RawMessage)
 	if got := r.conv.Size(); got != entry.ConvLen {
 		return fmt.Errorf("replayed conversation length after step %d (%s) is %d, want %d", entry.Step, entry.Name, got, entry.ConvLen)
 	}
+	// A replayed tool message can carry images that the live step charged
+	// before the crash. Recompute from what the conversation now holds so the
+	// session budget neither misses nor double-counts them.
+	if strings.HasPrefix(entry.Name, "tool:") {
+		r.resetImageBudget()
+	}
 	return nil
 }
 

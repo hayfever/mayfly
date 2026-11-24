@@ -79,7 +79,14 @@ func (c *MCPCounts) Snapshot() map[string]int {
 	return out
 }
 
-// MCPHandler returns a minimal Streamable HTTP MCP server with one echo tool.
+// ImagePNGBase64 is a 1x1 transparent PNG returned by the image tool.
+const ImagePNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+
+// ImagePNGMIME is the MIME type of ImagePNGBase64.
+const ImagePNGMIME = "image/png"
+
+// MCPHandler returns a minimal Streamable HTTP MCP server with an echo tool
+// and an image tool.
 func MCPHandler() http.Handler {
 	return MCPHandlerWithCounts(NewMCPCounts())
 }
@@ -156,16 +163,23 @@ func dispatchMCP(req rpcRequest) (any, map[string]any) {
 	case "ping":
 		return map[string]any{}, nil
 	case "tools/list":
-		return map[string]any{"tools": []map[string]any{{
-			"name":        "echo",
-			"description": "Echo text back to the caller.",
-			"inputSchema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"text": map[string]any{"type": "string", "description": "Text to echo"},
+		return map[string]any{"tools": []map[string]any{
+			{
+				"name":        "echo",
+				"description": "Echo text back to the caller.",
+				"inputSchema": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"text": map[string]any{"type": "string", "description": "Text to echo"},
+					},
 				},
 			},
-		}}}, nil
+			{
+				"name":        "image",
+				"description": "Return a small PNG image with a caption.",
+				"inputSchema": map[string]any{"type": "object"},
+			},
+		}}, nil
 	case "tools/call":
 		var params struct {
 			Name      string         `json:"name"`
@@ -173,6 +187,15 @@ func dispatchMCP(req rpcRequest) (any, map[string]any) {
 		}
 		if err := json.Unmarshal(req.Params, &params); err != nil {
 			return nil, map[string]any{"code": -32602, "message": "invalid params"}
+		}
+		if params.Name == "image" {
+			return map[string]any{
+				"content": []map[string]any{
+					{"type": "text", "text": "image follows"},
+					{"type": "image", "mimeType": ImagePNGMIME, "data": ImagePNGBase64},
+				},
+				"isError": false,
+			}, nil
 		}
 		if params.Name != "echo" {
 			return nil, map[string]any{"code": -32602, "message": "unknown tool " + params.Name}
