@@ -944,6 +944,9 @@ func (m *Manager) adoptPods(ctx context.Context, pods []corev1.Pod, only map[str
 		if inst.sess.Title == "" {
 			inst.sess.Title = "Session " + id
 		}
+		// The ConfigMap carries the budget but not the counters, so restore
+		// them from the record. The persist below writes the seed.
+		inst.seedLLM(m.adoptRecord(id), cfg)
 		// Seed before registering: a session whose turn keys cannot be
 		// placed above the previous lifetime's must not accept messages. The
 		// pod keeps its objects, so garbage collection leaves it alone.
@@ -1054,6 +1057,9 @@ func (m *Manager) adoptPodless(ctx context.Context, id string, objs k8s.OrphanOb
 	if inst.sess.Title == "" {
 		inst.sess.Title = "Session " + id
 	}
+	// The ConfigMap carries the budget but not the counters, so restore them
+	// from the record. The registration path persists the seed.
+	inst.seedLLM(m.adoptRecord(id), cfg)
 	empty, err := m.seedSequence(ctx, id)
 	if err != nil {
 		m.logger.Error("adopt: cannot seed session sequence; leaving session unadopted", "session", id, "error", err)

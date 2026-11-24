@@ -4,6 +4,7 @@ package model
 
 import (
 	"encoding/json"
+	"math"
 	"time"
 )
 
@@ -41,6 +42,31 @@ type ArtifactInfo struct {
 	Partial   bool      `json:"partial"`
 }
 
+// LLMUsage counts the model calls of one session. PromptTokens and
+// CompletionTokens include estimated usage; EstimatedCalls counts the calls
+// whose usage the provider did not report.
+type LLMUsage struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	Requests         int64 `json:"requests"`
+	EstimatedCalls   int64 `json:"estimated_calls"`
+}
+
+// Total returns prompt plus completion tokens, saturated at MaxInt64.
+func (u LLMUsage) Total() int64 {
+	if u.PromptTokens > math.MaxInt64-u.CompletionTokens {
+		return math.MaxInt64
+	}
+	return u.PromptTokens + u.CompletionTokens
+}
+
+// LLMBudget is the resolved model budget of one session. Zero in either field
+// means no limit.
+type LLMBudget struct {
+	MaxTokens   int64 `json:"max_tokens"`
+	MaxRequests int64 `json:"max_requests"`
+}
+
 // Session is the primary unit of work. A session exists for a bounded period
 // of time and always ends with an artifact export attempt.
 type Session struct {
@@ -67,7 +93,15 @@ type Session struct {
 	LastActivity time.Time     `json:"last_activity"`
 	MessageCount int           `json:"message_count"`
 	Artifact     *ArtifactInfo `json:"artifact,omitempty"`
-	Error        string        `json:"error,omitempty"`
+	// LLMUsage and LLMBudget report model consumption. Both are absent when
+	// the session made no model call or has no budget.
+	LLMUsage  *LLMUsage  `json:"llm_usage,omitempty"`
+	LLMBudget *LLMBudget `json:"llm_budget,omitempty"`
+	// LLMPendingTokens is the durable reservation of an in-flight model call.
+	// It is not part of the public session API; the control plane uses it to
+	// charge a call that a restart interrupts.
+	LLMPendingTokens int64  `json:"llm_pending_tokens,omitempty"`
+	Error            string `json:"error,omitempty"`
 }
 
 // EventType identifies an item in the session thread.
