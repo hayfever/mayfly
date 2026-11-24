@@ -210,7 +210,13 @@ type SessionsConfig struct {
 	// InboxBufferBytes bounds the retained human messages per session, in
 	// addition to the event_buffer count cap. Zero or less follows
 	// event_buffer_bytes.
-	InboxBufferBytes   int      `yaml:"inbox_buffer_bytes"`
+	InboxBufferBytes int `yaml:"inbox_buffer_bytes"`
+	// MaxLLMTokens and MaxLLMRequests bound the model calls one session may
+	// make: prompt plus completion tokens, and forwarded requests. Zero means
+	// no limit. An agent manifest can lower either value with maxLLMTokens or
+	// maxLLMRequests.
+	MaxLLMTokens       int      `yaml:"max_llm_tokens"`
+	MaxLLMRequests     int      `yaml:"max_llm_requests"`
 	MaxSteps           int      `yaml:"max_steps"`
 	MaxHistoryMessages int      `yaml:"max_history_messages"`
 	MaxConcurrent      int      `yaml:"max_concurrent"`
@@ -974,6 +980,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Sessions.MaxRestarts < 0 {
 		return fmt.Errorf("sessions.max_restarts must not be negative")
+	}
+	if c.Sessions.MaxLLMTokens < 0 {
+		return fmt.Errorf("sessions.max_llm_tokens must not be negative")
+	}
+	if c.Sessions.MaxLLMRequests < 0 {
+		return fmt.Errorf("sessions.max_llm_requests must not be negative")
 	}
 	switch c.Sessions.Records.Backend {
 	case "memory":
