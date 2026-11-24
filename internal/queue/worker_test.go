@@ -220,6 +220,92 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Fatal("condition not met before timeout")
 }
 
+// await receives one worker progress report. The timeout only guards a
+// deadlock: a test never asserts progress against the clock.
+func await[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(10 * time.Second):
+		t.Fatalf("worker did not report %s", what)
+		var zero T
+		return zero
+	}
+}
+
+// settleKind names the store call that ends one attempt.
+type settleKind int
+
+const (
+	settleAck settleKind = iota
+	settleNack
+)
+
+// settleEvent reports one finished attempt as the worker settled it.
+type settleEvent struct {
+	kind  settleKind
+	lease Lease
+	cause error
+	err   error
+}
+
+// progressStore reports claims and settlements through channels, so a test can
+// wait for worker progress instead of polling the store clock. Signals are
+// dropped after finished is closed, so a failed test can still stop its worker.
+type progressStore struct {
+	Store
+	claimed  chan Lease
+	settled  chan settleEvent
+	finished chan struct{}
+}
+
+func newProgressStore(store Store) *progressStore {
+	return &progressStore{
+		Store:    store,
+		claimed:  make(chan Lease, 16),
+		settled:  make(chan settleEvent, 16),
+		finished: make(chan struct{}),
+	}
+}
+
+func (s *progressStore) signalClaimed(lease Lease) {
+	select {
+	case s.claimed <- lease:
+	case <-s.finished:
+	}
+}
+
+func (s *progressStore) signalSettled(event settleEvent) {
+	select {
+	case s.settled <- event:
+	case <-s.finished:
+	}
+}
+
+func (s *progressStore) Claim(ctx context.Context, max int) ([]Lease, error) {
+	leases, err := s.Store.Claim(ctx, max)
+	if err != nil {
+		return nil, err
+	}
+	for _, lease := range leases {
+		s.signalClaimed(lease)
+	}
+	return leases, nil
+}
+
+func (s *progressStore) Ack(ctx context.Context, lease Lease, result Result) error {
+	err := s.Store.Ack(ctx, lease, result)
+	s.signalSettled(settleEvent{kind: settleAck, lease: lease, err: err})
+	return err
+}
+
+func (s *progressStore) Nack(ctx context.Context, lease Lease, cause error) error {
+	err := s.Store.Nack(ctx, lease, cause)
+	s.signalSettled(settleEvent{kind: settleNack, lease: lease, cause: cause, err: err})
+	return err
+}
+
 func TestWorkerDoesNotClaimPastFreeSlots(t *testing.T) {
 	store, err := New(context.Background(), testConfig(t))
 	if err != nil {
@@ -338,11 +424,14 @@ func TestWorkerRecoversHandlerPanicAndBuriesPoisonJob(t *testing.T) {
 	cfg.RetryBase = config.Duration(50 * time.Millisecond)
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
-	store, err := New(context.Background(), cfg)
+	inner, err := New(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer inner.Close()
+	// The worker reports every claim and settlement, so the test waits for
+	// events instead of polling the store on the clock.
+	store := newProgressStore(inner)
 
 	poison := testJob("poison-delivery")
 	poison.Trigger = "poison"
@@ -370,36 +459,38 @@ func TestWorkerRecoversHandlerPanicAndBuriesPoisonJob(t *testing.T) {
 	})
 	cancel, done := startWorker(t, worker)
 	defer func() {
+		close(store.finished)
 		cancel()
 		<-done
 	}()
 
-	// The first panic is Nacked, so the job waits for its retry instead of
-	// dying with the worker.
-	waitFor(t, 2*time.Second, func() bool {
-		stats, err := store.Stats(context.Background())
-		return err == nil && stats.Pending == 1 && stats.Dead == 0
-	})
-	// The second panic reaches max_attempts and buries the job.
-	waitFor(t, 2*time.Second, func() bool {
-		stats, err := store.Stats(context.Background())
-		return err == nil && stats.Dead == 1 && stats.Pending == 0
-	})
-
-	// The worker is still running: a healthy job completes after the poison
-	// job is dead.
-	healthyJob := testJob("healthy-delivery")
-	healthyJob.Trigger = "healthy"
-	if err := store.Accept(context.Background(), healthyJob); err != nil {
-		t.Fatal(err)
+	// The first claim runs attempt 1 and panics. The recover Nacks the job, so
+	// it waits for its retry instead of dying with the worker.
+	first := await(t, store.claimed, "the first claim")
+	if first.ID != poison.ID || first.Job.Attempts != 1 {
+		t.Fatalf("first claim = %s attempt %d, want %s attempt 1", first.ID, first.Job.Attempts, poison.ID)
 	}
-	waitFor(t, 2*time.Second, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return healthy == 1
-	})
+	recovered := await(t, store.settled, "the first nack")
+	if recovered.kind != settleNack || recovered.err != nil {
+		t.Fatalf("first settlement = %+v, want a successful nack", recovered)
+	}
+	if recovered.cause == nil || !strings.Contains(recovered.cause.Error(), "panicked") {
+		t.Fatalf("first nack cause = %v, want the panic cause", recovered.cause)
+	}
 
-	record, ok, err := store.Get(context.Background(), poison.ID)
+	// The Nack kept the attempt and requeued the job, so the retry claims
+	// attempt 2. A buried job would never be claimed again.
+	second := await(t, store.claimed, "the retry claim")
+	if second.ID != poison.ID || second.Job.Attempts != 2 {
+		t.Fatalf("retry claim = %s attempt %d, want %s attempt 2", second.ID, second.Job.Attempts, poison.ID)
+	}
+	// The second panic reaches max_attempts and buries the job.
+	buried := await(t, store.settled, "the burial")
+	if buried.kind != settleNack || buried.err != nil {
+		t.Fatalf("second settlement = %+v, want a successful nack", buried)
+	}
+
+	record, ok, err := inner.Get(context.Background(), poison.ID)
 	if err != nil || !ok {
 		t.Fatalf("poison record = %+v, %v, %v", record, ok, err)
 	}
@@ -409,6 +500,40 @@ func TestWorkerRecoversHandlerPanicAndBuriesPoisonJob(t *testing.T) {
 	if !strings.Contains(record.Error, "panicked") {
 		t.Fatalf("dead error = %q, want the panic cause", record.Error)
 	}
+	stats, err := inner.Stats(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Dead != 1 || stats.Pending != 0 {
+		t.Fatalf("stats after burial = %+v, want one dead job and nothing pending", stats)
+	}
+
+	// The worker is still running: a healthy job completes after the poison
+	// job is dead.
+	healthyJob := testJob("healthy-delivery")
+	healthyJob.Trigger = "healthy"
+	if err := store.Accept(context.Background(), healthyJob); err != nil {
+		t.Fatal(err)
+	}
+	next := await(t, store.claimed, "the healthy claim")
+	if next.ID != healthyJob.ID {
+		t.Fatalf("claim after burial = %s, want %s", next.ID, healthyJob.ID)
+	}
+	settled := await(t, store.settled, "the healthy ack")
+	if settled.kind != settleAck || settled.err != nil {
+		t.Fatalf("healthy settlement = %+v, want a successful ack", settled)
+	}
+	select {
+	case <-done:
+		t.Fatal("worker stopped after a handler panic")
+	default:
+	}
+	mu.Lock()
+	if healthy != 1 {
+		mu.Unlock()
+		t.Fatalf("healthy handler ran %d times, want 1", healthy)
+	}
+	mu.Unlock()
 
 	cancel()
 	<-done
