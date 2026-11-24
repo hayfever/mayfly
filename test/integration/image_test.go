@@ -66,6 +66,21 @@ func (r *recordingLLM) any(fn func([]byte) bool) bool {
 // TestMCPImageReachesModel runs one session whose MCP server returns an image
 // and checks that the next model request carries the image as a content part.
 func TestMCPImageReachesModel(t *testing.T) {
+	runMCPImageSession(t, stub.MCPHandler())
+}
+
+// TestMCPImageOverSSEReachesModel does the same through a Streamable HTTP
+// server that frames its responses as text/event-stream, with a legal 5 MiB
+// image. Its base64 form is about 6.7 MiB, so a smaller response bound would
+// turn it into a transport error.
+func TestMCPImageOverSSEReachesModel(t *testing.T) {
+	runMCPImageSession(t, stub.MCPHandlerWithOptions(stub.MCPOptions{SSE: true, ImageBytes: 5 << 20}))
+}
+
+// runMCPImageSession drives one session against mcpHandler and asserts the
+// image reaches the recorded model request.
+func runMCPImageSession(t *testing.T, mcpHandler http.Handler) {
+	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +89,7 @@ func TestMCPImageReachesModel(t *testing.T) {
 	recorder := &recordingLLM{handler: stub.LLMHandler()}
 	llmServer := httptest.NewServer(recorder)
 	defer llmServer.Close()
-	mcpServer := httptest.NewServer(stub.MCPHandler())
+	mcpServer := httptest.NewServer(mcpHandler)
 	defer mcpServer.Close()
 
 	ts := httptest.NewUnstartedServer(nil)

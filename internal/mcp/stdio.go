@@ -73,7 +73,7 @@ func newStdioTransportExact(_ context.Context, command string, args, env []strin
 	go func() {
 		defer close(t.lines)
 		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+		scanner.Buffer(make([]byte, 0, 64*1024), maxResponseBytes)
 		for scanner.Scan() {
 			line := append([]byte(nil), scanner.Bytes()...)
 			// Offer the line while the buffer has room. A select would race

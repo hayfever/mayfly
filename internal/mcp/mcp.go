@@ -22,6 +22,12 @@ import (
 
 const protocolVersion = "2025-06-18"
 
+// maxResponseBytes bounds one MCP response on every transport: an HTTP JSON
+// body, one accumulated SSE message, and one stdio line share it. A legal
+// tool result near the image caps must not pass on one transport and fail on
+// another.
+const maxResponseBytes = 8 << 20
+
 type rpcRequest struct {
 	JSONRPC string `json:"jsonrpc"`
 	ID      int64  `json:"id,omitempty"`
@@ -409,7 +415,7 @@ func (t *tailBuffer) String() string {
 
 func decodeSSE(r io.Reader, id int64) ([]byte, error) {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxResponseBytes)
 	var data bytes.Buffer
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -433,6 +439,11 @@ func decodeSSE(r io.Reader, id int64) ([]byte, error) {
 		if strings.HasPrefix(line, "data:") {
 			value := strings.TrimPrefix(line, "data:")
 			value = strings.TrimPrefix(value, " ")
+			// One message can arrive as several data lines. Bound the sum so
+			// a server cannot make the client retain more than one response.
+			if data.Len()+len(value)+1 > maxResponseBytes {
+				return nil, fmt.Errorf("mcp sse message exceeds %d bytes", maxResponseBytes)
+			}
 			data.WriteString(value)
 			data.WriteByte('\n')
 		}

@@ -500,3 +500,72 @@ func TestParseContentBoundaries(t *testing.T) {
 		})
 	}
 }
+
+// TestHTTPImageOverSSE delivers a legal 5 MiB image through a
+// text/event-stream response. Its base64 form is about 6.7 MiB, so the old
+// 4 MiB SSE token bound could not carry it.
+func TestHTTPImageOverSSE(t *testing.T) {
+	const imageBytes = 5 << 20
+	server := httptest.NewServer(stub.MCPHandlerWithOptions(stub.MCPOptions{SSE: true, ImageBytes: imageBytes}))
+	defer server.Close()
+	client := NewHTTP("sse", server.URL+"/mcp", "", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := client.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	res, err := client.CallToolResult(ctx, "image", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("call over SSE: %v", err)
+	}
+	if res.IsError || len(res.Parts) != 2 || !res.Parts[1].IsImage() || len(res.Parts[1].Data) != imageBytes {
+		t.Fatalf("result = %d parts, isError %v", len(res.Parts), res.IsError)
+	}
+	if text := res.Text(); !strings.Contains(text, "[image image/png, 5242880 bytes,") {
+		t.Fatalf("summary = %q", text)
+	}
+}
+
+// TestHTTPOversizeImageOverSSE proves an oversized image on the SSE path
+// becomes the existing rejected-image text part, not a transport error. The
+// cap is lower than the image, so the client rejects it before decoding.
+func TestHTTPOversizeImageOverSSE(t *testing.T) {
+	server := httptest.NewServer(stub.MCPHandlerWithOptions(stub.MCPOptions{SSE: true, ImageBytes: 5 << 20}))
+	defer server.Close()
+	client := NewHTTP("sse", server.URL+"/mcp", "", nil)
+	client.SetContentLimits(content.Limits{MaxImageBytes: 1 << 20, MaxResultImageBytes: 1 << 20, MaxSessionImageBytes: 2 << 20})
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := client.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	res, err := client.CallToolResult(ctx, "image", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("oversize image over SSE must not fail the transport: %v", err)
+	}
+	if !res.IsError || content.ImageCount(res.Parts) != 0 {
+		t.Fatalf("result = %d parts, isError %v", len(res.Parts), res.IsError)
+	}
+	text := res.Text()
+	if !strings.Contains(text, "ERROR: tool result image was rejected:") ||
+		!strings.Contains(text, "per-image limit") {
+		t.Fatalf("text = %q", text)
+	}
+}
+
+// TestDecodeSSEFrameLimit bounds one SSE message even when it arrives as many
+// short data lines: the per-line scanner bound alone would let a server make
+// the client retain an unbounded message.
+func TestDecodeSSEFrameLimit(t *testing.T) {
+	chunk := strings.Repeat("a", 1<<20)
+	var frame strings.Builder
+	for range maxResponseBytes/(1<<20) + 1 {
+		frame.WriteString("data: ")
+		frame.WriteString(chunk)
+		frame.WriteByte('\n')
+	}
+	frame.WriteByte('\n')
+	if _, err := decodeSSE(strings.NewReader(frame.String()), 1); err == nil {
+		t.Fatal("expected an SSE message size error")
+	}
+}
