@@ -441,6 +441,18 @@ The model abstracts these details:
   base64 or a data URI. Seeds cover an empty array, text only, an allowed
   image, a mixed text and image result, a disallowed MIME type, invalid
   base64, an oversize image, audio, a resource block, and malformed JSON.
+- `FuzzDecodeSSE` (`internal/mcp`) feeds arbitrary bytes to the Streamable
+  HTTP `text/event-stream` decoder. It asserts no panic, that a returned
+  message matches the requested id, is valid JSON, and is at most
+  `maxResponseBytes` (8 MiB, the bound shared with the HTTP JSON body and the
+  stdio line), and that content in a returned `tools/call` result keeps the
+  parser's image limits and byte-free text rendering. Seeds cover an empty
+  stream, a plain frame, a legal image, an oversize image, an unrelated id
+  before the matching one, a message split across data lines, malformed JSON,
+  an unterminated frame, and a comment line. What is not verified: SSE fields
+  the client ignores (`event`, `id`, `retry`), the server's conformance, and
+  the gateway, journal, and provider hops after the decoded message. A
+  60-second run made 3,390,248 executions.
 - `FuzzAuthLimiterKey` (`internal/httpapi`) feeds arbitrary `RemoteAddr` and
   `X-Forwarded-For` bytes with both trust settings. It asserts that the limiter
   key is stable and bounded, that trust off keys on the peer address, and that
