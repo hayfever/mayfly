@@ -3,6 +3,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# shellcheck source=hack/lib/k3d-images.sh
+. "$ROOT/hack/lib/k3d-images.sh"
+
 CLUSTER="${CLUSTER:-mayfly}"
 NAMESPACE="${NAMESPACE:-mayfly}"
 CONTEXT="k3d-$CLUSTER"
@@ -10,6 +13,7 @@ CONTEXT="k3d-$CLUSTER"
 command -v k3d >/dev/null || { echo "k3d is required" >&2; exit 1; }
 command -v kubectl >/dev/null || { echo "kubectl is required" >&2; exit 1; }
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 1; }
+command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 
 echo "==> building images"
 make image
@@ -29,7 +33,7 @@ else
 fi
 
 echo "==> importing images into k3d"
-k3d image import --cluster "$CLUSTER" \
+k3d_import_images "$CLUSTER" \
   mayflyd:dev mayfly-llmstub:dev mayfly-mcpstub:dev mayfly-agent:dev
 
 kubectl --context "$CONTEXT" create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl --context "$CONTEXT" apply -f - >/dev/null

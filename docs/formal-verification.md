@@ -3,7 +3,8 @@
 Two checks cover behavior that unit tests can only sample: TLA+ models of the
 session lifecycle, hub retention, request-body deadlines, queue poison
 recovery, schedule time zones, and release gating, and native Go fuzz targets. A third check covers
-the chart RBAC over its whole namespace configuration space. Each has a script
+the chart RBAC over its whole namespace configuration space. A fourth check
+covers the k3d image-name matcher with fixture JSON. Each has a script
 or command and a CI job.
 
 | Check | Script | CI job |
@@ -12,6 +13,7 @@ or command and a CI job.
 | TLC with two sessions | `hack/tlc.sh --deep` | `tlc-deep` in verify.yml, nightly and on demand |
 | Every fuzz target | `hack/fuzz.sh` | `fuzz-nightly` in verify.yml |
 | Chart RBAC property check | `MAYFLY_REQUIRE_HELM=1 go test ./test/chart/...` | `chart` step of the `test` job in [ci.yml](../.github/workflows/ci.yml) |
+| k3d image-name matcher fixtures | `hack/test-k3d-images.sh` | `shell` job in [ci.yml](../.github/workflows/ci.yml) |
 
 `hack/tlc.sh` needs a JDK 17 or newer (`java` on `PATH`, or `JAVA`). It
 downloads the pinned, checksummed `tla2tools.jar` once into
@@ -664,6 +666,12 @@ pagination are not verified. A change on the GitHub side fails the gate closed:
 an unreadable history is a failed gate. A real `v*` tag and a real release run
 are outside every check in this repository.
 
+The k3d image fixtures check the matcher, not the cluster. They do not run
+`k3d image import`, do not read a live `crictl` inventory, and do not check node
+discovery from Docker labels. The retry backoff and the per-node report run only
+in `hack/e2e.sh` and `hack/k3d-up.sh`. The 20-run stability gate is the only
+check of the live import path.
+
 ## Chart RBAC property check
 
 `test/chart/rbac_test.go` checks the chart RBAC over the whole configuration
@@ -740,3 +748,39 @@ The check does not prove that a cluster accepts the RBAC. It reads rendered
 manifests; it does not contact an API server and does not exercise the
 authorization decision. The e2e suite covers the cluster side when it creates
 a session. The check does not cover chart values that do not change RBAC.
+
+## Image import verification
+
+`hack/lib/k3d-images.sh` holds the import and verification that `hack/e2e.sh`
+and `hack/k3d-up.sh` share. `k3d_image_present <repo:tag> <crictl-json>` is a
+pure jq filter over `crictl images -o json`. It removes one leading
+`docker.io/` and one leading `library/` from the requested name and from every
+`repoTags` entry, then compares `repo:tag`. Digests are ignored. The helper
+returns 0 for present, 1 for absent, and 2 when the JSON cannot be read, so a
+broken inventory is not reported as a missing image.
+
+`hack/test-k3d-images.sh` feeds fixture JSON to the matcher and needs bash and
+jq only. The fixtures cover a short name, `docker.io/library/` normalization in
+both directions, a namespaced registry, a registry with a port, a tag that does
+not match, an empty and a null image list, a digest-only entry, another
+namespace, a node pair where one node has the image and the other does not, the
+requested image as the second entry, and invalid JSON. The script exits nonzero
+if any check fails.
+
+There is no TLA+ model for this check. The import path has no concurrent
+actors, message protocol, or shared state machine to explore. It is a bounded
+loop over deterministic predicates: run the import, read each node's inventory,
+and retry the names that are missing, at most three times. TLC would restate
+that loop. The part that can be wrong and is not visible by inspection is name
+matching across containerd's normalization and the per-node inventory, and the
+fixture set enumerates those cases exactly. A model would not add an invariant
+that the fixtures cannot check.
+
+Run it with:
+
+```bash
+make test-k3d-images
+```
+
+The `shell` job in [ci.yml](../.github/workflows/ci.yml) runs the fixtures and
+`shellcheck` on the helper and both callers on every push and pull request.

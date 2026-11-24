@@ -13,6 +13,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# shellcheck source=hack/lib/k3d-images.sh
+. "$ROOT/hack/lib/k3d-images.sh"
+
 CLUSTER="${E2E_CLUSTER:-mayfly-e2e}"
 NAMESPACE="${E2E_NAMESPACE:-mayfly-e2e}"
 RELEASE="${E2E_RELEASE:-mayfly}"
@@ -81,9 +84,13 @@ create_cluster() {
   log "waiting for nodes"
   k wait --for=condition=Ready nodes --all --timeout=300s
   log "importing images into k3d"
-  k3d image import --cluster "$CLUSTER" \
+  mkdir -p "$ARTIFACTS"
+  if ! k3d_import_images "$CLUSTER" \
     "$IMG_MAYFLYD" "$IMG_AGENT" "$IMG_LLMSTUB" "$IMG_MCPSTUB" \
-    "$IMG_PLUGIN" "$IMG_PLUGIN_MISSING"
+    "$IMG_PLUGIN" "$IMG_PLUGIN_MISSING"; then
+    k3d_node_image_report "$CLUSTER" >"$ARTIFACTS/k3d-images.txt" 2>&1 || true
+    die "image import failed; per-node image list in $ARTIFACTS/k3d-images.txt"
+  fi
 }
 
 push_images() {
@@ -151,7 +158,7 @@ up() {
     build_images
   fi
   if [[ "$MODE" == k3d ]]; then
-    need k3d docker
+    need k3d docker jq
     create_cluster
   elif [[ "$SKIP_BUILD" != 1 ]]; then
     push_images
@@ -167,6 +174,10 @@ diagnostics() {
   kn describe pods >"$ARTIFACTS/pods.txt" 2>&1 || true
   kn logs "deployment/$RELEASE" --all-containers --tail=-1 >"$ARTIFACTS/mayflyd.log" 2>&1 || true
   kn logs "deployment/$RELEASE" --all-containers --previous --tail=-1 >"$ARTIFACTS/mayflyd.previous.log" 2>&1 || true
+  if [[ "$MODE" == k3d ]]; then
+    printf '\n==> k3d node images\n'
+    k3d_node_image_report "$CLUSTER" 2>&1 | tee "$ARTIFACTS/k3d-images.txt" || true
+  fi
 }
 
 run_tests() {

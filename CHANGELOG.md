@@ -6,6 +6,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ### Added
 
+- `hack/e2e.sh` and `hack/k3d-up.sh` import images through `hack/lib/k3d-images.sh`, which checks every image on every k3d server and agent node after the import, retries the missing images three times with backoff, and fails with `image X missing on node Y` plus a per-node image list. `hack/test-k3d-images.sh` checks the name matcher with fixture JSON (#52).
 - A TLA+ model of the session lifecycle and resume protocol in `spec/tla`, checked by `hack/tlc.sh` and the `tlc` job in `.github/workflows/verify.yml`. See [docs/formal-verification.md](docs/formal-verification.md).
 - Native Go fuzz targets for webhook verification and parsing, persisted queue jobs, journal steps, session records, runtime events, HTTP request bodies, the hub, and bundles. `hack/fuzz.sh` runs every target, and the `fuzz-nightly` job runs them on a schedule.
 - `sessions.max_event_bytes` (default 64 KiB) caps one runtime event (#44).

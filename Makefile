@@ -9,7 +9,7 @@ LOADTEST_ARGS ?= -mode sessions -n 5 -duration 2m
 LDFLAGS := -s -w -X github.com/hayfever/mayfly/internal/version.Version=$(VERSION) -X github.com/hayfever/mayfly/internal/version.Commit=$(COMMIT) -X github.com/hayfever/mayfly/internal/version.Date=$(DATE)
 CMDS := mayflyd mayfly-agent mayfly mayfly-harness mayfly-plugin-shim llmstub mcpstub
 
-.PHONY: build test vet fmt image cluster-create cluster-up cluster-down deploy e2e e2e-up e2e-test e2e-down stress e2e-stability run-local loadtest clean FORCE
+.PHONY: build test test-k3d-images vet fmt image cluster-create cluster-up cluster-down deploy e2e e2e-up e2e-test e2e-down stress e2e-stability run-local loadtest clean FORCE
 
 build: $(addprefix $(BIN)/,$(CMDS))
 
@@ -21,6 +21,10 @@ FORCE:
 
 test:
 	$(GO) test ./...
+
+# Fixture checks for the k3d image matcher; needs bash and jq only.
+test-k3d-images:
+	./hack/test-k3d-images.sh
 
 vet:
 	$(GO) vet ./...

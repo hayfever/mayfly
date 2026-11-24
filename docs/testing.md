@@ -27,7 +27,7 @@ Plugin behavior is covered in the first two layers:
 
 1. builds the four release images from the working tree, plus the plugin fixture images in `e2e/plugins`,
 2. creates a k3d cluster (`mayfly-e2e`) on k3s, whose built-in kube-router controller enforces NetworkPolicy,
-3. loads the images, deploys the deterministic LLM and MCP stubs, and installs the local chart with [e2e/values.yaml](../e2e/values.yaml),
+3. imports the images into every k3d server and agent node and verifies each one, retrying missing images up to three times, then deploys the deterministic LLM and MCP stubs, and installs the local chart with [e2e/values.yaml](../e2e/values.yaml),
 4. runs the Go tests in [e2e/](../e2e) (build tag `e2e`) against the release over a port-forward,
 5. deletes the cluster.
 
@@ -87,7 +87,7 @@ make e2e-down
 
 `make e2e-up` rebuilds the images and restarts the control plane, so code changes are picked up. Logs and, on failure, cluster diagnostics go to `.e2e/` (`E2E_ARTIFACTS` to change).
 
-Requirements: Docker, k3d, kubectl, Helm 3, Go, and openssl. The k3d cluster uses about 3 GB of memory.
+Requirements: Docker, k3d, kubectl, Helm 3, Go, jq, and openssl. The k3d cluster uses about 3 GB of memory.
 
 ### Upgrade test
 
