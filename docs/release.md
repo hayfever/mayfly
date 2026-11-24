@@ -23,19 +23,46 @@ hack/api-diff.sh v0.2.0     # a tag, branch, or commit
 
 If the base ref has no `api/openapi.yaml`, the script prints a notice and exits 0. That is the case for a tag that predates the spec.
 
+## Release gate
+
+Every `v*` tag runs the `gate` job before any other job, release candidates included. The gate passes only when the tagged commit has both of these:
+
+- A successful `ci` workflow run for the commit.
+- A successful `e2e-stability` workflow run with `runs=20` for the same commit.
+
+The gate reads the commit's workflow history from the GitHub API. It derives the `runs` value from the e2e job names, `e2e (1/bbolt)` to `e2e (20/redis)`, because the workflow-run API does not return the dispatch inputs. A successful rerun attempt counts on its own: when attempt 1 failed on an infrastructure glitch and attempt 2 passed, the commit is gated.
+
+A tag push on a commit without the gate fails in the `gate` job. Nothing is built, signed, tagged, or published.
+
+The decision is `hack/release-gate`, with the logic in `internal/releasegate`. It reads the `gh api` payloads and makes no network call. Unit tests and `FuzzDecide` cover a missing run, a failed run, a run with fewer than 20 e2e jobs, a failed `ci`, and the rerun case. Run it locally against saved `gh api` payloads with `go run ./hack/release-gate -sha <sha> -runs runs.json -jobs jobs.json`.
+
+Test the gate against a commit without publishing anything:
+
+```bash
+gh workflow run release.yml -f dry_run=true -f sha=<sha>
+run_id="$(gh run list --workflow=release.yml --limit=1 --json databaseId --jq '.[0].databaseId')"
+gh run watch "$run_id"
+```
+
+A dry run runs only the `gate` job against the given 40-character commit SHA. It creates no release, image tag, or chart.
+
 ## Supply chain
 
 CI runs `govulncheck ./...` in the `vulncheck` job. The job fails when the module graph reaches a known vulnerability in our code paths. Fix it by bumping the dependency in `go.mod`. The scan runs with the latest vulnerability database, so a new advisory can fail a pull request that changes nothing.
 
-The release workflow builds each image, scans it, tags it, and signs it in that order:
+The release workflow builds each image, scans it, signs it, and tags it in that order:
 
 1. Docker Buildx builds the multi-arch image and pushes the manifest and layers by digest, without a tag.
 2. `trivy image` scans that digest for `linux/amd64` and `linux/arm64` with `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`. A HIGH or CRITICAL vulnerability that has a fixed version fails the job. A finding without a fix is reported and does not block.
-3. Only a clean scan creates the image tags with `docker buildx imagetools create`: the version tag, and for a final release `major.minor` and `latest`.
-4. `cosign sign` signs the digest with the workflow's GitHub OIDC identity. No key and no stored secret is involved.
-5. The chart job waits for both images to be scanned, tagged, and signed, then pushes the chart to GHCR and signs it with the same identity.
+3. `cosign sign` signs the digest with the workflow's GitHub OIDC identity. No key and no stored secret is involved.
+4. Only a signed digest gets the image tags with `docker buildx imagetools create`: the version tag, and for a final release `major.minor` and `latest`.
+5. The chart job waits for both images, then pushes the chart to GHCR, uploads it to the draft release, and signs it with the same identity.
 
-A failed scan fails the job before any tag exists, so the release has no image tag and no signature. The untagged manifest is not a release artifact, and the registry garbage collector removes it. A tag that does not verify is not a release artifact.
+A failed scan fails the job before any tag exists. A failed signature fails the job before the tag step runs. Either failure leaves no tag for the digest, so no tag names an unsigned image. The untagged manifest is not a release artifact, and the registry garbage collector removes it. A tag that does not verify is not a release artifact.
+
+GoReleaser signs the CLI release too. It builds the archives and `checksums.txt`, runs `cosign sign-blob --bundle checksums.txt.sigstore.json checksums.txt` with the same keyless identity, and attaches the bundle to the release. The goreleaser job has `id-token: write` for that token.
+
+The GitHub release is a draft from creation until the `publish` job, which needs `goreleaser`, both `images`, and `chart`. A failed image scan, signature, or chart push therefore leaves only a draft release. `publish` runs `gh release edit <tag> --draft=false` after every job succeeded.
 
 ### Verify a published release
 
@@ -64,9 +91,18 @@ cosign verify \
   --certificate-identity "$identity" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   "ghcr.io/${owner}/charts/mayfly@${digest}"
+
+# Download checksums.txt and checksums.txt.sigstore.json from the release page.
+cosign verify-blob \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-identity "$identity" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+
+sha256sum -c checksums.txt
 ```
 
-Each command must print the workflow identity and the tag. The OIDC issuer is the only trust anchor; there is no public key to fetch. Both images also carry BuildKit SBOM and provenance attestations. Verify them with the same identity flags and `cosign verify-attestation --type slsaprovenance`. The chart has no attestation; its signature covers the chart digest.
+Each `cosign` command must print the workflow identity and the tag. The OIDC issuer is the only trust anchor; there is no public key to fetch. `sha256sum -c` reads the archive names in `checksums.txt` from the current directory, so download the archives there too. Both images also carry BuildKit SBOM and provenance attestations. Verify them with the same identity flags and `cosign verify-attestation --type slsaprovenance`. The chart has no attestation; its signature covers the chart digest.
 
 ## Pre-release checklist
 
@@ -103,7 +139,7 @@ go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
 gh workflow run e2e-stability.yml -f runs=20 -f ref=<sha>
 ```
 
-The gate and its failure modes are in [testing.md](testing.md#stability-gate). A green run on another commit does not cover this one.
+The gate and its failure modes are in [testing.md](testing.md#stability-gate). A green run on another commit does not cover this one. The release workflow checks the same gate for the tagged commit and fails the tag without it. Test the gate without publishing with `gh workflow run release.yml -f dry_run=true -f sha=<sha>`.
 6. Review the security notes and known limitations for accuracy.
 
 ## Tag
@@ -113,12 +149,15 @@ git tag -a vX.Y.Z -m "Mayfly vX.Y.Z"
 git push origin main --tags
 ```
 
-The release workflow runs on `v*` tags. It fails when its Go toolchain is older than 1.27.4 (GO-2026-6859):
+The release workflow runs on `v*` tags in this order:
 
-- GoReleaser builds CLI archives, checksums, and the GitHub release.
-- Docker Buildx builds multi-arch control-plane and agent images with SBOM and provenance, and pushes them by digest without tags.
-- Trivy scans each digest for both architectures and fails the job on a HIGH or CRITICAL vulnerability that has a fix.
-- Buildx creates the image tags after a clean scan. Cosign then signs each digest with the workflow identity, and the chart job pushes and signs the chart.
+1. `gate` reads the tagged commit's workflow history. It fails the workflow unless `ci` succeeded and a successful `e2e-stability` attempt with 20 runs exists for that commit.
+2. `goreleaser` builds the CLI archives and `checksums.txt`, signs `checksums.txt` with keyless cosign, and creates the GitHub release as a draft. The job fails when its Go toolchain is older than 1.27.4 (GO-2026-6859).
+3. `images` builds each control-plane and agent image with SBOM and provenance, pushes it by digest without a tag, scans both architectures, signs the digest, and only then creates the version tags.
+4. `chart` pushes and signs the chart, and uploads it to the draft release.
+5. `publish` turns the draft into a public release. It runs only when `goreleaser`, `images`, and `chart` all succeeded.
+
+A failed job leaves the GitHub release a draft, and later jobs do not run. Rerun the failed job; `publish` makes the release public when the rerun succeeds.
 
 ## Release candidates
 
@@ -129,11 +168,15 @@ git tag -a vX.Y.Z-rc.1 -m "Mayfly vX.Y.Z-rc.1"
 git push origin vX.Y.Z-rc.1
 ```
 
-The same workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`). The image tags come from the semver patterns in `release.yml`: an RC tag like `v1.0.0-rc.1` publishes only `1.0.0-rc.1`. `docker/metadata-action` skips the `{{major}}.{{minor}}` pattern for a pre-release, and `latest` is enabled only for a tag with no `-`. The chart is pushed as `1.0.0-rc.1`. Install it with `--version 1.0.0-rc.1`. When the candidate passes, tag `v1.0.0` on the same commit; that tag publishes `1.0.0`, `1.0`, and `latest`.
+The same gated workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`) and `release.make_latest: auto` keeps the `latest` marker on the newest final release, so an RC never becomes latest. The release stays a draft until `publish` runs. The image tags come from the semver patterns in `release.yml`: an RC tag like `v1.0.0-rc.1` publishes only `1.0.0-rc.1`. `docker/metadata-action` skips the `{{major}}.{{minor}}` pattern for a pre-release, and `latest` is enabled only for a tag with no `-`. The chart is pushed as `1.0.0-rc.1`. Install it with `--version 1.0.0-rc.1`. When the candidate passes, tag `v1.0.0` on the same commit; that tag publishes `1.0.0`, `1.0`, and `latest`.
 
 ## Post-release verification
 
-Run the commands in [Verify a published release](#verify-a-published-release) first. All three must print the workflow identity and the tag.
+Run the commands in [Verify a published release](#verify-a-published-release) first. Every `cosign` command must print the workflow identity and the tag. Check that `publish` made the release public:
+
+```bash
+gh release view vX.Y.Z --json isDraft --jq '.isDraft'   # false
+```
 
 ```bash
 docker pull ghcr.io/<owner>/mayflyd:<version>

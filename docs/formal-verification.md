@@ -2,13 +2,13 @@
 
 Two checks cover behavior that unit tests can only sample: TLA+ models of the
 session lifecycle, hub retention, request-body deadlines, queue poison
-recovery, and schedule time zones, and native Go fuzz targets. A third check covers the chart RBAC over
-its whole namespace configuration space. Each has a script or command and a CI
-job.
+recovery, schedule time zones, and release gating, and native Go fuzz targets. A third check covers
+the chart RBAC over its whole namespace configuration space. Each has a script
+or command and a CI job.
 
 | Check | Script | CI job |
 |---|---|---|
-| TLC on `SessionResume.tla`, `HubRetention.tla`, `BodyReadDeadline.tla`, `QueuePoison.tla`, `AuthHardening.tla`, and `CronTimezone.tla` | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
+| TLC on `SessionResume.tla`, `HubRetention.tla`, `BodyReadDeadline.tla`, `QueuePoison.tla`, `AuthHardening.tla`, `CronTimezone.tla`, and `ReleaseGating.tla` | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
 | TLC with two sessions | `hack/tlc.sh --deep` | `tlc-deep` in verify.yml, nightly and on demand |
 | Every fuzz target | `hack/fuzz.sh` | `fuzz-nightly` in verify.yml |
 | Chart RBAC property check | `MAYFLY_REQUIRE_HELM=1 go test ./test/chart/...` | `chart` step of the `test` job in [ci.yml](../.github/workflows/ci.yml) |
@@ -446,6 +446,67 @@ The model abstracts these details:
   model. The slot is the UTC instant the model emits; `mostRecentSlot` and
   `acceptSlot` use the same instant as the key.
 
+## Release gating model
+
+`spec/tla/ReleaseGating.tla` models the release pipeline in
+[.github/workflows/release.yml](../.github/workflows/release.yml) for #50: the
+gate job, the GoReleaser draft release, the image digest, scan, signature, and
+tag order, the chart, and the final publish. The gate decision itself is Go
+(`internal/releasegate`), not TLA+. The model checks the ordering guarantees
+that the workflow jobs must keep.
+
+| TLA+ action | Go code it models |
+|---|---|
+| `GatePass` | the `gate` job in `release.yml` and `releasegate.Decide` (`internal/releasegate/releasegate.go`), which `hack/release-gate` runs over the `gh api` payloads |
+| `GateFail` | the same job when `Decide` returns a reason |
+| `BuildCLI` | the `goreleaser` job: archives, `checksums.txt`, and the GitHub release, which `release.draft: true` creates as a draft |
+| `SignChecksums` | the `signs:` entry in `.goreleaser.yaml`: `cosign sign-blob --bundle` over `checksums.txt` |
+| `BuildImage` | the `images` job build step, `docker/build-push-action` with `push-by-digest` |
+| `ScanImage` | `trivy image` over the digest; a finding stops the job before the next action |
+| `SignImage` | `cosign sign` over `IMAGE@DIGEST` |
+| `TagImage` | `docker buildx imagetools create` over the signed digest |
+| `Chart` | the `chart` job: `helm push`, `gh release upload`, and `cosign sign` as one unit |
+| `Publish` | the `publish` job: `gh release edit <tag> --draft=false` |
+| `Stutter` | no Go function; no further job at the model's bound |
+
+| Property | Meaning | Tests that sample it |
+|---|---|---|
+| `TypeOK` | Every variable stays in its declared domain | none; model well-formedness |
+| `NoPublishWithoutGate` | The GitHub release is never public without a successful gate | `TestDecide` (missing, failed, cancelled, and short stability runs), `FuzzDecide` |
+| `PublicReleaseComplete` | A public release has signed checksums, a signed and tagged image, and a signed chart | `TestDecide` (the passing cases), `FuzzDecide`; the job graph in `release.yml` |
+| `TagOnlySignedDigests` | An image tag exists only after the digest signature | the step order in the `images` job |
+
+`ReleaseGating.cfg` sets `RequireGate = TRUE`, `DraftUntilComplete = TRUE`, and
+`SignBeforeTag = TRUE`, and checks all four invariants: 67 states generated, 26
+distinct, under one second. The negative cfgs each flip one switch:
+
+| Cfg | Constant | Expected violation |
+|---|---|---|
+| `ReleaseGating_no_gate_buggy.cfg` | `RequireGate = FALSE` | `NoPublishWithoutGate` |
+| `ReleaseGating_draft_false_buggy.cfg` | `DraftUntilComplete = FALSE` | `PublicReleaseComplete` |
+| `ReleaseGating_tag_before_sign_buggy.cfg` | `SignBeforeTag = FALSE` | `TagOnlySignedDigests` |
+
+The runs stop quickly: no-gate 174 states (54 distinct), draft-false 27 (16),
+and tag-before-sign 70 (29).
+
+The model abstracts these details:
+
+- Each workflow job is one action. A job that fails is an action that never
+  becomes enabled. Job retries, queue time, and a partially completed matrix
+  are outside the model.
+- The gate is one decision per tag. `releasegate.Decide` reads workflow-run and
+  job payloads; the model does not represent their JSON shape, pagination, or
+  the API's rate limits.
+- `RequireGate` guards the actions that publish an artifact: the draft release,
+  an image tag, the chart, and the public release. The workflow also needs the
+  gate for every build job. An untagged image manifest is not a published
+  artifact.
+- The chart push and its signature are one action, because the job creates the
+  OCI tag, signs the digest, and fails as a unit. A transient unsigned chart
+  tag is outside the model.
+- The model covers one tag. Two tags at the same time are two separate release
+  runs.
+
 ## Fuzz targets for the bounds
 
 - `FuzzHubAppendBudget` (`internal/hub`) drives appends, restores, and replays,
@@ -526,9 +587,18 @@ The model abstracts these details:
   overlong IPv6 host; the fuzz run found the missing length cap before commit,
   and the seed stays as the regression. A 60-second run made 526,765
   executions.
+- `FuzzDecide` (`internal/releasegate`) feeds arbitrary workflow-run and job
+  payloads to `Decide`. A PASS must satisfy an independent, more permissive
+  search: a green `ci` run and a successful `e2e-stability` run with at least
+  20 e2e jobs and a green stability gate job. Seeds cover a passing history, a
+  stability run with five runs, an empty jobs list, and invalid JSON. A
+  60-second run made 5,053,225 executions.
 
 ## What is abstracted away
 
+- The release gating model abstracts each workflow job as an action. Job
+  retries, runner availability, and the GitHub API's pagination and rate
+  limits are not modeled. The model has one tag at a time.
 - bbolt writes are atomic. A journal or ledger write either lands or not.
 - One control-plane replica. The model has no leader election or two writers.
 - No network partitions or Kubernetes API eventual consistency. An API call
@@ -574,6 +644,12 @@ ledger operations and replaying them through the model, is future work.
 A fuzz target checks the input handling of the package that adds it; the
 targets do not check the lifecycle. `hack/fuzz.sh` discovers targets
 automatically; a branch with no fuzz target exits 0 and says so.
+
+The release gate reads synthetic GitHub API payloads. Its Go tests and
+`FuzzDecide` cover run and job selection, but the live API's field names and
+pagination are not verified. A change on the GitHub side fails the gate closed:
+an unreadable history is a failed gate. A real `v*` tag and a real release run
+are outside every check in this repository.
 
 ## Chart RBAC property check
 
