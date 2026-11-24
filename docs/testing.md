@@ -155,7 +155,7 @@ The `upgrade` job resolves the last `v*` tag, logs in to `ghcr.io` with the work
 
 | Job | What it runs |
 |---|---|
-| `plan` | Builds the run matrix: entry `1` to `runs`, alternating `bbolt` and `redis` |
+| `plan` | Resolves and validates the 40-hex commit SHA, then builds the run matrix: entry `1` to `runs`, alternating `bbolt` and `redis` |
 | `e2e` | One `make e2e` per matrix entry, 10 runs at a time, 45 minute limit per run |
 | `unit-stress` | `./hack/stress.sh 20` |
 | `gate` | Fails unless every e2e run and the unit stress pass, and writes a pass or fail row per run to the run summary |
@@ -164,13 +164,22 @@ An odd `runs` value gives the bbolt queue one more run. A Redis-only and a bbolt
 
 ### Trigger it
 
-The gate runs weekly on Sunday at 06:00 UTC. Start it by hand before a release:
+The gate runs weekly on Sunday at 06:00 UTC against the default-branch tip at
+that time. Start it by hand before a release:
 
 ```bash
-gh workflow run e2e-stability.yml -f runs=20 -f ref=main
+gh workflow run e2e-stability.yml -f runs=20 -f ref=<40-hex commit sha>
 ```
 
-`make e2e-stability` prints that command and does not run it. `runs` accepts 1 to 100. `ref` accepts any branch, tag, or commit.
+`make e2e-stability` prints an equivalent command with `ref` set to the current
+HEAD and does not run it. `runs` accepts 1 to 100. `ref` must be a full
+40-character commit SHA; `plan` rejects anything else before the matrix starts.
+A branch or tag name is not accepted, because the release gate must know the
+exact commit.
+
+The run-name is `e2e-stability runs=<runs> sha=<sha>`. The release gate reads
+that title, so a dispatch on `main` still counts for the commit it names. See
+[release.md](release.md#release-gate).
 
 ### Unit stress
 

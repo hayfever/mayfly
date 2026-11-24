@@ -590,9 +590,12 @@ The model abstracts these details:
 - `FuzzDecide` (`internal/releasegate`) feeds arbitrary workflow-run and job
   payloads to `Decide`. A PASS must satisfy an independent, more permissive
   search: a green `ci` run and a successful `e2e-stability` run with at least
-  20 e2e jobs and a green stability gate job. Seeds cover a passing history, a
-  stability run with five runs, an empty jobs list, and invalid JSON. A
-  60-second run made 5,053,225 executions.
+  20 e2e jobs and a green stability gate job. The independent search matches a
+  stability run by `head_sha` or an exact `sha=<sha>` title token, never by a
+  substring. Seeds cover a passing history, a stability run with five runs, an
+  empty jobs list, invalid JSON, a dispatch on another commit whose title names
+  the target, and titles with a short, longer, unbounded, or prefix-sharing
+  SHA. A 60-second run made 6,493,973 executions.
 
 ## What is abstracted away
 

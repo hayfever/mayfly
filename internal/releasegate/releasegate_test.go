@@ -5,7 +5,11 @@ import (
 	"testing"
 )
 
-const testSHA = "0123456789abcdef0123456789abcdef01234567"
+const (
+	testSHA = "0123456789abcdef0123456789abcdef01234567"
+	// otherSHASHA is a commit that is not testSHA.
+	otherSHASHA = "ffffffffffffffffffffffffffffffffffffffff"
+)
 
 func ciRun(conclusion string) Run {
 	return Run{
@@ -21,6 +25,12 @@ func ciRun(conclusion string) Run {
 	}
 }
 
+func ciAttempt(attempt int, conclusion string) Run {
+	r := ciRun(conclusion)
+	r.RunAttempt = attempt
+	return r
+}
+
 func stabilityRun(id int64, attempt int, conclusion string) Run {
 	return Run{
 		ID:         id,
@@ -33,6 +43,15 @@ func stabilityRun(id int64, attempt int, conclusion string) Run {
 		RunAttempt: attempt,
 		CreatedAt:  "2026-11-23T09:00:00Z",
 	}
+}
+
+// stabilityRunNamed returns a run that names headSHA and title, as a dispatch
+// on another ref does: the run ran there, and the run-name names the target.
+func stabilityRunNamed(id int64, attempt int, conclusion, headSHA, title string) Run {
+	r := stabilityRun(id, attempt, conclusion)
+	r.HeadSHA = headSHA
+	r.DisplayTitle = title
+	return r
 }
 
 // stabilityJobs returns the jobs of one complete e2e-stability attempt: the
@@ -175,6 +194,96 @@ func TestDecide(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// The documented command dispatches e2e-stability on main while it
+			// names the release commit in the run-name. The run counts.
+			name: "dispatch on main names the gated sha",
+			sha:  testSHA,
+			runs: []Run{
+				ciRun("success"),
+				stabilityRunNamed(20, 1, "success", otherSHASHA, "e2e-stability runs=20 sha="+testSHA),
+			},
+			jobs:   stabilityJobs(20, 1, RequiredStabilityRuns),
+			wantOK: true,
+		},
+		{
+			// #52 applies to ci too: attempt 1 passed and the rerun failed.
+			name: "ci green attempt survived a failed rerun",
+			sha:  testSHA,
+			runs: []Run{
+				ciAttempt(1, "success"),
+				ciAttempt(2, "failure"),
+				stabilityRun(20, 1, "success"),
+			},
+			jobs:   stabilityJobs(20, 1, RequiredStabilityRuns),
+			wantOK: true,
+		},
+		{
+			// #52 with the API shape that reports only the latest attempt: the
+			// rerun failed, attempt 1 passed, and both attempts' jobs exist.
+			name: "latest stability attempt failed but an earlier attempt passed",
+			sha:  testSHA,
+			runs: []Run{
+				ciRun("success"),
+				stabilityRun(20, 2, "failure"),
+				stabilityRun(20, 1, "success"),
+			},
+			jobs: append(
+				stabilityJobs(20, 1, RequiredStabilityRuns),
+				stabilityJobs(20, 2, RequiredStabilityRuns)...,
+			),
+			wantOK: true,
+		},
+		{
+			name: "run name with another sha fails",
+			sha:  testSHA,
+			runs: []Run{
+				ciRun("success"),
+				stabilityRunNamed(20, 1, "success", otherSHASHA,
+					"e2e-stability runs=20 sha=ffffffffffffffffffffffffffffffffffffffff"),
+			},
+			wantReason: "no e2e-stability workflow run exists",
+		},
+		{
+			name: "run name with a short sha fails",
+			sha:  testSHA,
+			runs: []Run{
+				ciRun("success"),
+				stabilityRunNamed(20, 1, "success", otherSHASHA,
+					"e2e-stability runs=20 sha="+testSHA[:16]),
+			},
+			wantReason: "no e2e-stability workflow run exists",
+		},
+		{
+			name: "run name with a longer hex string fails",
+			sha:  testSHA,
+			runs: []Run{
+				ciRun("success"),
+				stabilityRunNamed(20, 1, "success", otherSHASHA,
+					"e2e-stability runs=20 sha="+testSHA+"0"),
+			},
+			wantReason: "no e2e-stability workflow run exists",
+		},
+		{
+			name: "run name without a token boundary fails",
+			sha:  testSHA,
+			runs: []Run{
+				ciRun("success"),
+				stabilityRunNamed(20, 1, "success", otherSHASHA,
+					"e2e-stability runs=20 xsha="+testSHA),
+			},
+			wantReason: "no e2e-stability workflow run exists",
+		},
+		{
+			name: "run name with a sha sharing the prefix fails",
+			sha:  testSHA,
+			runs: []Run{
+				ciRun("success"),
+				stabilityRunNamed(20, 1, "success", otherSHASHA,
+					"e2e-stability runs=20 sha="+testSHA[:39]+"0"),
+			},
+			wantReason: "no e2e-stability workflow run exists",
+		},
+		{
 			name:       "no sha",
 			sha:        " ",
 			runs:       []Run{ciRun("success"), stabilityRun(20, 1, "success")},
@@ -209,7 +318,7 @@ func TestDecide(t *testing.T) {
 }
 
 func otherSHA(r Run) Run {
-	r.HeadSHA = "ffffffffffffffffffffffffffffffffffffffff"
+	r.HeadSHA = otherSHASHA
 	return r
 }
 

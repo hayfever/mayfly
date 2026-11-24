@@ -67,8 +67,9 @@ stress:
 	./hack/stress.sh
 
 # The 1.0 stability gate runs in CI. This target only prints how to start it.
+# e2e-stability.yml requires a full 40-character commit SHA, not a branch.
 e2e-stability:
-	@echo "gh workflow run e2e-stability.yml -f runs=20 -f ref=main"
+	@echo "gh workflow run e2e-stability.yml -f runs=20 -f ref=$$(git rev-parse HEAD)"
 
 run-local:
 	./hack/run-local.sh

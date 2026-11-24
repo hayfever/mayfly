@@ -35,17 +35,23 @@ const (
 // e2eJob matches the e2e-stability matrix job name, for example `e2e (1/bbolt)`.
 var e2eJob = regexp.MustCompile(`^e2e \((\d+)/(bbolt|redis)\)$`)
 
+// titleSHA matches the run-name that e2e-stability.yml sets:
+// `e2e-stability runs=20 sha=<40-hex>`. The sha is a whole token, so a prefix,
+// a longer hex string, `xsha=`, or a different sha never matches.
+var titleSHA = regexp.MustCompile(`(?:^|\s)sha=([0-9a-fA-F]{40})(?:\s|$)`)
+
 // Run is the subset of a GitHub Actions workflow run that the gate reads.
 type Run struct {
-	ID         int64  `json:"id"`
-	Name       string `json:"name"`
-	Path       string `json:"path"`
-	HeadSHA    string `json:"head_sha"`
-	Event      string `json:"event"`
-	Status     string `json:"status"`
-	Conclusion string `json:"conclusion"`
-	RunAttempt int    `json:"run_attempt"`
-	CreatedAt  string `json:"created_at"`
+	ID           int64  `json:"id"`
+	Name         string `json:"name"`
+	Path         string `json:"path"`
+	HeadSHA      string `json:"head_sha"`
+	DisplayTitle string `json:"display_title"`
+	Event        string `json:"event"`
+	Status       string `json:"status"`
+	Conclusion   string `json:"conclusion"`
+	RunAttempt   int    `json:"run_attempt"`
+	CreatedAt    string `json:"created_at"`
 }
 
 // Job is the subset of a GitHub Actions workflow job that the gate reads.
@@ -110,10 +116,14 @@ func checkCI(sha string, runs []Run) string {
 
 // checkStability returns "" when a successful e2e-stability attempt with the
 // full 20-run matrix exists for sha, and records which run satisfied it.
+//
+// A stability run can be dispatched on main while it names the gated commit in
+// its run-name, so a run also belongs to sha when display_title carries an
+// exact `sha=<sha>` token. ci stays on head_sha, because it runs on push.
 func checkStability(sha string, runs []Run, jobs []Job, d *Decision) string {
 	var succeeded, attempted []Run
 	for _, r := range runs {
-		if r.HeadSHA != sha || !isWorkflow(r, gateWorkflowName, gateWorkflowFile) {
+		if !isWorkflow(r, gateWorkflowName, gateWorkflowFile) || !matchesStabilitySHA(r, sha) {
 			continue
 		}
 		attempted = append(attempted, r)
@@ -219,6 +229,28 @@ func isWorkflow(r Run, name, file string) bool {
 		return true
 	}
 	return r.Path != "" && path.Base(r.Path) == file
+}
+
+// matchesStabilitySHA reports whether an e2e-stability run tested sha. A
+// dispatch can run on another commit and name the target in its run-name.
+func matchesStabilitySHA(r Run, sha string) bool {
+	if r.HeadSHA == sha {
+		return true
+	}
+	return titleHasSHA(r.DisplayTitle, sha)
+}
+
+// titleHasSHA reports whether title carries `sha=<sha>` as a whole token.
+func titleHasSHA(title, sha string) bool {
+	if title == "" || sha == "" {
+		return false
+	}
+	for _, m := range titleSHA.FindAllStringSubmatch(title, -1) {
+		if strings.EqualFold(m[1], sha) {
+			return true
+		}
+	}
+	return false
 }
 
 func completed(r Run) bool { return r.Status == "" || r.Status == "completed" }

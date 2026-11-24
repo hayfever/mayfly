@@ -33,6 +33,26 @@ func FuzzDecide(f *testing.F) {
 	f.Add("", []byte("null"), []byte("null"))
 	f.Add(testSHA, []byte("{"), []byte("]"))
 
+	// A dispatch on main names the gated commit in the run-name. Only an
+	// exact `sha=<40-hex>` token may match; a prefix, a longer hex string, a
+	// missing token boundary, or another sha that shares the prefix must not.
+	named := func(title string) []byte {
+		runs := []Run{
+			ciRun("success"),
+			stabilityRunNamed(20, 1, "success", otherSHASHA, title),
+		}
+		data, err := json.Marshal(runs)
+		if err != nil {
+			f.Fatalf("marshal runs: %v", err)
+		}
+		return data
+	}
+	f.Add(testSHA, named("e2e-stability runs=20 sha="+testSHA), seedJobs)
+	f.Add(testSHA, named("e2e-stability runs=20 sha="+testSHA[:16]), seedJobs)
+	f.Add(testSHA, named("e2e-stability runs=20 sha="+testSHA+"0"), seedJobs)
+	f.Add(testSHA, named("e2e-stability runs=20 xsha="+testSHA), seedJobs)
+	f.Add(testSHA, named("e2e-stability runs=20 sha="+testSHA[:39]+"0"), seedJobs)
+
 	f.Fuzz(func(t *testing.T, sha string, runsJSON, jobsJSON []byte) {
 		var runs []Run
 		var jobs []Job
@@ -60,7 +80,9 @@ func FuzzDecide(f *testing.F) {
 
 // naiveGate is a deliberately simpler and more permissive check than Decide:
 // it counts any job whose name starts with "e2e (" and accepts 20 or more. A
-// PASS from the strict implementation must also pass this one.
+// PASS from the strict implementation must also pass this one. The stability
+// selector still requires an exact `sha=` token, so a title substring cannot
+// make the naive check disagree with Decide in the unsafe direction.
 func naiveGate(sha string, runs []Run, jobs []Job) bool {
 	ci := false
 	for _, r := range runs {
@@ -72,7 +94,7 @@ func naiveGate(sha string, runs []Run, jobs []Job) bool {
 		return false
 	}
 	for _, r := range runs {
-		if r.HeadSHA != sha || r.Conclusion != "success" || !isStability(r) {
+		if !naiveMatchesSHA(r, sha) || r.Conclusion != "success" || !isStability(r) {
 			continue
 		}
 		e2e, gate := 0, false
@@ -99,6 +121,23 @@ func naiveGate(sha string, runs []Run, jobs []Job) bool {
 
 func isCI(r Run) bool {
 	return r.Name == ciWorkflowName || path.Base(r.Path) == ciWorkflowFile
+}
+
+// naiveMatchesSHA accepts a run by head_sha or by an exact `sha=<sha>`
+// whitespace-separated token. It never accepts a substring.
+func naiveMatchesSHA(r Run, sha string) bool {
+	if r.HeadSHA == sha {
+		return true
+	}
+	if sha == "" {
+		return false
+	}
+	for _, field := range strings.Fields(r.DisplayTitle) {
+		if strings.EqualFold(field, "sha="+sha) {
+			return true
+		}
+	}
+	return false
 }
 
 func isStability(r Run) bool {

@@ -141,10 +141,10 @@ only when no cache entry exists.
 20 of 20 e2e runs plus the repeated unit stress:
 
 ```bash
-gh workflow run e2e-stability.yml -f runs=20 -f ref=<sha>
+gh workflow run e2e-stability.yml -f runs=20 -f ref=<40-hex commit sha>
 ```
 
-The gate and its failure modes are in
+The workflow rejects a branch or tag name. See
 [Stability gate](testing.md#stability-gate). This step applies to the
 maintainers who tag the release, not to an operator.
 
