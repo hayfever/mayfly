@@ -434,7 +434,7 @@ func TestSchedulerCatchUpEnqueuesOneSlot(t *testing.T) {
 }
 
 func TestMostRecentSlotIsUTC(t *testing.T) {
-	slot, ok := mostRecentSlot("0 7 * * *", time.Date(2026, 11, 13, 23, 0, 0, 0, time.UTC))
+	slot, ok := mostRecentSlot("0 7 * * *", time.Date(2026, 11, 13, 23, 0, 0, 0, time.UTC), time.UTC)
 	if !ok {
 		t.Fatal("no slot")
 	}

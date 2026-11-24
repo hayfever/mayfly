@@ -269,6 +269,8 @@ The schedules compiled from agent files at startup, sorted by name.
 {"items":[{"name":"page-watch","agent":"page-watch","cron":"0 7 * * *","source":"watch-pages"}],"next_cursor":"..."}
 ```
 
+A schedule with a `timezone` adds `"timezone":"America/Chicago"`: the IANA zone the cron fields are read in. The field is omitted when the bundle omits it. An omitted or empty value means UTC. See [sources.md](sources.md#schedules).
+
 ### `POST /api/v1/schedules/{name}/run`
 
 Enqueues one manual run of the named schedule and returns `202` with the accepted-job object: `{"accepted":true,"duplicate":false,"job_id":"s-...","delivery":"manual:...","status":"queued"}`. The run writes its artifact and creates a session when the change totals match the schedule trigger, the same as a cron slot. Manual runs use a random delivery key, so they do not consume or block a cron slot. Unknown schedule: `404 not_found`. Scheduler not started, or the queue is full: `503 unavailable`.

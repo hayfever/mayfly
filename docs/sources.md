@@ -23,6 +23,7 @@ agents:
     schedules:
       - name: page-watch
         cron: "0 7 * * *"
+        timezone: America/Chicago
         source: watch-pages
         prompt: ...
 
@@ -346,6 +347,7 @@ agents:
     schedules:
       - name: page-watch
         cron: "0 7 * * *"
+        timezone: America/Chicago
         source: watch-pages
         ttl: 30m
         triggerOn: [changed]
@@ -360,6 +362,7 @@ agents:
 | --- | --- |
 | `name` | Unique across the bundle |
 | `cron` | Five fields. Macros such as `@daily` are rejected |
+| `timezone` | IANA zone name the cron fields are read in. Omitted or empty means `Etc/UTC` |
 | `source` | Visible source, and the terminal step of the plan |
 | `ttl` | Session time to live. Default 30m, maximum 24h |
 | `triggerOn` | `changed` (default) or `new`, or both |
@@ -369,11 +372,29 @@ agents:
 | `title` | Session title. An empty result falls back to `Scheduled run <date>` |
 | `prompt` | Required session prompt |
 
-Cron slots are UTC. A `CRON_TZ=` prefix is rejected, because a schedule has no
-time zone of its own. The scheduler accepts each slot once, so a restart or a
-slow tick cannot start the same slot twice. On first start it records the
-current slot and waits for the next one. After a downtime, it catches up the
-most recent missed slot, up to seven days back.
+The cron fields are read in `timezone`, an IANA name such as
+`America/Chicago`, so `0 7 * * *` fires at 07:00 local time. Omitted or empty
+means `Etc/UTC`; `UTC` and `Etc/UTC` both mean UTC. A `CRON_TZ=` or `TZ=`
+prefix is rejected: the zone lives only in the `timezone` field. An unknown
+IANA name stops bundle load with an error that names it.
+
+Daylight saving time follows Vixie cron. If a selected civil time does not
+exist, because the clock skips forward, the schedule fires once at the
+transition instant, the first valid local time after the gap. For example,
+`30 2 * * *` in `America/New_York` fires at 03:00 EDT on the spring-forward
+day. If a selected civil time occurs twice, because the clock repeats an hour,
+the schedule fires once, at the first occurrence. For example, `30 1 * * *` in
+`America/New_York` fires at 01:30 EDT and not again at 01:30 EST. The slot key
+is the UTC instant.
+
+An expression whose hour field selects every hour, such as `* * * * *`,
+`*/5 * * * *`, or `0 * * * *`, is not special-cased. It runs on real elapsed
+time: a repeated hour runs twice and a skipped hour does not run.
+
+The scheduler accepts each slot once, so a restart or a slow tick cannot start
+the same slot twice. On first start it records the current slot and waits for
+the next one. After a downtime, it catches up the most recent missed slot, up
+to seven days back.
 
 ### Prompt data
 

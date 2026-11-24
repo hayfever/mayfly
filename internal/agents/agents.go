@@ -56,6 +56,7 @@ type Schedule struct {
 	Name      string   `yaml:"name" json:"name"`
 	Cron      string   `yaml:"cron" json:"cron"`
 	Source    string   `yaml:"source" json:"source"`
+	Timezone  string   `yaml:"timezone" json:"timezone,omitempty"`
 	TTL       string   `yaml:"ttl" json:"ttl"`
 	TriggerOn []string `yaml:"triggerOn" json:"triggerOn"`
 	Context   string   `yaml:"context" json:"context"`

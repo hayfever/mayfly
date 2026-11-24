@@ -236,7 +236,10 @@ func TestScheduleValidation(t *testing.T) {
 		{"missing source", "0 7 * * *", "missing", "", "is not defined"},
 		{"large ttl", "0 7 * * *", "nightly", "\n        ttl: 48h", "ttl must be"},
 		{"bad trigger", "0 7 * * *", "nightly", "\n        triggerOn: [same]", "triggerOn"},
-		{"timezone prefix", "CRON_TZ=Europe/Berlin 0 7 * * *", "nightly", "", "five-field"},
+		{"timezone prefix", "CRON_TZ=Europe/Berlin 0 7 * * *", "nightly", "", "timezone field"},
+		{"tz prefix", "TZ=Europe/Berlin 0 7 * * *", "nightly", "", "timezone field"},
+		{"unknown timezone", "0 7 * * *", "nightly", "\n        timezone: Mars/Olympus", "Mars/Olympus"},
+		{"timezone path", "0 7 * * *", "nightly", "\n        timezone: /etc/localtime", "not an IANA name"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -850,5 +853,124 @@ plugin word-stats placement=inline scope=shared tools=1 effects=- image=-
 `
 	if got := bundle.Describe(); got != want {
 		t.Fatalf("Describe() =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestScheduleTimezone(t *testing.T) {
+	cases := []struct {
+		name     string
+		timezone string
+		want     string
+	}{
+		{"named zone", "America/Chicago", "America/Chicago"},
+		{"utc", "UTC", "UTC"},
+		{"etc utc", "Etc/UTC", "Etc/UTC"},
+		{"omitted", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := ""
+			if tc.timezone != "" {
+				line = "\n        timezone: " + tc.timezone
+			}
+			dir := writeBundle(t, map[string]string{
+				"bundle.yaml": `schemaVersion: 1
+name: bundle
+agents:
+  - name: watcher
+    systemPrompt: watch
+    schedules:
+      - name: nightly
+        cron: "0 7 * * *"
+        source: nightly
+        prompt: run` + line + `
+` + baseConnections + `
+sources:
+  - name: nightly
+    type: http.json
+    connection: api
+    request:
+      path: /x
+`,
+			})
+			bundle, err := load(t, dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			schedule, ok := bundle.Schedule("nightly")
+			if !ok {
+				t.Fatal("schedule missing")
+			}
+			if schedule.Timezone != tc.want {
+				t.Fatalf("Timezone = %q, want %q", schedule.Timezone, tc.want)
+			}
+			if schedule.Location == nil {
+				t.Fatal("Location is nil")
+			}
+			wantZone := tc.timezone
+			if wantZone == "" {
+				wantZone = "UTC"
+			}
+			if got := schedule.Location.String(); got != wantZone {
+				t.Fatalf("Location = %q, want %q", got, wantZone)
+			}
+			if tc.timezone == "" && schedule.Location != time.UTC {
+				t.Fatalf("default location = %s, want UTC", schedule.Location)
+			}
+		})
+	}
+}
+
+func TestScheduleTimezoneDescribe(t *testing.T) {
+	dir := writeBundle(t, map[string]string{
+		"bundle.yaml": `schemaVersion: 1
+name: bundle
+agents:
+  - name: watcher
+    systemPrompt: watch
+    schedules:
+      - name: nightly
+        cron: "0 7 * * *"
+        timezone: America/Chicago
+        source: one
+        prompt: run
+` + baseConnections + `
+sources:
+  - name: one
+    type: http.json
+    connection: api
+    request:
+      path: /x
+`,
+	})
+	bundle, err := load(t, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bundle.Describe(); !strings.Contains(got, `cron="0 7 * * *" timezone=America/Chicago source=one`) {
+		t.Fatalf("Describe() =\n%s", got)
+	}
+}
+
+func TestResolveTimezone(t *testing.T) {
+	for _, name := range []string{"", "UTC", "Etc/UTC"} {
+		got, loc, err := resolveTimezone(name)
+		if err != nil {
+			t.Fatalf("%q: %v", name, err)
+		}
+		if loc == nil {
+			t.Fatalf("%q: nil location", name)
+		}
+		if _, offset := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC).In(loc).Zone(); offset != 0 {
+			t.Fatalf("%q: offset %d, want 0", name, offset)
+		}
+		if name != "" && got != name {
+			t.Fatalf("%q: name = %q", name, got)
+		}
+	}
+	for _, name := range []string{"Mars/Olympus", "../zoneinfo", "/usr/share/zoneinfo/UTC", `America\Chicago`} {
+		if _, _, err := resolveTimezone(name); err == nil || !strings.Contains(err.Error(), "not an IANA name") {
+			t.Fatalf("%q: err = %v", name, err)
+		}
 	}
 }

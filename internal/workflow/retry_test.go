@@ -255,11 +255,11 @@ func TestTickSlotUsesScheduledTime(t *testing.T) {
 		time.Date(2026, 11, 13, 7, 0, 59, 0, time.UTC),
 		time.Date(2026, 11, 13, 7, 3, 10, 0, time.UTC),
 	} {
-		if got := tickSlot("0 7 * * *", now); !got.Equal(time.Date(2026, 11, 13, 7, 0, 0, 0, time.UTC)) {
+		if got := tickSlot("0 7 * * *", now, time.UTC); !got.Equal(time.Date(2026, 11, 13, 7, 0, 0, 0, time.UTC)) {
 			t.Fatalf("tick at %s: slot %s", now, got)
 		}
 	}
-	if got := tickSlot("*/5 * * * *", time.Date(2026, 11, 13, 7, 6, 30, 0, time.UTC)); !got.Equal(time.Date(2026, 11, 13, 7, 5, 0, 0, time.UTC)) {
+	if got := tickSlot("*/5 * * * *", time.Date(2026, 11, 13, 7, 6, 30, 0, time.UTC), time.UTC); !got.Equal(time.Date(2026, 11, 13, 7, 5, 0, 0, time.UTC)) {
 		t.Fatalf("five-minute tick slot = %s", got)
 	}
 }
