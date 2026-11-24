@@ -372,20 +372,28 @@ jobs:
         run: |
           state="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')"
           case "$state" in
-            true)
-              gh release edit "$GITHUB_REF_NAME" --draft=false
-              ;;
-            false)
-              echo "::notice::$GITHUB_REF_NAME is already published"
-              ;;
+            true|false) ;;
             *)
               echo "::error::could not read the draft state of $GITHUB_REF_NAME (got '$state')" >&2
               exit 1
               ;;
           esac
+          # An RC tag contains `-` and must not take the latest marker; a final
+          # tag must. --latest=false is explicit so a rerun of publish cannot
+          # leave an RC marked latest.
+          latest=false
+          if [[ "$GITHUB_REF_NAME" != *-* ]]; then
+            latest=true
+          fi
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest="$latest"
           state="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')"
           if [[ "$state" != "false" ]]; then
             echo "::error::$GITHUB_REF_NAME is still a draft" >&2
             exit 1
           fi
-          echo "published $GITHUB_REF_NAME"
+          marked="$(gh release view "$GITHUB_REF_NAME" --json isLatest --jq '.isLatest')"
+          if [[ "$marked" != "$latest" ]]; then
+            echo "::error::$GITHUB_REF_NAME has isLatest=$marked, want $latest" >&2
+            exit 1
+          fi
+          echo "published $GITHUB_REF_NAME (latest=$latest)"

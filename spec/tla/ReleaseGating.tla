@@ -12,17 +12,20 @@
 \*   RequireGate        the gate must pass before a release artifact is public
 \*   DraftUntilComplete the GitHub release is a draft until every artifact exists
 \*   SignBeforeTag      an image tag is created only for a signed digest
+\*   LatestPrerelease   publish marks a release candidate as `latest`
 \*
 \* The model abstracts each job as an action. A job that fails before its
-\* action is enabled simply leaves the state unchanged; only the three
+\* action is enabled simply leaves the state unchanged; only the four
 \* guarantees above decide what may become public.
 EXTENDS Naturals
 
-CONSTANTS RequireGate, DraftUntilComplete, SignBeforeTag
+CONSTANTS RequireGate, DraftUntilComplete, SignBeforeTag, LatestPrerelease
 
-VARIABLES gate, checksums, digest, imageSigned, imageTag, chart, release
+VARIABLES gate, checksums, digest, imageSigned, imageTag, chart, release,
+          prerelease, latest
 
-vars == <<gate, checksums, digest, imageSigned, imageTag, chart, release>>
+vars == <<gate, checksums, digest, imageSigned, imageTag, chart, release,
+          prerelease, latest>>
 
 \* The gate job succeeded, or the pipeline has no gate to enforce.
 GateOK == RequireGate = FALSE \/ gate = "pass"
@@ -35,17 +38,22 @@ Init ==
   /\ imageTag = FALSE
   /\ chart = FALSE
   /\ release = "none"
+  \* One tag: a final release or a release candidate.
+  /\ prerelease \in BOOLEAN
+  /\ latest = FALSE
 
 \* The gate job decides from the tagged SHA's workflow history.
 GatePass ==
   /\ gate = "pending"
   /\ gate' = "pass"
-  /\ UNCHANGED <<checksums, digest, imageSigned, imageTag, chart, release>>
+  /\ UNCHANGED <<checksums, digest, imageSigned, imageTag, chart, release,
+                 prerelease, latest>>
 
 GateFail ==
   /\ gate = "pending"
   /\ gate' = "fail"
-  /\ UNCHANGED <<checksums, digest, imageSigned, imageTag, chart, release>>
+  /\ UNCHANGED <<checksums, digest, imageSigned, imageTag, chart, release,
+                 prerelease, latest>>
 
 \* GoReleaser builds the archives and checksums.txt and creates the GitHub
 \* release. With DraftUntilComplete the release is a draft; without it,
@@ -56,32 +64,37 @@ BuildCLI ==
   /\ checksums = "missing"
   /\ checksums' = "built"
   /\ release' = IF DraftUntilComplete THEN "draft" ELSE "public"
-  /\ UNCHANGED <<gate, digest, imageSigned, imageTag, chart>>
+  /\ UNCHANGED <<gate, digest, imageSigned, imageTag, chart, prerelease,
+                 latest>>
 
 \* cosign sign-blob --bundle checksums.txt.
 SignChecksums ==
   /\ checksums = "built"
   /\ checksums' = "signed"
-  /\ UNCHANGED <<gate, digest, imageSigned, imageTag, chart, release>>
+  /\ UNCHANGED <<gate, digest, imageSigned, imageTag, chart, release,
+                 prerelease, latest>>
 
 \* Buildx pushes the multi-arch manifest by digest, without a tag.
 BuildImage ==
   /\ digest = "none"
   /\ digest' = "built"
-  /\ UNCHANGED <<gate, checksums, imageSigned, imageTag, chart, release>>
+  /\ UNCHANGED <<gate, checksums, imageSigned, imageTag, chart, release,
+                 prerelease, latest>>
 
 \* Trivy scans the digest; a finding stops the job here.
 ScanImage ==
   /\ digest = "built"
   /\ digest' = "scanned"
-  /\ UNCHANGED <<gate, checksums, imageSigned, imageTag, chart, release>>
+  /\ UNCHANGED <<gate, checksums, imageSigned, imageTag, chart, release,
+                 prerelease, latest>>
 
 \* cosign sign signs the digest.
 SignImage ==
   /\ digest = "scanned"
   /\ ~imageSigned
   /\ imageSigned' = TRUE
-  /\ UNCHANGED <<gate, checksums, digest, imageTag, chart, release>>
+  /\ UNCHANGED <<gate, checksums, digest, imageTag, chart, release,
+                 prerelease, latest>>
 
 \* docker buildx imagetools create makes the version tags.
 TagImage ==
@@ -90,7 +103,8 @@ TagImage ==
   /\ ~imageTag
   /\ (SignBeforeTag = FALSE \/ imageSigned)
   /\ imageTag' = TRUE
-  /\ UNCHANGED <<gate, checksums, digest, imageSigned, chart, release>>
+  /\ UNCHANGED <<gate, checksums, digest, imageSigned, chart, release,
+                 prerelease, latest>>
 
 \* The chart job pushes and signs the chart after the images. The push and the
 \* signature are one action: the job fails as a unit, and a failed job leaves
@@ -101,9 +115,12 @@ Chart ==
   /\ imageTag
   /\ ~chart
   /\ chart' = TRUE
-  /\ UNCHANGED <<gate, checksums, digest, imageSigned, imageTag, release>>
+  /\ UNCHANGED <<gate, checksums, digest, imageSigned, imageTag, release,
+                 prerelease, latest>>
 
-\* The publish job flips the draft public.
+\* The publish job flips the draft public and sets the `latest` marker. A final
+\* release is latest; a release candidate is not, unless LatestPrerelease
+\* models the publish job passing --latest=true for an RC.
 Publish ==
   /\ GateOK
   /\ release = "draft"
@@ -112,7 +129,9 @@ Publish ==
   /\ imageTag
   /\ chart
   /\ release' = "public"
-  /\ UNCHANGED <<gate, checksums, digest, imageSigned, imageTag, chart>>
+  /\ latest' = ((~prerelease) \/ (prerelease /\ LatestPrerelease))
+  /\ UNCHANGED <<gate, checksums, digest, imageSigned, imageTag, chart,
+                 prerelease>>
 
 Stutter == UNCHANGED vars
 
@@ -139,6 +158,8 @@ TypeOK ==
   /\ imageTag \in BOOLEAN
   /\ chart \in BOOLEAN
   /\ release \in {"none", "draft", "public"}
+  /\ prerelease \in BOOLEAN
+  /\ latest \in BOOLEAN
 
 \* Nothing is public without a successful gate.
 NoPublishWithoutGate ==
@@ -156,5 +177,9 @@ PublicReleaseComplete ==
 \* An image tag never names an unsigned digest.
 TagOnlySignedDigests ==
   imageTag => imageSigned
+
+\* The `latest` marker never moves to a release candidate.
+RCNeverLatest ==
+  prerelease => ~latest
 
 =============================================================================

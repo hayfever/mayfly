@@ -451,7 +451,8 @@ The model abstracts these details:
 `spec/tla/ReleaseGating.tla` models the release pipeline in
 [.github/workflows/release.yml](../.github/workflows/release.yml) for #50: the
 gate job, the GoReleaser draft release, the image digest, scan, signature, and
-tag order, the chart, and the final publish. The gate decision itself is Go
+tag order, the chart, the final publish, and the `latest` marker that an RC
+never takes. The gate decision itself is Go
 (`internal/releasegate`), not TLA+. The model checks the ordering guarantees
 that the workflow jobs must keep.
 
@@ -466,7 +467,7 @@ that the workflow jobs must keep.
 | `SignImage` | `cosign sign` over `IMAGE@DIGEST` |
 | `TagImage` | `docker buildx imagetools create` over the signed digest |
 | `Chart` | the `chart` job: `helm push`, `gh release upload`, and `cosign sign` as one unit |
-| `Publish` | the `publish` job: `gh release edit <tag> --draft=false` |
+| `Publish` | the `publish` job: `gh release edit <tag> --draft=false --latest=true\|false` |
 | `Stutter` | no Go function; no further job at the model's bound |
 
 | Property | Meaning | Tests that sample it |
@@ -475,19 +476,23 @@ that the workflow jobs must keep.
 | `NoPublishWithoutGate` | The GitHub release is never public without a successful gate | `TestDecide` (missing, failed, cancelled, and short stability runs), `FuzzDecide` |
 | `PublicReleaseComplete` | A public release has signed checksums, a signed and tagged image, and a signed chart | `TestDecide` (the passing cases), `FuzzDecide`; the job graph in `release.yml` |
 | `TagOnlySignedDigests` | An image tag exists only after the digest signature | the step order in the `images` job |
+| `RCNeverLatest` | A release candidate never carries the `latest` marker | the `make_latest` template in `.goreleaser.yaml` and the `publish` job's explicit `--latest` |
 
-`ReleaseGating.cfg` sets `RequireGate = TRUE`, `DraftUntilComplete = TRUE`, and
-`SignBeforeTag = TRUE`, and checks all four invariants: 67 states generated, 26
-distinct, under one second. The negative cfgs each flip one switch:
+`ReleaseGating.cfg` sets `RequireGate = TRUE`, `DraftUntilComplete = TRUE`,
+`SignBeforeTag = TRUE`, and `LatestPrerelease = FALSE`, and checks all five
+invariants: 134 states generated, 52 distinct, under one second. `prerelease`
+ranges over both values in `Init`, so one run covers a final tag and a release
+candidate. The negative cfgs each flip one switch:
 
 | Cfg | Constant | Expected violation |
 |---|---|---|
 | `ReleaseGating_no_gate_buggy.cfg` | `RequireGate = FALSE` | `NoPublishWithoutGate` |
 | `ReleaseGating_draft_false_buggy.cfg` | `DraftUntilComplete = FALSE` | `PublicReleaseComplete` |
 | `ReleaseGating_tag_before_sign_buggy.cfg` | `SignBeforeTag = FALSE` | `TagOnlySignedDigests` |
+| `ReleaseGating_rc_latest_buggy.cfg` | `LatestPrerelease = TRUE` | `RCNeverLatest` |
 
-The runs stop quickly: no-gate 174 states (54 distinct), draft-false 27 (16),
-and tag-before-sign 70 (29).
+The runs stop quickly: no-gate 348 states (108 distinct), draft-false 47 (29),
+tag-before-sign 111 (50), and RC-latest 132 (52).
 
 The model abstracts these details:
 
@@ -506,6 +511,11 @@ The model abstracts these details:
   tag is outside the model.
 - The model covers one tag. Two tags at the same time are two separate release
   runs.
+- The tag's kind is nondeterministic in `Init`: `prerelease` is a BOOLEAN for a
+  release candidate or a final release. `publish` sets `latest` from it, so one
+  model run covers both. `LatestPrerelease` is the fault switch: TRUE models a
+  publish that passes `--latest=true` for an RC. The `make_latest` template in
+  `.goreleaser.yaml` is the production reason the switch is FALSE.
 
 ## Fuzz targets for the bounds
 

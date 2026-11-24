@@ -48,9 +48,10 @@ changelog:
 
 release:
   # The GitHub release stays a draft until release.yml's publish job proves
-  # that the images, chart, and signatures exist. A release candidate keeps
-  # `prerelease: auto` and never takes the `latest` marker, which stays on the
-  # newest final release.
+  # that the images, chart, and signatures exist. `prerelease: auto` marks an
+  # RC by its version. `make_latest` is a template because `auto` is not a
+  # value GoReleaser accepts: an RC sets false and a final release sets true,
+  # so the `latest` marker never moves to a release candidate.
   draft: true
   prerelease: auto
-  make_latest: auto
+  make_latest: '{{ if .Prerelease }}false{{ else }}true{{ end }}'

@@ -69,7 +69,7 @@ A failed scan fails the job before any tag exists. A failed signature fails the 
 
 GoReleaser signs the CLI release too. It builds the archives and `checksums.txt`, runs `cosign sign-blob --bundle checksums.txt.sigstore.json checksums.txt` with the same keyless identity, and attaches the bundle to the release. The goreleaser job has `id-token: write` for that token.
 
-The GitHub release is a draft from creation until the `publish` job, which needs `goreleaser`, both `images`, and `chart`. A failed image scan, signature, or chart push therefore leaves only a draft release. `publish` runs `gh release edit <tag> --draft=false` after every job succeeded.
+The GitHub release is a draft from creation until the `publish` job, which needs `goreleaser`, both `images`, and `chart`. A failed image scan, signature, or chart push therefore leaves only a draft release. `publish` runs `gh release edit <tag> --draft=false --latest=true|false` after every job succeeded. It passes `--latest=false` when the tag contains `-` (an RC) and `--latest=true` otherwise, then checks `isLatest` matches.
 
 ### Verify a published release
 
@@ -175,7 +175,7 @@ git tag -a vX.Y.Z-rc.1 -m "Mayfly vX.Y.Z-rc.1"
 git push origin vX.Y.Z-rc.1
 ```
 
-The same gated workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`) and `release.make_latest: auto` keeps the `latest` marker on the newest final release, so an RC never becomes latest. The release stays a draft until `publish` runs. The image tags come from the semver patterns in `release.yml`: an RC tag like `v1.0.0-rc.1` publishes only `1.0.0-rc.1`. `docker/metadata-action` skips the `{{major}}.{{minor}}` pattern for a pre-release, and `latest` is enabled only for a tag with no `-`. The chart is pushed as `1.0.0-rc.1`. Install it with `--version 1.0.0-rc.1`. When the candidate passes, tag `v1.0.0` on the same commit; that tag publishes `1.0.0`, `1.0`, and `latest`.
+The same gated workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`). Its `make_latest` setting is the template `{{ if .Prerelease }}false{{ else }}true{{ end }}`, so GoReleaser creates an RC without the `latest` marker and a final release with it. The `publish` job repeats the decision: it passes `--latest=false` for a tag that contains `-` and `--latest=true` otherwise, then checks `isLatest`. An RC never becomes latest. The release stays a draft until `publish` runs. The image tags come from the semver patterns in `release.yml`: an RC tag like `v1.0.0-rc.1` publishes only `1.0.0-rc.1`. `docker/metadata-action` skips the `{{major}}.{{minor}}` pattern for a pre-release, and `latest` is enabled only for a tag with no `-`. The chart is pushed as `1.0.0-rc.1`. Install it with `--version 1.0.0-rc.1`. When the candidate passes, tag `v1.0.0` on the same commit; that tag publishes `1.0.0`, `1.0`, and `latest`.
 
 ## Post-release verification
 

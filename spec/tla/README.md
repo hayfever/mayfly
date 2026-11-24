@@ -14,9 +14,10 @@ the per-client failure limiter, and the 32-character token-secret floor.
 daylight-saving transition: the spring-forward fire at the transition instant,
 the single fall-back fire at the first occurrence, and slot keys as UTC
 instants. `ReleaseGating.tla` models the release pipeline: the gate, the draft
-GitHub release, the image scan, signature, and tag order, the chart, and the
-final publish. A cfg runs the module named by its basename up to the first
-underscore, so `HubRetention_evict_inbox_buggy.cfg` runs `HubRetention.tla`.
+GitHub release, the image scan, signature, and tag order, the chart, the final
+publish, and the rule that an RC never takes the `latest` marker. A cfg runs
+the module named by its basename up to the first underscore, so
+`HubRetention_evict_inbox_buggy.cfg` runs `HubRetention.tla`.
 [formal-verification.md](../../docs/formal-verification.md) maps each action to
 the Go code it models, lists the invariants, and states what the models
 abstract away.
@@ -101,10 +102,11 @@ which runs only in the nightly `tlc-deep` job.
 | `CronTimezone_fall.cfg` | Fall-back transition, positive |
 | `CronTimezone_skips_gap_buggy.cfg` | `FireGapAtTransition = FALSE`: a selected time in the skipped hour never fires |
 | `CronTimezone_double_fallback_buggy.cfg` | `DoubleFallback = TRUE`: a repeated civil time fires at both offsets |
-| `ReleaseGating.cfg` | Gate before publish, draft until complete, sign before tag, positive |
+| `ReleaseGating.cfg` | Gate before publish, draft until complete, sign before tag, no RC is latest, positive |
 | `ReleaseGating_no_gate_buggy.cfg` | `RequireGate = FALSE`: the release is published without a successful gate |
 | `ReleaseGating_draft_false_buggy.cfg` | `DraftUntilComplete = FALSE`: the release is public before the images, chart, and signatures exist |
 | `ReleaseGating_tag_before_sign_buggy.cfg` | `SignBeforeTag = FALSE`: an image tag names an unsigned digest |
+| `ReleaseGating_rc_latest_buggy.cfg` | `LatestPrerelease = TRUE`: publish marks a release candidate as `latest` |
 | `deep/SessionResume_two_sessions.cfg` | Nightly only: two sessions, one turn each, one shared control-plane restart; safety invariants (6,127,026 distinct states, about 10.5 minutes with `-workers auto`) |
 
 `HubRetention.cfg` runs eight appends over sizes `{1, 2, 3}` and human posts over
@@ -131,11 +133,13 @@ one-hour transition, and one scheduled civil minute. Each holds 8 generated
 states (4 distinct) and stops in under a second. Each negative cfg stops after
 4 states (3 distinct) on the invariant named in its `expect-violation` line.
 
-`ReleaseGating.cfg` is the smallest model: the positive run holds 67 generated
-states (26 distinct) in under a second. The no-gate negative cfg stops on
-`NoPublishWithoutGate` (174 states, 54 distinct), the draft-false cfg on
-`PublicReleaseComplete` (27, 16), and the tag-before-sign cfg on
-`TagOnlySignedDigests` (70, 29).
+`ReleaseGating.cfg` is the smallest model: the positive run holds 134
+generated states (52 distinct) in under a second. Its `prerelease` variable
+ranges over both a final tag and an RC, so one run checks both `latest`
+outcomes. The no-gate negative cfg stops on `NoPublishWithoutGate` (348 states,
+108 distinct), the draft-false cfg on `PublicReleaseComplete` (47, 29), the
+tag-before-sign cfg on `TagOnlySignedDigests` (111, 50), and the RC-latest cfg
+on `RCNeverLatest` (132, 52).
 
 `SessionResume.cfg` holds 34,840 distinct states and finishes in about 18
 seconds; `SessionResume_resume.cfg` holds 2,429 and finishes in about a
