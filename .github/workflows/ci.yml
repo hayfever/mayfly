@@ -73,6 +73,25 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
           "$(go env GOPATH)/bin/govulncheck" ./...
 
+  shell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: k3d image matcher fixtures
+        run: make test-k3d-images
+      - name: shellcheck
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
+          shellcheck \
+            hack/lib/k3d-images.sh \
+            hack/e2e.sh \
+            hack/k3d-up.sh \
+            hack/test-k3d-images.sh
+
   api-diff:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest

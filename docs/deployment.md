@@ -12,7 +12,7 @@ The script:
 
 1. Builds `mayflyd:dev`, `mayfly-agent:dev`, `mayfly-llmstub:dev`, `mayfly-mcpstub:dev`.
 2. Creates the `mayfly` k3d cluster from [deploy/k3d.yaml](../deploy/k3d.yaml) if absent. k3s enforces NetworkPolicy; the cluster publishes NodePort 30080 as host port 8080.
-3. Imports the images into the k3d node.
+3. Imports the images into every k3d node and verifies each one, retrying missing images up to three times with backoff.
 4. Creates the `mayfly` namespace and the `mayfly-secrets` Secret with an API token and webhook secret.
 5. Applies the local overlay and waits for rollouts.
 
