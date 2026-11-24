@@ -1427,6 +1427,12 @@ components:
           type: string
         cron:
           type: string
+        timezone:
+          type: string
+          description: >
+            IANA time zone the cron fields are read in, such as
+            `America/Chicago`. Omitted or empty means `Etc/UTC`. The zone must
+            not be embedded in `cron`.
         source:
           type: string
     SchedulePage:

@@ -85,6 +85,7 @@ agents:
     schedules:
       - name: page-watch
         cron: "0 7 * * *"
+        timezone: America/Chicago
         source: watch-pages
         ttl: 30m
         triggerOn: [changed]
@@ -96,7 +97,7 @@ agents:
           {{ .Diff }}{{ end }}
 ```
 
-A schedule names a source from the same bundle, a five-field cron expression in UTC, and the prompt the session receives. The control plane writes a run artifact for every run and starts a session only when the change totals match `triggerOn`. A schedule template can call `env` only for a variable listed in the schedule's `requiredEnv` or `optionalEnv`; anything else fails at startup. Sources, connections, the environment allowlist, and prompt data are documented in [sources.md](sources.md).
+A schedule names a source from the same bundle, a five-field cron expression, an optional IANA time zone (UTC when omitted), and the prompt the session receives. The control plane writes a run artifact for every run and starts a session only when the change totals match `triggerOn`. A schedule template can call `env` only for a variable listed in the schedule's `requiredEnv` or `optionalEnv`; anything else fails at startup. Sources, connections, the environment allowlist, and prompt data are documented in [sources.md](sources.md).
 
 ## Harness selection
 

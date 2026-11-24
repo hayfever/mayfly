@@ -1,14 +1,14 @@
 # Formal verification
 
 Two checks cover behavior that unit tests can only sample: TLA+ models of the
-session lifecycle, hub retention, request-body deadlines, and queue poison
-recovery, and native Go fuzz targets. A third check covers the chart RBAC over
+session lifecycle, hub retention, request-body deadlines, queue poison
+recovery, and schedule time zones, and native Go fuzz targets. A third check covers the chart RBAC over
 its whole namespace configuration space. Each has a script or command and a CI
 job.
 
 | Check | Script | CI job |
 |---|---|---|
-| TLC on `SessionResume.tla`, `HubRetention.tla`, `BodyReadDeadline.tla`, `QueuePoison.tla`, and `AuthHardening.tla` | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
+| TLC on `SessionResume.tla`, `HubRetention.tla`, `BodyReadDeadline.tla`, `QueuePoison.tla`, `AuthHardening.tla`, and `CronTimezone.tla` | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
 | TLC with two sessions | `hack/tlc.sh --deep` | `tlc-deep` in verify.yml, nightly and on demand |
 | Every fuzz target | `hack/fuzz.sh` | `fuzz-nightly` in verify.yml |
 | Chart RBAC property check | `MAYFLY_REQUIRE_HELM=1 go test ./test/chart/...` | `chart` step of the `test` job in [ci.yml](../.github/workflows/ci.yml) |
@@ -390,6 +390,62 @@ The model abstracts these details:
 - The 429 response is modeled as a refused attempt. The `Retry-After` value is
   outside the model.
 
+## Cron time-zone model
+
+`spec/tla/CronTimezone.tla` models a schedule whose cron fields are read in one
+civil time zone, across a daylight-saving transition. It covers the Vixie cron
+rules that `nextWallClockSlot` implements: a selected civil time in the
+spring-forward gap fires once at the transition instant, and a selected civil
+time in the fall-back overlap fires once at its first occurrence. A slot key is
+a UTC instant.
+
+| TLA+ action | Go code it models |
+|---|---|
+| `FireDay` | `zonedSchedule.Next` and `nextWallClockSlot` (`internal/workflow/scheduler.go`) when the selected civil time exists. `civilInstants` returns one instant normally and two in the overlap; the first instant after the input becomes the slot |
+| `GapDay` | the empty result from `civilInstants` and `gapInstant`, which binary-searches the transition instant. With `FireGapAtTransition = TRUE` the transition key becomes the slot; `FALSE` models skipping the day |
+| `Stutter` | no Go function; no further day at the modeled bound |
+
+`DoubleFallback` is the fault switch for the overlap. `TRUE` emits both UTC
+keys for the repeated civil time and models a scheduler that fires twice, which
+the Vixie rule forbids.
+
+| Property | Meaning | Tests that sample it |
+|---|---|---|
+| `TypeOK` | The day index and slot set stay in their domains | none; model well-formedness |
+| `ValidSlotKeys` | Every slot is a UTC instant the calendar or an enabled fault explains | `TestChicagoWallClockAcrossDST`, `TestNewYorkSpringForwardFiresAtTransition`, `TestLordHoweHalfHourShift` |
+| `GapFiresAtTransition` | A selected civil time in the spring-forward gap fires once at the transition instant, not skipped and not at a wall time that does not exist | `TestNewYorkSpringForwardFiresAtTransition`, `TestMostRecentSlotUsesGapTransition`, `TestLordHoweHalfHourShift`, `FuzzCronTZNext` |
+| `FallbackFiresOnce` | A selected civil time in the fall-back overlap fires once, at the first occurrence; the second UTC key never becomes a slot | `TestNewYorkFallBackFiresOnce`, `TestMostRecentSlotUsesFirstFallBack`, `TestLordHoweHalfHourShift`, `FuzzCronTZNext` |
+
+`CronTimezone.cfg` models the spring transition and
+`CronTimezone_fall.cfg` the fall transition; both check every invariant. Each
+holds 8 generated states (4 distinct) and finishes in under a second.
+`CronTimezone_skips_gap_buggy.cfg` sets `FireGapAtTransition = FALSE` and must
+report `GapFiresAtTransition` (4 generated, 3 distinct).
+`CronTimezone_double_fallback_buggy.cfg` sets `DoubleFallback = TRUE` and must
+report `FallbackFiresOnce` (4 generated, 3 distinct). Two fall-back firings are
+the fault here, not the specified behavior.
+
+The model abstracts these details:
+
+- One scheduled civil minute per civil day. The cron grammar, the day-of-month
+  and day-of-week fields, and the number of selected minutes per day are
+  outside the model; one transition day is enough to check the rules.
+- Offsets are minutes west of UTC. Days other than the transition day use
+  offset 0, so the model checks key arithmetic and the skip and overlap rules,
+  not the real zone database.
+- A fixed-hour expression that selects several minutes inside the gap, such as
+  `* 2`, fires once at the transition in the Go code. The model has one
+  scheduled civil minute and cannot show an accumulated run per minute. Vixie
+  cron may run each accumulated job at the transition; Mayfly starts one
+  session per slot key, and a key is the transition instant, so the first fire
+  is the defined behavior.
+- The real-time path for an expression whose hour field selects every hour is
+  outside the model. The Go code delegates that path to `robfig/cron`, and the
+  unit tests cover the repeated and skipped hours.
+- The cron timer, the catch-up loop, and the queue delivery key are outside the
+  model. The slot is the UTC instant the model emits; `mostRecentSlot` and
+  `acceptSlot` use the same instant as the key.
+
 ## Fuzz targets for the bounds
 
 - `FuzzHubAppendBudget` (`internal/hub`) drives appends, restores, and replays,
@@ -427,6 +483,16 @@ The model abstracts these details:
   source-run resume path. A torn, wrong-run, unknown-field, or newer-version
   artifact must return an error, never a panic. A 60-second run made 44,824
   executions.
+- `FuzzCronTZNext` (`internal/workflow`) drives `Next()` for an expression, a
+  zone, and a start instant. It asserts strictly increasing UTC slots on whole
+  minutes, stable results, and the Vixie rules: a fixed-hour expression fires
+  only at a selected civil time or at a zone transition, never twice at the
+  same civil minute, and, when it selects every day, at most 26 hours apart, so
+  the spring-forward day is not skipped; an all-hours expression matches its
+  minute field and may fire twice in a repeated hour. Seeds cover America/Chicago,
+  America/New_York, Australia/Lord_Howe, Europe/Berlin, UTC, the 2026
+  transitions, and daily, gap, overlap, every-minute, and hourly expressions.
+  A 60-second run made 289,281 executions.
 - `FuzzTokenSecretValidation` (`internal/config`) feeds arbitrary name, scope,
   and secret bytes to the token rules. It asserts that a secret shorter than
   `MinTokenSecretLength` is rejected with the fixed error text, that a longer

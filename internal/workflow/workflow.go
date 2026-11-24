@@ -84,10 +84,11 @@ type Runner struct {
 
 // ScheduleInfo describes one schedule for the config API.
 type ScheduleInfo struct {
-	Name   string `json:"name"`
-	Agent  string `json:"agent"`
-	Cron   string `json:"cron"`
-	Source string `json:"source"`
+	Name     string `json:"name"`
+	Agent    string `json:"agent"`
+	Cron     string `json:"cron"`
+	Timezone string `json:"timezone,omitempty"`
+	Source   string `json:"source"`
 }
 
 // New builds a runner. Every schedule is already compiled in the bundle.
@@ -136,10 +137,11 @@ func (r *Runner) Schedules() []ScheduleInfo {
 	out := make([]ScheduleInfo, 0, len(r.bundle.Schedules))
 	for _, schedule := range r.bundle.Schedules {
 		out = append(out, ScheduleInfo{
-			Name:   schedule.Name,
-			Agent:  schedule.Agent,
-			Cron:   schedule.Cron,
-			Source: schedule.Source,
+			Name:     schedule.Name,
+			Agent:    schedule.Agent,
+			Cron:     schedule.Cron,
+			Timezone: schedule.Timezone,
+			Source:   schedule.Source,
 		})
 	}
 	return out

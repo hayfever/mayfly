@@ -9,7 +9,11 @@ stalled set of headers, with and without the server's read deadline.
 `QueuePoison.tla` models a queue with a poison job: claim, handler panic, Nack,
 lease expiry, restart, and burial at `max_attempts`. `AuthHardening.tla` models
 API authentication: always-on audit lines, failed-auth auditing and counting,
-the per-client failure limiter, and the 32-character token-secret floor. A cfg
+the per-client failure limiter, and the 32-character token-secret floor.
+`CronTimezone.tla` models a schedule in one civil time zone across a
+daylight-saving transition: the spring-forward fire at the transition instant,
+the single fall-back fire at the first occurrence, and slot keys as UTC
+instants. A cfg
 runs the module named by its basename up to the first underscore, so
 `HubRetention_evict_inbox_buggy.cfg` runs `HubRetention.tla`.
 [formal-verification.md](../../docs/formal-verification.md) maps each action to
@@ -34,7 +38,8 @@ temporary directory, never into the repository.
 ## Config convention
 
 - `SessionResume.cfg`, `HubRetention.cfg`, `BodyReadDeadline.cfg`,
-  `QueuePoison.cfg`, and `AuthHardening.cfg` are the positive configurations.
+  `QueuePoison.cfg`, `AuthHardening.cfg`, `CronTimezone.cfg`, and
+  `CronTimezone_fall.cfg` are the positive configurations.
   Each must pass with no invariant violation; `SessionResume.cfg` and
   `QueuePoison.cfg` must also prove their liveness properties.
 - A configuration whose file name ends in `_buggy.cfg` is a negative check. It
@@ -90,6 +95,10 @@ which runs only in the nightly `tlc-deep` job.
 | `AuthHardening_no_limiter_buggy.cfg` | `LimitFailedAuth = FALSE`: one address guesses without bound |
 | `AuthHardening_short_token_buggy.cfg` | `RejectShortTokens = FALSE`: a short secret loads |
 | `AuthHardening_limit_success_buggy.cfg` | `LimitSuccessBeforeAuth = TRUE`: an over-budget client is refused with a valid credential |
+| `CronTimezone.cfg` | Spring-forward transition, positive |
+| `CronTimezone_fall.cfg` | Fall-back transition, positive |
+| `CronTimezone_skips_gap_buggy.cfg` | `FireGapAtTransition = FALSE`: a selected time in the skipped hour never fires |
+| `CronTimezone_double_fallback_buggy.cfg` | `DoubleFallback = TRUE`: a repeated civil time fires at both offsets |
 | `deep/SessionResume_two_sessions.cfg` | Nightly only: two sessions, one turn each, one shared control-plane restart; safety invariants (6,127,026 distinct states, about 10.5 minutes with `-workers auto`) |
 
 `HubRetention.cfg` runs eight appends over sizes `{1, 2, 3}` and human posts over
@@ -110,6 +119,11 @@ and a one-key map cap, so the limiter bound and its eviction path are reachable.
 The positive run explores 732 states (204 distinct) in under one second. Each
 `AuthHardening_*_buggy.cfg` removes one guarantee and stops on the invariant
 named in its `expect-violation` line.
+
+`CronTimezone.cfg` and `CronTimezone_fall.cfg` use three modeled days, a
+one-hour transition, and one scheduled civil minute. Each holds 8 generated
+states (4 distinct) and stops in under a second. Each negative cfg stops after
+4 states (3 distinct) on the invariant named in its `expect-violation` line.
 
 `SessionResume.cfg` holds 34,840 distinct states and finishes in about 18
 seconds; `SessionResume_resume.cfg` holds 2,429 and finishes in about a

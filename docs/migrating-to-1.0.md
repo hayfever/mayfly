@@ -43,6 +43,13 @@ kubectl -n mayfly rollout status deployment/mayfly --timeout=3m
 A running session keeps its pod and workspace claim across the upgrade. The new
 control plane adopts the pod and continues the turn from the journal.
 
+## Schedule time zones
+
+A schedule accepts an optional `timezone` field holding an IANA name. Omitting
+it keeps the existing behavior: the cron fields are read in UTC. No action is
+needed for an existing bundle. See
+[Schedules](sources.md#schedules) for the daylight-saving rules.
+
 ## Web UI sessions
 
 The web UI no longer keeps the API token in browser storage. It exchanges the

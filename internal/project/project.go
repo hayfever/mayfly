@@ -15,6 +15,10 @@ import (
 	"strings"
 	"time"
 
+	// Bundle load resolves schedule time zones by name. The mayflyd image is
+	// distroless and ships no zoneinfo, so the database is compiled in.
+	_ "time/tzdata"
+
 	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
 
@@ -39,6 +43,24 @@ const (
 	MaxTTL = 24 * time.Hour
 )
 
+// resolveTimezone validates an optional IANA zone name. An empty name is the
+// default zone. The returned name is what the bundle declared, and the
+// location is never nil; callers use it for cron evaluation.
+func resolveTimezone(name string) (string, *time.Location, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", time.UTC, nil
+	}
+	if strings.HasPrefix(name, "/") || strings.Contains(name, "..") || strings.Contains(name, `\`) {
+		return "", nil, fmt.Errorf("timezone %q is not an IANA name", name)
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return "", nil, fmt.Errorf("timezone %q is not an IANA name: %w", name, err)
+	}
+	return name, loc, nil
+}
+
 var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 
 // Options carries source runner limits into plan construction.
@@ -54,11 +76,15 @@ type Options struct {
 	RequirePluginImage bool
 }
 
-// Schedule is one validated schedule bound to its agent and plan.
+// Schedule is one validated schedule bound to its agent and plan. Location is
+// the zone the cron fields are read in; it is UTC when Timezone is empty, and
+// never nil.
 type Schedule struct {
 	Name      string
 	Agent     string
 	Cron      string
+	Timezone  string
+	Location  *time.Location
 	Source    string
 	TTL       time.Duration
 	TriggerOn []string
@@ -131,9 +157,12 @@ func (b *Bundle) Describe() string {
 		out.WriteString("\n")
 	}
 	for _, schedule := range b.Schedules {
-		fmt.Fprintf(&out, "schedule %s agent=%s cron=%q source=%s ttl=%s trigger=%s\n",
-			schedule.Name, schedule.Agent, schedule.Cron, schedule.Source, schedule.TTL,
-			strings.Join(schedule.TriggerOn, ","))
+		fmt.Fprintf(&out, "schedule %s agent=%s cron=%q", schedule.Name, schedule.Agent, schedule.Cron)
+		if schedule.Timezone != "" {
+			fmt.Fprintf(&out, " timezone=%s", schedule.Timezone)
+		}
+		fmt.Fprintf(&out, " source=%s ttl=%s trigger=%s\n",
+			schedule.Source, schedule.TTL, strings.Join(schedule.TriggerOn, ","))
 	}
 	for _, schedule := range b.Schedules {
 		plan := b.Plans[schedule.Name]
@@ -700,12 +729,23 @@ func buildSchedule(bundle *Bundle, agentName string, raw agents.Schedule, denied
 	if !visible(bundle.Sources[schedule.Source].Scope, agentName) {
 		return Schedule{}, fmt.Errorf("schedule %q: source %q is not visible to %s", schedule.Name, schedule.Source, agentName)
 	}
+	for _, field := range strings.Fields(schedule.Cron) {
+		if strings.HasPrefix(field, "CRON_TZ=") || strings.HasPrefix(field, "TZ=") {
+			return Schedule{}, fmt.Errorf("schedule %q: cron must not embed CRON_TZ= or TZ=; set the timezone field", schedule.Name)
+		}
+	}
 	if schedule.Cron == "" || strings.HasPrefix(schedule.Cron, "@") || len(strings.Fields(schedule.Cron)) != 5 {
 		return Schedule{}, fmt.Errorf("schedule %q: cron must be a five-field expression", schedule.Name)
 	}
 	if _, err := cron.ParseStandard(schedule.Cron); err != nil {
 		return Schedule{}, fmt.Errorf("schedule %q: %w", schedule.Name, err)
 	}
+	timezone, location, err := resolveTimezone(raw.Timezone)
+	if err != nil {
+		return Schedule{}, fmt.Errorf("schedule %q: %w", schedule.Name, err)
+	}
+	schedule.Timezone = timezone
+	schedule.Location = location
 	if raw.TTL != "" {
 		ttl, err := time.ParseDuration(raw.TTL)
 		if err != nil {
