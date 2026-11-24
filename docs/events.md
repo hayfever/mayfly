@@ -104,8 +104,12 @@ The outcome of one tool invocation.
 | `call_id` | string | Model call identifier. |
 | `error` | boolean | The tool reported an error. |
 | `interrupted` | boolean | A restart cut the call short and the result is not a real output. |
+| `images` | integer | Image parts the model receives with this result. Absent when zero. |
+| `images_omitted` | integer | Image parts replaced by a labeled text placeholder because the model does not accept image content. Absent when zero. |
 
-The field `text` holds the tool output.
+The field `text` holds the tool output. An image part appears as
+`[image <mime>, <bytes> bytes, sha256:<digest>]`; image bytes never appear in
+the event.
 
 ### `status`
 

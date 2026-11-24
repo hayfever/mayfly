@@ -2,7 +2,9 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 
+	"github.com/hayfever/mayfly/internal/content"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
 	"github.com/hayfever/mayfly/internal/stub"
 )
@@ -226,7 +229,7 @@ func TestHTTPClientAndAuth(t *testing.T) {
 		t.Fatalf("authorization = %q", auth)
 	}
 	tools, err := client.ListTools(ctx)
-	if err != nil || len(tools) != 1 {
+	if err != nil || len(tools) != 2 || tools[0].Name != "echo" || tools[1].Name != "image" {
 		t.Fatalf("tools = %+v err=%v", tools, err)
 	}
 	out, _, err := client.CallTool(ctx, "echo", json.RawMessage(`{"text":"hi"}`))
@@ -306,7 +309,7 @@ func TestManagerNamesTools(t *testing.T) {
 		Command:   os.Args[0],
 		Args:      []string{"-test.run=TestMCPHelperProcess"},
 		Env:       map[string]string{"MAYFLY_MCP_HELPER": "1"},
-	}}, testLogger())
+	}}, testLogger(), content.Limits{})
 	defer manager.Close()
 	if errs := manager.Errors(); len(errs) != 0 {
 		t.Fatalf("errors: %v", errs)
@@ -318,11 +321,11 @@ func TestManagerNamesTools(t *testing.T) {
 	if tools[0].Name != "mcp_my_server_echo" {
 		t.Fatalf("tool name = %q", tools[0].Name)
 	}
-	out, _, err := manager.Call(ctx, tools[0].Name, json.RawMessage(`{"text":"x"}`))
-	if err != nil || !strings.Contains(out, "echo: x") {
-		t.Fatalf("call = %q err=%v", out, err)
+	res, err := manager.Call(ctx, tools[0].Name, json.RawMessage(`{"text":"x"}`))
+	if err != nil || !strings.Contains(res.Text(), "echo: x") {
+		t.Fatalf("call = %q err=%v", res.Text(), err)
 	}
-	if _, _, err := manager.Call(ctx, "missing", nil); err == nil {
+	if _, err := manager.Call(ctx, "missing", nil); err == nil {
 		t.Fatal("expected unknown tool error")
 	}
 }
@@ -338,7 +341,7 @@ func TestManagerToolAllowlist(t *testing.T) {
 		Args:      []string{"-test.run=TestMCPHelperProcess"},
 		Env:       map[string]string{"MAYFLY_MCP_HELPER": "1"},
 		Tools:     []string{"echo"},
-	}}, testLogger())
+	}}, testLogger(), content.Limits{})
 	defer allowed.Close()
 	if errs := allowed.Errors(); len(errs) != 0 {
 		t.Fatalf("errors: %v", errs)
@@ -354,7 +357,7 @@ func TestManagerToolAllowlist(t *testing.T) {
 		Args:      []string{"-test.run=TestMCPHelperProcess"},
 		Env:       map[string]string{"MAYFLY_MCP_HELPER": "1"},
 		Tools:     []string{"missing"},
-	}}, testLogger())
+	}}, testLogger(), content.Limits{})
 	defer hidden.Close()
 	if errs := hidden.Errors(); len(errs) != 0 {
 		t.Fatalf("errors: %v", errs)
@@ -371,7 +374,7 @@ func TestStartSkipsHTTPServers(t *testing.T) {
 	manager := Start(context.Background(), []sessioncfg.MCPServer{{
 		Name:      "remote",
 		Transport: "http",
-	}}, testLogger())
+	}}, testLogger(), content.Limits{})
 	defer manager.Close()
 	if errs := manager.Errors(); len(errs) != 0 {
 		t.Fatalf("errors: %v", errs)
@@ -401,4 +404,196 @@ func TestUpstreamClientsHaveNoFixedTimeout(t *testing.T) {
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestHTTPImageContent(t *testing.T) {
+	server := httptest.NewServer(stub.MCPHandler())
+	defer server.Close()
+	client := NewHTTP("images", server.URL+"/mcp", "", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	res, err := client.CallToolResult(ctx, "image", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError || len(res.Parts) != 2 {
+		t.Fatalf("result = %+v", res)
+	}
+	if res.Parts[0].Type != content.TypeText || res.Parts[0].Text != "image follows" {
+		t.Fatalf("text part = %+v", res.Parts[0])
+	}
+	want, err := base64.StdEncoding.DecodeString(stub.ImagePNGBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := res.Parts[1]
+	if !image.IsImage() || image.MIMEType != stub.ImagePNGMIME || !bytes.Equal(image.Data, want) {
+		t.Fatalf("image part = mime %q bytes %d", image.MIMEType, len(image.Data))
+	}
+	text := res.Text()
+	if !strings.Contains(text, "[image image/png,") {
+		t.Fatalf("summary = %q", text)
+	}
+	if strings.Contains(text, stub.ImagePNGBase64) {
+		t.Fatal("summary contains base64 image data")
+	}
+	flat, isErr, err := client.CallTool(ctx, "image", json.RawMessage(`{}`))
+	if err != nil || isErr || flat != text {
+		t.Fatalf("flattened = %q isErr=%v err=%v", flat, isErr, err)
+	}
+}
+
+func TestParseContentBoundaries(t *testing.T) {
+	png := base64.StdEncoding.EncodeToString([]byte("png!"))
+	blocks := func(values ...map[string]any) []json.RawMessage {
+		t.Helper()
+		raw, err := json.Marshal(values)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			t.Fatal(err)
+		}
+		return items
+	}
+	limits := content.Limits{MaxImageBytes: 4, MaxResultImageBytes: 6, MaxSessionImageBytes: 8}
+
+	cases := []struct {
+		name     string
+		items    []json.RawMessage
+		wantErr  bool
+		wantText string
+		images   int
+	}{
+		{name: "text", items: blocks(map[string]any{"type": "text", "text": "hello"}), wantText: "hello"},
+		{name: "image", items: blocks(map[string]any{"type": "image", "mimeType": "image/png", "data": png}), images: 1},
+		{name: "mixed", items: blocks(
+			map[string]any{"type": "text", "text": "caption"},
+			map[string]any{"type": "image", "mimeType": "image/png", "data": png},
+		), wantText: "caption", images: 1},
+		{name: "disallowed mime", items: blocks(map[string]any{"type": "image", "mimeType": "image/svg+xml", "data": png}), wantErr: true, wantText: "not an allowed MIME type"},
+		{name: "missing mime", items: blocks(map[string]any{"type": "image", "data": png}), wantErr: true, wantText: "mimeType is missing"},
+		{name: "invalid base64", items: blocks(map[string]any{"type": "image", "mimeType": "image/png", "data": "!!!"}), wantErr: true, wantText: "not valid base64"},
+		{name: "oversize", items: blocks(map[string]any{"type": "image", "mimeType": "image/png", "data": base64.StdEncoding.EncodeToString([]byte("12345"))}), wantErr: true, wantText: "per-image limit"},
+		{name: "over result", items: blocks(
+			map[string]any{"type": "image", "mimeType": "image/png", "data": base64.StdEncoding.EncodeToString([]byte("1234"))},
+			map[string]any{"type": "image", "mimeType": "image/png", "data": base64.StdEncoding.EncodeToString([]byte("5678"))},
+		), images: 1, wantErr: true, wantText: "per-result limit"},
+		{name: "audio", items: blocks(map[string]any{"type": "audio", "mimeType": "audio/wav", "data": png}), wantText: "tool-result audio is not supported"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := parseContent(tc.items, limits)
+			if res.IsError != tc.wantErr {
+				t.Fatalf("IsError = %v, want %v (parts %+v)", res.IsError, tc.wantErr, res.Parts)
+			}
+			if got := content.ImageCount(res.Parts); got != tc.images {
+				t.Fatalf("images = %d, want %d (parts %+v)", got, tc.images, res.Parts)
+			}
+			if tc.wantText != "" && !strings.Contains(res.Text(), tc.wantText) {
+				t.Fatalf("text = %q, want %q", res.Text(), tc.wantText)
+			}
+		})
+	}
+}
+
+// TestDecodeImageRejectsByEncodedLength pins the order inside decodeImage: a
+// payload whose decoded size cannot fit is rejected from its encoded length,
+// before base64 decoding. The boundary case proves the length is exact for
+// padded base64, not the raw DecodedLen upper bound.
+func TestDecodeImageRejectsByEncodedLength(t *testing.T) {
+	limits := content.Limits{MaxImageBytes: 5, MaxResultImageBytes: 5, MaxSessionImageBytes: 8}
+
+	// Five bytes encode to eight characters with two padding bytes, so
+	// base64.StdEncoding.DecodedLen reports six.
+	part, reason := decodeImage("image/png", base64.StdEncoding.EncodeToString([]byte("12345")), limits, 0)
+	if reason != "" || len(part.Data) != 5 {
+		t.Fatalf("boundary image = %d bytes, reason %q", len(part.Data), reason)
+	}
+
+	// A megabyte of non-base64 text cannot fit, so the size check answers and
+	// DecodeString never runs.
+	_, reason = decodeImage("image/png", strings.Repeat("!", 1<<20), limits, 0)
+	if !strings.Contains(reason, "per-image limit") {
+		t.Fatalf("oversize invalid base64 reason = %q", reason)
+	}
+
+	// Invalid base64 that fits the length bound still names base64.
+	_, reason = decodeImage("image/png", "!!!", limits, 0)
+	if reason != "data is not valid base64" {
+		t.Fatalf("invalid base64 reason = %q", reason)
+	}
+}
+
+// TestHTTPImageOverSSE delivers a legal 5 MiB image through a
+// text/event-stream response. Its base64 form is about 6.7 MiB, so the old
+// 4 MiB SSE token bound could not carry it.
+func TestHTTPImageOverSSE(t *testing.T) {
+	const imageBytes = 5 << 20
+	server := httptest.NewServer(stub.MCPHandlerWithOptions(stub.MCPOptions{SSE: true, ImageBytes: imageBytes}))
+	defer server.Close()
+	client := NewHTTP("sse", server.URL+"/mcp", "", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := client.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	res, err := client.CallToolResult(ctx, "image", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("call over SSE: %v", err)
+	}
+	if res.IsError || len(res.Parts) != 2 || !res.Parts[1].IsImage() || len(res.Parts[1].Data) != imageBytes {
+		t.Fatalf("result = %d parts, isError %v", len(res.Parts), res.IsError)
+	}
+	if text := res.Text(); !strings.Contains(text, "[image image/png, 5242880 bytes,") {
+		t.Fatalf("summary = %q", text)
+	}
+}
+
+// TestHTTPOversizeImageOverSSE proves an oversized image on the SSE path
+// becomes the existing rejected-image text part, not a transport error. The
+// cap is lower than the image, so the client rejects it before decoding.
+func TestHTTPOversizeImageOverSSE(t *testing.T) {
+	server := httptest.NewServer(stub.MCPHandlerWithOptions(stub.MCPOptions{SSE: true, ImageBytes: 5 << 20}))
+	defer server.Close()
+	client := NewHTTP("sse", server.URL+"/mcp", "", nil)
+	client.SetContentLimits(content.Limits{MaxImageBytes: 1 << 20, MaxResultImageBytes: 1 << 20, MaxSessionImageBytes: 2 << 20})
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := client.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	res, err := client.CallToolResult(ctx, "image", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("oversize image over SSE must not fail the transport: %v", err)
+	}
+	if !res.IsError || content.ImageCount(res.Parts) != 0 {
+		t.Fatalf("result = %d parts, isError %v", len(res.Parts), res.IsError)
+	}
+	text := res.Text()
+	if !strings.Contains(text, "ERROR: tool result image was rejected:") ||
+		!strings.Contains(text, "per-image limit") {
+		t.Fatalf("text = %q", text)
+	}
+}
+
+// TestDecodeSSEFrameLimit bounds one SSE message even when it arrives as many
+// short data lines: the per-line scanner bound alone would let a server make
+// the client retain an unbounded message.
+func TestDecodeSSEFrameLimit(t *testing.T) {
+	chunk := strings.Repeat("a", 1<<20)
+	var frame strings.Builder
+	for range maxResponseBytes/(1<<20) + 1 {
+		frame.WriteString("data: ")
+		frame.WriteString(chunk)
+		frame.WriteByte('\n')
+	}
+	frame.WriteByte('\n')
+	if _, err := decodeSSE(strings.NewReader(frame.String()), 1); err == nil {
+		t.Fatal("expected an SSE message size error")
+	}
 }

@@ -188,7 +188,7 @@ func (s *Server) internalToolCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req gateway.BeginRequest
-	if err := s.decodeJSON(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
+	if err := s.decodeJSON(w, r, s.cfg.MCP.RequestBytes(), &req); err != nil {
 		writeInternalBodyError(w, err)
 		return
 	}
@@ -206,7 +206,7 @@ func (s *Server) internalToolComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req gateway.CompleteRequest
-	if err := s.decodeJSON(w, r, s.cfg.Server.MaxBodyBytes, &req); err != nil {
+	if err := s.decodeJSON(w, r, s.cfg.MCP.RequestBytes(), &req); err != nil {
 		writeInternalBodyError(w, err)
 		return
 	}

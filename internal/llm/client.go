@@ -7,20 +7,27 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/hayfever/mayfly/internal/content"
 )
 
-// Message is one chat message.
+// Message is one chat message. Content is the text-only form. Parts holds
+// structured tool output, including images; a message with Parts sends the
+// parts array to the provider and ignores Content. Content stays the text a
+// log, event, or text-only reader sees.
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role       string         `json:"role"`
+	Content    string         `json:"content,omitempty"`
+	Parts      []content.Part `json:"parts,omitempty"`
+	ToolCalls  []ToolCall     `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
 }
 
 // ToolCall is an assistant-requested tool invocation.
@@ -91,10 +98,67 @@ func (e *StatusError) Error() string {
 }
 
 type chatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Tools    []Tool    `json:"tools,omitempty"`
-	Stream   bool      `json:"stream"`
+	Model    string        `json:"model"`
+	Messages []wireMessage `json:"messages"`
+	Tools    []Tool        `json:"tools,omitempty"`
+	Stream   bool          `json:"stream"`
+}
+
+// wireMessage is the provider's message shape. Content is a string for a
+// text-only message and an array of parts when a tool result carries an
+// image.
+type wireMessage struct {
+	Role       string     `json:"role"`
+	Content    any        `json:"content,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+// wirePart is one OpenAI chat-completions content part.
+type wirePart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *wireImageURL `json:"image_url,omitempty"`
+}
+
+type wireImageURL struct {
+	URL string `json:"url"`
+}
+
+// providerMessage converts m to the provider shape. A message without image
+// parts keeps a string content field, which is what every text-only provider
+// already accepts. An image becomes an image_url part carrying a data URI.
+func providerMessage(m Message) wireMessage {
+	out := wireMessage{Role: m.Role, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID}
+	if !content.HasImage(m.Parts) {
+		out.Content = m.Content
+		if out.Content == "" {
+			out.Content = nil
+		}
+		return out
+	}
+	parts := make([]wirePart, 0, len(m.Parts))
+	for _, p := range m.Parts {
+		if !p.IsImage() {
+			parts = append(parts, wirePart{Type: "text", Text: p.Text})
+			continue
+		}
+		mime, ok := content.NormalizeMIMEType(p.MIMEType)
+		if !ok || len(p.Data) == 0 {
+			// The runtime rejects such a part before it reaches a message.
+			// A stale log must still produce a request the provider accepts.
+			parts = append(parts, wirePart{Type: "text", Text: content.ImagePlaceholder(p, "invalid image part")})
+			continue
+		}
+		parts = append(parts, wirePart{
+			Type: "image_url",
+			ImageURL: &wireImageURL{
+				URL: "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(p.Data),
+			},
+		})
+	}
+	out.Content = parts
+	return out
 }
 
 type chatResponse struct {
@@ -112,9 +176,13 @@ type chatResponse struct {
 // When onDelta is non-nil the response is streamed and onDelta receives text
 // fragments as they arrive.
 func (c *Client) Complete(ctx context.Context, messages []Message, tools []Tool, onDelta func(string)) (Message, string, error) {
+	wire := make([]wireMessage, len(messages))
+	for i, m := range messages {
+		wire[i] = providerMessage(m)
+	}
 	body := chatRequest{
 		Model:    c.model,
-		Messages: messages,
+		Messages: wire,
 		Tools:    tools,
 		Stream:   onDelta != nil,
 	}

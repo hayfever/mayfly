@@ -234,3 +234,22 @@ func TestConfigValidatePlugins(t *testing.T) {
 		})
 	}
 }
+
+func TestContentLimitsDefaults(t *testing.T) {
+	cfg := validConfig()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	limits := cfg.ContentLimits()
+	if limits.MaxImageBytes <= 0 || limits.MaxResultImageBytes <= 0 || limits.MaxSessionImageBytes <= 0 {
+		t.Fatalf("limits = %+v", limits)
+	}
+	if !cfg.ModelAcceptsImages() {
+		t.Fatal("an unset ToolResultImages must accept images")
+	}
+	disabled := false
+	cfg.ToolResultImages = &disabled
+	if cfg.ModelAcceptsImages() {
+		t.Fatal("an explicit false must refuse images")
+	}
+}

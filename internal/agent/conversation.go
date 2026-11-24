@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/hayfever/mayfly/internal/content"
 	"github.com/hayfever/mayfly/internal/llm"
 )
 
@@ -130,6 +131,18 @@ func (c *conversation) MessagesForModel(system string, max int) []llm.Message {
 	out = append(out, llm.Message{Role: "system", Content: system})
 	out = append(out, history...)
 	return out
+}
+
+// ImageBytes returns the stored image bytes. A runtime uses it to restore its
+// session image budget after a restart.
+func (c *conversation) ImageBytes() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var total int64
+	for _, m := range c.messages {
+		total += content.ImageBytes(m.Parts)
+	}
+	return total
 }
 
 // Count returns the number of stored messages.

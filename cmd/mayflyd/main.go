@@ -217,12 +217,13 @@ func main() {
 			server, ok := mcpServers[name]
 			return server, ok
 		},
-		HTTPClient:  upstreamBroker.HTTPClient(),
-		ServiceURL:  serviceURL,
-		MaxInflight: cfg.Plugins.MaxInflightCalls,
-		Audit:       audit,
-		Logger:      logger,
-		Observer:    registry,
+		HTTPClient:    upstreamBroker.HTTPClient(),
+		ServiceURL:    serviceURL,
+		MaxInflight:   cfg.Plugins.MaxInflightCalls,
+		ContentLimits: cfg.MCP.ContentLimits(),
+		Audit:         audit,
+		Logger:        logger,
+		Observer:      registry,
 	})
 	// Grant registration happens at session create and adoption, so the
 	// manager needs the gateway before it starts.

@@ -198,6 +198,7 @@ func (g *Gateway) openRemoteClient(ctx context.Context, session, owner string, p
 			return nil, fmt.Errorf("mcp server %q is not an HTTP server", owner)
 		}
 		client := mcp.NewHTTPWithClient(owner, def.URL, def.ResolvedHeaders, g.opts.HTTPClient, nil)
+		client.SetContentLimits(g.opts.ContentLimits)
 		if err := client.Initialize(ctx); err != nil {
 			_ = client.Close()
 			return nil, err
@@ -210,6 +211,7 @@ func (g *Gateway) openRemoteClient(ctx context.Context, session, owner string, p
 				return nil, fmt.Errorf("mcp server %q is not an HTTP server", def.Name)
 			}
 			client := mcp.NewHTTPWithClient(owner, def.URL, def.ResolvedHeaders, g.opts.HTTPClient, nil)
+			client.SetContentLimits(g.opts.ContentLimits)
 			if err := client.Initialize(ctx); err != nil {
 				_ = client.Close()
 				return nil, err
@@ -237,6 +239,7 @@ func (g *Gateway) openRemoteClient(ctx context.Context, session, owner string, p
 		if err != nil {
 			return nil, err
 		}
+		client.SetContentLimits(g.opts.ContentLimits)
 		rc.client = client
 		if err := rc.client.Initialize(withRequestToken(ctx, token)); err != nil {
 			_ = rc.client.Close()
@@ -436,8 +439,9 @@ func allowedRemote(def config.MCPServerConfig, owner, name string) (string, bool
 // Every upstream failure becomes an error result: it is recorded done, so a
 // resume replays the failure instead of calling the tool again.
 func (g *Gateway) beginRemote(ctx context.Context, grant Grant, tool GrantTool, rec journal.Call, args json.RawMessage) (BeginResponse, error) {
-	content, isErr := g.callRemote(ctx, grant, tool, rec, args)
-	done, err := g.ledger.Complete(ctx, grant.SessionID, rec.Key, truncate(content, tool.MaxOutput), isErr, false)
+	res := g.callRemote(ctx, grant, tool, rec, args)
+	res = g.admissibleResult(grant.SessionID, rec.Key, res)
+	done, err := g.ledger.Complete(ctx, grant.SessionID, rec.Key, recordedResult(res, tool.MaxOutput))
 	g.limits.release(rec.Key)
 	if err != nil {
 		return BeginResponse{}, fmt.Errorf("record tool call: %w", err)
@@ -450,27 +454,27 @@ func (g *Gateway) beginRemote(ctx context.Context, grant Grant, tool GrantTool, 
 // service plugin that rejects its call token may have picked up a new gateway
 // key: the cached connection is dropped, so the reconciler is asked for the
 // endpoint again, and the call is retried once.
-func (g *Gateway) callRemote(ctx context.Context, grant Grant, tool GrantTool, rec journal.Call, args json.RawMessage) (string, bool) {
+func (g *Gateway) callRemote(ctx context.Context, grant Grant, tool GrantTool, rec journal.Call, args json.RawMessage) mcp.ToolResult {
 	client, err := g.remoteClient(ctx, grant.SessionID, tool.Owner, tool.Placement)
 	if err != nil {
-		return err.Error(), true
+		return mcp.TextResult(err.Error(), true)
 	}
-	content, isErr, timedOut, err := g.callUpstream(ctx, client, grant, tool, rec, args)
+	res, timedOut, err := g.callUpstream(ctx, client, grant, tool, rec, args)
 	if err != nil && isAuthFailure(err) && client.key != nil {
 		g.forgetRemoteClient(grant.SessionID, tool.Owner)
 		if fresh, reopenErr := g.remoteClient(ctx, grant.SessionID, tool.Owner, tool.Placement); reopenErr == nil {
-			content, isErr, timedOut, err = g.callUpstream(ctx, fresh, grant, tool, rec, args)
+			res, timedOut, err = g.callUpstream(ctx, fresh, grant, tool, rec, args)
 		}
 	}
 	switch {
 	case err == nil:
-		return content, isErr
+		return res
 	case timedOut:
-		return fmt.Sprintf("tool %s timed out after %s", tool.Name, tool.Timeout), true
+		return mcp.TextResult(fmt.Sprintf("tool %s timed out after %s", tool.Name, tool.Timeout), true)
 	case isAuthFailure(err):
-		return authErrorMessage, true
+		return mcp.TextResult(authErrorMessage, true)
 	}
-	return err.Error(), true
+	return mcp.TextResult(err.Error(), true)
 }
 
 // callUpstream performs one tools/call on one connection. The call runs on a
@@ -478,7 +482,7 @@ func (g *Gateway) callRemote(ctx context.Context, grant Grant, tool GrantTool, r
 // a runtime that disconnects no longer aborts a call that may already have
 // taken effect upstream. The _meta block carries the ledger key and the
 // session identity; a service plugin also gets a call token in Authorization.
-func (g *Gateway) callUpstream(ctx context.Context, client *remoteClient, grant Grant, tool GrantTool, rec journal.Call, args json.RawMessage) (string, bool, bool, error) {
+func (g *Gateway) callUpstream(ctx context.Context, client *remoteClient, grant Grant, tool GrantTool, rec journal.Call, args json.RawMessage) (mcp.ToolResult, bool, error) {
 	if len(args) == 0 {
 		args = json.RawMessage("{}")
 	}
@@ -494,7 +498,7 @@ func (g *Gateway) callUpstream(ctx context.Context, client *remoteClient, grant 
 		})
 		if err != nil {
 			cancel()
-			return "", true, false, err
+			return mcp.ToolResult{}, false, err
 		}
 		callCtx = withRequestToken(callCtx, token)
 	}
@@ -503,7 +507,7 @@ func (g *Gateway) callUpstream(ctx context.Context, client *remoteClient, grant 
 		"mayfly.io/session":         grant.SessionID,
 		"mayfly.io/agent":           grant.Agent,
 	}
-	content, isErr, id, err := client.client.CallToolMeta(callCtx, tool.Remote, args, meta)
+	res, id, err := client.client.CallToolResultMeta(callCtx, tool.Remote, args, meta)
 	timedOut := errors.Is(callCtx.Err(), context.DeadlineExceeded)
 	cancel()
 	if timedOut {
@@ -511,7 +515,7 @@ func (g *Gateway) callUpstream(ctx context.Context, client *remoteClient, grant 
 		_ = client.client.Cancel(cancelCtx, id, "tool call timed out")
 		stop()
 	}
-	return content, isErr, timedOut, err
+	return res, timedOut, err
 }
 
 // isAuthFailure reports a 401 or 403 from an upstream. The MCP HTTP transport

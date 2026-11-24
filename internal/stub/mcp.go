@@ -1,7 +1,10 @@
 package stub
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 )
@@ -79,36 +82,96 @@ func (c *MCPCounts) Snapshot() map[string]int {
 	return out
 }
 
-// MCPHandler returns a minimal Streamable HTTP MCP server with one echo tool.
+// ImagePNGBase64 is a 1x1 transparent PNG returned by the image tool.
+const ImagePNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+
+// ImagePNGMIME is the MIME type of ImagePNGBase64.
+const ImagePNGMIME = "image/png"
+
+// MCPOptions selects how the stub frames its responses and how large the
+// image tool's payload is.
+type MCPOptions struct {
+	// SSE frames every JSON-RPC response as one text/event-stream message.
+	SSE bool
+	// ImageBytes is the decoded size of the image tool's payload. Zero uses
+	// ImagePNGBase64.
+	ImageBytes int
+}
+
+// MCPHandler returns a minimal Streamable HTTP MCP server with an echo tool
+// and an image tool.
 func MCPHandler() http.Handler {
 	return MCPHandlerWithCounts(NewMCPCounts())
+}
+
+// MCPHandlerWithOptions returns the stub MCP server with the given response
+// framing and image size.
+func MCPHandlerWithOptions(opts MCPOptions) http.Handler {
+	return MCPHandlerWithCountsOptions(NewMCPCounts(), opts)
 }
 
 // MCPHandlerWithCounts returns the MCP server, reports its counters at
 // GET /counts and the last call metadata at GET /meta, and clears both at
 // POST /counts/reset.
 func MCPHandlerWithCounts(counts *MCPCounts) http.Handler {
+	return MCPHandlerWithCountsOptions(counts, MCPOptions{})
+}
+
+// MCPHandlerWithCountsOptions is MCPHandlerWithCounts with response framing
+// and image size options.
+func MCPHandlerWithCountsOptions(counts *MCPCounts, opts MCPOptions) http.Handler {
+	server := &mcpServer{counts: counts, opts: opts, image: imagePayload(opts.ImageBytes)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("GET /counts", func(w http.ResponseWriter, r *http.Request) {
-		writeStubJSON(w, map[string]any{"counts": counts.Snapshot()})
+		writeStubJSON(w, map[string]any{"counts": server.counts.Snapshot()})
 	})
 	mux.HandleFunc("GET /meta", func(w http.ResponseWriter, r *http.Request) {
-		writeStubJSON(w, map[string]any{"meta": counts.Meta()})
+		writeStubJSON(w, map[string]any{"meta": server.counts.Meta()})
 	})
 	mux.HandleFunc("POST /counts/reset", func(w http.ResponseWriter, r *http.Request) {
-		counts.Reset()
+		server.counts.Reset()
 		w.WriteHeader(http.StatusNoContent)
 	})
-	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
-		handleMCP(w, r, counts)
-	})
+	mux.HandleFunc("/mcp", server.handle)
 	return mux
 }
 
-func handleMCP(w http.ResponseWriter, r *http.Request, counts *MCPCounts) {
+// imagePayload returns the base64 image the image tool answers with.
+func imagePayload(size int) string {
+	if size <= 0 {
+		return ImagePNGBase64
+	}
+	return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x89}, size))
+}
+
+// mcpServer is the stub's state: counters, response framing, and the image
+// payload the image tool returns.
+type mcpServer struct {
+	counts *MCPCounts
+	opts   MCPOptions
+	image  string
+}
+
+// reply writes one JSON-RPC response, as JSON or as one SSE message.
+func (s *mcpServer) reply(w http.ResponseWriter, value any) {
+	if !s.opts.SSE {
+		writeStubJSON(w, value)
+		return
+	}
+	payload, err := json.Marshal(value)
+	if err != nil {
+		http.Error(w, "encode response", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", payload)
+}
+
+func (s *mcpServer) handle(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 	case http.MethodDelete:
@@ -127,25 +190,25 @@ func handleMCP(w http.ResponseWriter, r *http.Request, counts *MCPCounts) {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
-	result, rpcErr := dispatchMCP(req)
+	result, rpcErr := s.dispatch(req)
 	if rpcErr == nil && req.Method == "tools/call" {
 		var params struct {
 			Name string         `json:"name"`
 			Meta map[string]any `json:"_meta"`
 		}
 		if json.Unmarshal(req.Params, &params) == nil {
-			counts.Add(params.Name)
-			counts.RecordMeta(params.Name, params.Meta)
+			s.counts.Add(params.Name)
+			s.counts.RecordMeta(params.Name, params.Meta)
 		}
 	}
 	if rpcErr != nil {
-		writeStubJSON(w, map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": rpcErr})
+		s.reply(w, map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": rpcErr})
 		return
 	}
-	writeStubJSON(w, map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result})
+	s.reply(w, map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result})
 }
 
-func dispatchMCP(req rpcRequest) (any, map[string]any) {
+func (s *mcpServer) dispatch(req rpcRequest) (any, map[string]any) {
 	switch req.Method {
 	case "initialize":
 		return map[string]any{
@@ -156,16 +219,23 @@ func dispatchMCP(req rpcRequest) (any, map[string]any) {
 	case "ping":
 		return map[string]any{}, nil
 	case "tools/list":
-		return map[string]any{"tools": []map[string]any{{
-			"name":        "echo",
-			"description": "Echo text back to the caller.",
-			"inputSchema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"text": map[string]any{"type": "string", "description": "Text to echo"},
+		return map[string]any{"tools": []map[string]any{
+			{
+				"name":        "echo",
+				"description": "Echo text back to the caller.",
+				"inputSchema": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"text": map[string]any{"type": "string", "description": "Text to echo"},
+					},
 				},
 			},
-		}}}, nil
+			{
+				"name":        "image",
+				"description": "Return an image with a caption.",
+				"inputSchema": map[string]any{"type": "object"},
+			},
+		}}, nil
 	case "tools/call":
 		var params struct {
 			Name      string         `json:"name"`
@@ -173,6 +243,15 @@ func dispatchMCP(req rpcRequest) (any, map[string]any) {
 		}
 		if err := json.Unmarshal(req.Params, &params); err != nil {
 			return nil, map[string]any{"code": -32602, "message": "invalid params"}
+		}
+		if params.Name == "image" {
+			return map[string]any{
+				"content": []map[string]any{
+					{"type": "text", "text": "image follows"},
+					{"type": "image", "mimeType": ImagePNGMIME, "data": s.image},
+				},
+				"isError": false,
+			}, nil
 		}
 		if params.Name != "echo" {
 			return nil, map[string]any{"code": -32602, "message": "unknown tool " + params.Name}

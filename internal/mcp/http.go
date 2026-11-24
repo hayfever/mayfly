@@ -72,7 +72,7 @@ func (t *httpTransport) Do(ctx context.Context, id int64, payload []byte) ([]byt
 	if strings.HasPrefix(contentType, "text/event-stream") {
 		return decodeSSE(resp.Body, id)
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return nil, err
 	}

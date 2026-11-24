@@ -1,10 +1,13 @@
 package journal
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/hayfever/mayfly/internal/content"
 )
 
 // CallState is where a tool call stands in the ledger.
@@ -30,22 +33,62 @@ type Call struct {
 	// InstanceID names the runtime process that opened the call. A pending
 	// record with the same instance means the answer to the begin was lost,
 	// so the call never ran. A different instance means a restart.
-	InstanceID  string    `json:"instance_id,omitempty"`
-	State       CallState `json:"state"`
-	Content     string    `json:"content,omitempty"`
-	IsError     bool      `json:"is_error,omitempty"`
-	Interrupted bool      `json:"interrupted,omitempty"`
-	Attempts    int       `json:"attempts"`
-	StartedAt   time.Time `json:"started_at"`
-	DoneAt      time.Time `json:"done_at,omitempty"`
+	InstanceID string    `json:"instance_id,omitempty"`
+	State      CallState `json:"state"`
+	Content    string    `json:"content,omitempty"`
+	// Parts holds structured output, including image data. It is the replay
+	// authority for a result the runtime must apply again.
+	Parts       []content.Part `json:"parts,omitempty"`
+	IsError     bool           `json:"is_error,omitempty"`
+	Interrupted bool           `json:"interrupted,omitempty"`
+	Attempts    int            `json:"attempts"`
+	StartedAt   time.Time      `json:"started_at"`
+	DoneAt      time.Time      `json:"done_at,omitempty"`
 }
 
 // ErrCallNotFound reports a ledger key the session never began.
 var ErrCallNotFound = errors.New("tool call not found")
 
-// ErrCallConflict reports a completed record whose content differs from the
-// content being written again.
+// ErrCallConflict reports a completed record whose result differs from the
+// result being written again.
 var ErrCallConflict = errors.New("tool call completed with different content")
+
+// partsEqual reports whether two part lists are identical.
+func partsEqual(a, b []content.Part) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Type != b[i].Type || a[i].Text != b[i].Text || a[i].MIMEType != b[i].MIMEType ||
+			!bytes.Equal(a[i].Data, b[i].Data) {
+			return false
+		}
+	}
+	return true
+}
+
+// cloneParts returns a deep copy so a stored record cannot change under a
+// caller.
+func cloneParts(parts []content.Part) []content.Part {
+	if parts == nil {
+		return nil
+	}
+	out := make([]content.Part, len(parts))
+	for i, p := range parts {
+		p.Data = bytes.Clone(p.Data)
+		out[i] = p
+	}
+	return out
+}
+
+// Result is the output recorded for one completed call: the text a log and
+// the model see, plus any image parts.
+type Result struct {
+	Content     string
+	Parts       []content.Part
+	IsError     bool
+	Interrupted bool
+}
 
 // Ledger records each authorized tool call so a replacement runtime can replay
 // a completed result instead of running the tool twice. A record moves from
@@ -55,9 +98,9 @@ type Ledger interface {
 	// created reports whether c was stored. Begin on a pending record
 	// increments Attempts.
 	Begin(ctx context.Context, c Call) (rec Call, created bool, err error)
-	// Complete marks the record done. Repeating it with the same content is
-	// a no-op; different content is an error.
-	Complete(ctx context.Context, session, key, content string, isError, interrupted bool) (Call, error)
+	// Complete marks the record done. Repeating it with the same result is
+	// a no-op; a different result is an error.
+	Complete(ctx context.Context, session, key string, result Result) (Call, error)
 	// Get returns the record for key, or false when the session has none.
 	Get(ctx context.Context, session, key string) (Call, bool, error)
 }

@@ -65,7 +65,7 @@ func TestLedgerConformance(t *testing.T) {
 				t.Fatalf("retry record lost the runtime instance: %+v", rec)
 			}
 
-			done, err := ledger.Complete(ctx, "s1", call.Key, "hello", true, false)
+			done, err := ledger.Complete(ctx, "s1", call.Key, Result{Content: "hello", IsError: true})
 			if err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
@@ -74,17 +74,17 @@ func TestLedgerConformance(t *testing.T) {
 			}
 
 			// Repeating the same completion is a no-op, including the flag.
-			again, err := ledger.Complete(ctx, "s1", call.Key, "hello", true, false)
+			again, err := ledger.Complete(ctx, "s1", call.Key, Result{Content: "hello", IsError: true})
 			if err != nil {
 				t.Fatalf("Complete repeat: %v", err)
 			}
 			if again.Content != "hello" || !again.IsError {
 				t.Fatalf("repeat record = %+v", again)
 			}
-			if _, err := ledger.Complete(ctx, "s1", call.Key, "other", true, false); !errors.Is(err, ErrCallConflict) {
+			if _, err := ledger.Complete(ctx, "s1", call.Key, Result{Content: "other", IsError: true}); !errors.Is(err, ErrCallConflict) {
 				t.Fatalf("different content error = %v, want ErrCallConflict", err)
 			}
-			if _, err := ledger.Complete(ctx, "s1", call.Key, "hello", false, false); !errors.Is(err, ErrCallConflict) {
+			if _, err := ledger.Complete(ctx, "s1", call.Key, Result{Content: "hello"}); !errors.Is(err, ErrCallConflict) {
 				t.Fatalf("different flag error = %v, want ErrCallConflict", err)
 			}
 
@@ -102,7 +102,7 @@ func TestLedgerConformance(t *testing.T) {
 			if _, found, err := ledger.Get(ctx, "s1", "missing"); err != nil || found {
 				t.Fatalf("Get missing = found %v, %v", found, err)
 			}
-			if _, err := ledger.Complete(ctx, "s1", "missing", "", false, false); !errors.Is(err, ErrCallNotFound) {
+			if _, err := ledger.Complete(ctx, "s1", "missing", Result{}); !errors.Is(err, ErrCallNotFound) {
 				t.Fatalf("Complete missing error = %v, want ErrCallNotFound", err)
 			}
 
@@ -155,7 +155,7 @@ func TestBoltLedgerSurvivesClose(t *testing.T) {
 	if _, _, err := first.Begin(ctx, call); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := first.Complete(ctx, "s1", call.Key, "stored", true, true); err != nil {
+	if _, err := first.Complete(ctx, "s1", call.Key, Result{Content: "stored", IsError: true, Interrupted: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := first.Close(); err != nil {
@@ -211,7 +211,7 @@ func TestLedgerDeleteWithJournal(t *testing.T) {
 			if _, _, err := store.Begin(ctx, call); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := store.Complete(ctx, session, call.Key, "ok", false, false); err != nil {
+			if _, err := store.Complete(ctx, session, call.Key, Result{Content: "ok"}); err != nil {
 				t.Fatal(err)
 			}
 

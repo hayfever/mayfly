@@ -352,7 +352,8 @@
               "type": "object",
               "additionalProperties": { "type": "string" }
             },
-            "max_body_bytes": { "type": "integer", "minimum": 0 }
+            "max_body_bytes": { "type": "integer", "minimum": 0 },
+            "tool_result_images": { "type": "boolean" }
           }
         },
         "artifacts": {
@@ -548,7 +549,11 @@
                   }
                 }
               }
-            }
+            },
+            "max_image_bytes": { "type": "integer", "minimum": 0 },
+            "max_result_image_bytes": { "type": "integer", "minimum": 0 },
+            "max_session_image_bytes": { "type": "integer", "minimum": 0 },
+            "max_request_bytes": { "type": "integer", "minimum": 0 }
           }
         },
         "triggers": {

@@ -196,8 +196,8 @@ func (m *Memory) Begin(_ context.Context, c Call) (Call, bool, error) {
 	return c, true, nil
 }
 
-// Complete marks a call done. The same content again is a no-op.
-func (m *Memory) Complete(_ context.Context, session, key, content string, isError, interrupted bool) (Call, error) {
+// Complete marks a call done. The same result again is a no-op.
+func (m *Memory) Complete(_ context.Context, session, key string, result Result) (Call, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	calls := m.calls[session]
@@ -206,17 +206,20 @@ func (m *Memory) Complete(_ context.Context, session, key, content string, isErr
 		return Call{}, fmt.Errorf("%w: %s", ErrCallNotFound, key)
 	}
 	if rec.State == CallDone {
-		if rec.Content == content && rec.IsError == isError && rec.Interrupted == interrupted {
+		if rec.Content == result.Content && rec.IsError == result.IsError &&
+			rec.Interrupted == result.Interrupted && partsEqual(rec.Parts, result.Parts) {
 			return rec, nil
 		}
 		return Call{}, fmt.Errorf("%w: %s", ErrCallConflict, key)
 	}
 	rec.State = CallDone
-	rec.Content = content
-	rec.IsError = isError
-	rec.Interrupted = interrupted
+	rec.Content = result.Content
+	rec.Parts = cloneParts(result.Parts)
+	rec.IsError = result.IsError
+	rec.Interrupted = result.Interrupted
 	rec.DoneAt = time.Now().UTC()
 	calls[key] = rec
+	rec.Parts = cloneParts(rec.Parts)
 	return rec, nil
 }
 
@@ -225,5 +228,6 @@ func (m *Memory) Get(_ context.Context, session, key string) (Call, bool, error)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	rec, ok := m.calls[session][key]
+	rec.Parts = cloneParts(rec.Parts)
 	return rec, ok, nil
 }

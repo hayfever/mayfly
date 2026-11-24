@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/hayfever/mayfly/internal/content"
 )
 
 const Version = 1
@@ -141,8 +143,18 @@ type Config struct {
 	AllowShell         bool           `json:"allow_shell"`
 	ShellTimeoutSecs   int            `json:"shell_timeout_seconds"`
 	ArtifactMaxBytes   int64          `json:"artifact_max_bytes"`
-	Skills             []Skill        `json:"skills"`
-	MCPServers         []MCPServer    `json:"mcp_servers"`
+	// MaxImageBytes, MaxResultImageBytes, and MaxSessionImageBytes bound
+	// image content from MCP tool results. Zero applies the content package
+	// defaults, never an unlimited value.
+	MaxImageBytes        int64 `json:"max_image_bytes,omitempty"`
+	MaxResultImageBytes  int64 `json:"max_result_image_bytes,omitempty"`
+	MaxSessionImageBytes int64 `json:"max_session_image_bytes,omitempty"`
+	// ToolResultImages is nil or true when the assigned model accepts image
+	// content parts. An explicit false makes the runtime replace each image
+	// with a labeled text placeholder.
+	ToolResultImages *bool       `json:"tool_result_images,omitempty"`
+	Skills           []Skill     `json:"skills"`
+	MCPServers       []MCPServer `json:"mcp_servers"`
 	// Plugins are the tools the gateway grants this session. A service plugin
 	// records its manifest so the grant can be rebuilt on adoption.
 	Plugins []Plugin `json:"plugins,omitempty"`
@@ -158,6 +170,21 @@ type Config struct {
 	// from the journal and the same workspace. A runtime that is not resumable
 	// finalizes on SIGTERM instead of leaving the turn to a replacement.
 	Resumable bool `json:"resumable,omitempty"`
+}
+
+// ContentLimits returns the image bounds, with defaults for unset fields.
+func (c Config) ContentLimits() content.Limits {
+	return content.Limits{
+		MaxImageBytes:        c.MaxImageBytes,
+		MaxResultImageBytes:  c.MaxResultImageBytes,
+		MaxSessionImageBytes: c.MaxSessionImageBytes,
+	}.WithDefaults()
+}
+
+// ModelAcceptsImages reports whether the assigned model may receive image
+// content parts. An unset field accepts them.
+func (c Config) ModelAcceptsImages() bool {
+	return c.ToolResultImages == nil || *c.ToolResultImages
 }
 
 // Validate checks invariants that both the control plane and the runtime rely on.
@@ -192,6 +219,10 @@ func (c *Config) Validate() error {
 	if c.MaxSteps <= 0 {
 		return errors.New("max_steps must be positive")
 	}
+	limits := c.ContentLimits()
+	c.MaxImageBytes = limits.MaxImageBytes
+	c.MaxResultImageBytes = limits.MaxResultImageBytes
+	c.MaxSessionImageBytes = limits.MaxSessionImageBytes
 	for i, s := range c.Skills {
 		if strings.TrimSpace(s.Name) == "" {
 			return fmt.Errorf("skill %d has an empty name", i)

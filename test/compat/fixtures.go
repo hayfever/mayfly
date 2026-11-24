@@ -502,7 +502,7 @@ func generateJournal(dir string) error {
 	}); err != nil {
 		return err
 	}
-	if _, err := store.Complete(ctx, journalSession, callKey, `{"text":"hello"}`, false, false); err != nil {
+	if _, err := store.Complete(ctx, journalSession, callKey, journal.Result{Content: `{"text":"hello"}`}); err != nil {
 		return err
 	}
 	return store.Close()

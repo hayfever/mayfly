@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hayfever/mayfly/internal/content"
 	"github.com/hayfever/mayfly/internal/gateway"
 	"github.com/hayfever/mayfly/internal/llm"
 	"github.com/hayfever/mayfly/internal/mcp"
@@ -242,7 +243,31 @@ func (t *toolset) localTool(name string) (pluginhost.Tool, bool) {
 // Call executes a built-in tool or reaches an MCP server the gateway does not
 // grant. A granted tool goes through Runtime.callGranted instead, so the
 // gateway sees it before and after.
-func (t *toolset) Call(ctx context.Context, name string, args json.RawMessage) (string, bool, error) {
+func (t *toolset) Call(ctx context.Context, name string, args json.RawMessage) (toolResult, error) {
+	if strings.HasPrefix(name, mcp.ToolNamePrefix) {
+		// A local stdio tool the gateway grants by name or by wildcard prefix
+		// is dispatched from here. Anything else is refused: an MCP tool that
+		// discovery did not grant must not slip through to the broker proxy.
+		if _, ok := t.localMCP(name); !ok {
+			return toolResult{}, fmt.Errorf("MCP tool %q is not granted to this session", name)
+		}
+		callCtx, cancel := context.WithTimeout(ctx, mcpCallTimeout)
+		defer cancel()
+		res, err := t.mcp.Call(callCtx, name, args)
+		if err != nil {
+			return toolResult{}, err
+		}
+		return mcpToolResult(res), nil
+	}
+	out, isErr, err := t.callText(ctx, name, args)
+	if err != nil {
+		return toolResult{}, err
+	}
+	return toolResult{Content: out, IsError: isErr}, nil
+}
+
+// callText executes a built-in tool and returns its text result.
+func (t *toolset) callText(ctx context.Context, name string, args json.RawMessage) (string, bool, error) {
 	switch name {
 	case "read_file":
 		return t.readFile(args)
@@ -258,21 +283,6 @@ func (t *toolset) Call(ctx context.Context, name string, args json.RawMessage) (
 	case "read_artifact":
 		return t.readArtifact(ctx, args)
 	}
-	if strings.HasPrefix(name, mcp.ToolNamePrefix) {
-		// A local stdio tool the gateway grants by name or by wildcard prefix
-		// is dispatched from here. Anything else is refused: an MCP tool that
-		// discovery did not grant must not slip through to the broker proxy.
-		if _, ok := t.localMCP(name); !ok {
-			return "", false, fmt.Errorf("MCP tool %q is not granted to this session", name)
-		}
-		callCtx, cancel := context.WithTimeout(ctx, mcpCallTimeout)
-		defer cancel()
-		out, isErr, err := t.mcp.Call(callCtx, name, args)
-		if err != nil {
-			return "", false, err
-		}
-		return truncate(out, maxToolOutput), isErr, nil
-	}
 	return "", false, fmt.Errorf("unknown tool %q", name)
 }
 
@@ -280,24 +290,43 @@ func (t *toolset) Call(ctx context.Context, name string, args json.RawMessage) (
 // runs in the plugin host with the ledger key and call token; a stdio MCP
 // server runs through the manager. The caller bounds ctx by the gateway's
 // timeout.
-func (t *toolset) Dispatch(ctx context.Context, tool gateway.DiscoveryTool, args json.RawMessage, key, token string) (string, bool, error) {
+func (t *toolset) Dispatch(ctx context.Context, tool gateway.DiscoveryTool, args json.RawMessage, key, token string) (toolResult, error) {
 	switch tool.Placement {
 	case gateway.Inline, gateway.Sidecar:
 		if t.plugins == nil {
-			return "", false, fmt.Errorf("plugin %q is not running", tool.Owner)
+			return toolResult{}, fmt.Errorf("plugin %q is not running", tool.Owner)
 		}
-		return t.plugins.Call(ctx, tool.Name, args, key, token)
+		out, isErr, err := t.plugins.Call(ctx, tool.Name, args, key, token)
+		if err != nil {
+			return toolResult{}, err
+		}
+		return toolResult{Content: out, IsError: isErr}, nil
 	case gateway.MCPStdio:
 		if t.mcp == nil {
-			return "", false, fmt.Errorf("MCP server %q is not connected", tool.Owner)
+			return toolResult{}, fmt.Errorf("MCP server %q is not connected", tool.Owner)
 		}
-		out, isErr, err := t.mcp.Call(ctx, tool.Name, args)
+		res, err := t.mcp.Call(ctx, tool.Name, args)
 		if err != nil {
-			return "", false, err
+			return toolResult{}, err
 		}
-		return truncate(out, maxToolOutput), isErr, nil
+		return mcpToolResult(res), nil
 	}
-	return "", false, fmt.Errorf("tool %q runs at the gateway, not in this runtime", tool.Name)
+	return toolResult{}, fmt.Errorf("tool %q runs at the gateway, not in this runtime", tool.Name)
+}
+
+// mcpToolResult converts one MCP result for the runtime. A result without
+// images keeps the plain text shape. A result with images keeps its parts, and
+// only its text is capped by maxToolOutput.
+func mcpToolResult(res mcp.ToolResult) toolResult {
+	out := toolResult{IsError: res.IsError}
+	if res.HasImage() {
+		parts := content.TruncateText(res.Parts, maxToolOutput)
+		out.Parts = parts
+		out.Content = truncate(content.Text(parts), maxToolOutput)
+		return out
+	}
+	out.Content = truncate(res.Text(), maxToolOutput)
+	return out
 }
 
 // toolGateway is the part of the platform client the runtime uses to
@@ -310,11 +339,14 @@ type toolGateway interface {
 
 // localDispatch performs the local half of a tool call the gateway
 // authorized.
-type localDispatch func(ctx context.Context, tool gateway.DiscoveryTool, args json.RawMessage, key, token string) (string, bool, error)
+type localDispatch func(ctx context.Context, tool gateway.DiscoveryTool, args json.RawMessage, key, token string) (toolResult, error)
 
 // toolResult is what one tool call produced for its journal step.
 type toolResult struct {
 	Content string
+	// Parts holds structured output, including images. It is set only when
+	// the result has images; Content is then the text summary.
+	Parts   []content.Part
 	IsError bool
 	// Executed reports that this runtime ran the tool now.
 	Executed bool
@@ -388,11 +420,12 @@ func (r *Runtime) callTool(ctx context.Context, turn int64, step int, call llm.T
 	if tool, ok := r.tools.Granted(call.Function.Name); ok {
 		return r.callGranted(ctx, turn, step, call, tool)
 	}
-	out, isErr, err := r.tools.Call(ctx, call.Function.Name, json.RawMessage(args))
+	res, err := r.tools.Call(ctx, call.Function.Name, json.RawMessage(args))
 	if err != nil {
 		return toolResult{Content: "ERROR: " + err.Error(), IsError: true, Executed: true}, nil
 	}
-	return toolResult{Content: out, IsError: isErr, Executed: true}, nil
+	res.Executed = true
+	return res, nil
 }
 
 // callGranted asks the gateway to authorize one call, then either uses the
@@ -428,6 +461,7 @@ func (r *Runtime) callGranted(ctx context.Context, turn int64, step int, call ll
 	if resp.Result != nil {
 		return toolResult{
 			Content:     resp.Result.Content,
+			Parts:       resp.Result.Parts,
 			IsError:     resp.Result.IsError,
 			Replayed:    resp.Result.Replayed,
 			Interrupted: resp.Result.Interrupted,
@@ -445,21 +479,34 @@ func (r *Runtime) callGranted(ctx context.Context, turn int64, step int, call ll
 		return toolResult{}, fatal(fmt.Errorf("no local dispatcher for tool %q", tool.Name))
 	}
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
-	out, isErr, callErr := r.dispatch(callCtx, tool, args, dispatch.Key, dispatch.Token)
+	out, callErr := r.dispatch(callCtx, tool, args, dispatch.Key, dispatch.Token)
 	cancel()
 	if callErr != nil {
-		out = "ERROR: " + callErr.Error()
-		isErr = true
+		out = toolResult{Content: "ERROR: " + callErr.Error(), IsError: true}
 	}
-	out = truncate(out, maxToolOutput)
+	out = capToolResult(out)
 	if err := r.completeCall(ctx, gateway.CompleteRequest{
 		Key:     dispatch.Key,
-		Content: out,
-		IsError: isErr,
+		Content: out.Content,
+		Parts:   out.Parts,
+		IsError: out.IsError,
 	}); err != nil {
 		return toolResult{}, err
 	}
-	return toolResult{Content: out, IsError: isErr, Executed: true}, nil
+	out.Executed = true
+	return out, nil
+}
+
+// capToolResult caps text output at the tool limit while leaving image parts
+// whole: a text truncate must never slice image data.
+func capToolResult(res toolResult) toolResult {
+	if len(res.Parts) == 0 {
+		res.Content = truncate(res.Content, maxToolOutput)
+		return res
+	}
+	res.Parts = content.TruncateText(res.Parts, maxToolOutput)
+	res.Content = truncate(content.Text(res.Parts), maxToolOutput)
+	return res
 }
 
 // beginCall authorizes one call, retrying while the gateway is unreachable.

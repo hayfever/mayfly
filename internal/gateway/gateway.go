@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/hayfever/mayfly/internal/config"
+	"github.com/hayfever/mayfly/internal/content"
 	"github.com/hayfever/mayfly/internal/journal"
 	"github.com/hayfever/mayfly/internal/mcp"
 	"github.com/hayfever/mayfly/internal/plugin"
@@ -113,9 +114,12 @@ type Options struct {
 	ServiceURL func(name string) (url string, key []byte, err error)
 	// MaxInflight bounds dispatched calls across every session.
 	MaxInflight int
-	Audit       *Audit
-	Logger      *slog.Logger
-	Now         func() time.Time
+	// ContentLimits bounds image content in tool results. Zero values use the
+	// content package defaults.
+	ContentLimits content.Limits
+	Audit         *Audit
+	Logger        *slog.Logger
+	Now           func() time.Time
 	// Observer records every finished or refused call. A nil observer drops
 	// the notifications.
 	Observer CallObserver
@@ -167,6 +171,9 @@ type Gateway struct {
 	// remote holds the upstream MCP clients and their discovery results,
 	// one client and one listing per (session, server).
 	remote remoteState
+
+	// images bounds the image bytes one session may store.
+	images *imageAdmission
 }
 
 // flight is one begin in progress. A second begin for the same key waits for
@@ -205,6 +212,7 @@ func New(opts Options) *Gateway {
 			clients:   map[remoteKey]*clientEntry{},
 			discovery: map[remoteKey]*discoveryEntry{},
 		},
+		images: newImageAdmission(opts.ContentLimits),
 	}
 }
 
@@ -256,6 +264,7 @@ func (g *Gateway) Drop(session string) {
 	g.mu.Unlock()
 	g.limits.dropSession(session)
 	g.dropRemote(session)
+	g.images.drop(session)
 }
 
 // Discover reports the session's tools. A local tool carries the grant
@@ -562,8 +571,10 @@ func (g *Gateway) begin(ctx context.Context, grant Grant, session string, req Be
 // result, and returns it. A later resume reads that record and gets the same
 // answer.
 func (g *Gateway) interrupt(ctx context.Context, grant Grant, tool GrantTool, rec journal.Call) (BeginResponse, error) {
-	content := fmt.Sprintf(interruptedFormat, tool.Name)
-	done, err := g.ledger.Complete(ctx, grant.SessionID, rec.Key, content, true, true)
+	message := fmt.Sprintf(interruptedFormat, tool.Name)
+	done, err := g.ledger.Complete(ctx, grant.SessionID, rec.Key, journal.Result{
+		Content: message, IsError: true, Interrupted: true,
+	})
 	if err != nil {
 		return BeginResponse{}, fmt.Errorf("record interrupted call: %w", err)
 	}
@@ -599,7 +610,12 @@ func (g *Gateway) Complete(ctx context.Context, session string, req CompleteRequ
 	if limit <= 0 {
 		limit = plugin.MaxOutputBytes
 	}
-	done, err := g.ledger.Complete(ctx, session, req.Key, truncate(req.Content, limit), req.IsError, false)
+	result := journal.Result{Content: truncate(req.Content, limit), IsError: req.IsError}
+	if len(req.Parts) > 0 {
+		admitted := g.admissibleResult(session, req.Key, mcp.ToolResult{Parts: req.Parts, IsError: req.IsError})
+		result = recordedResult(admitted, limit)
+	}
+	done, err := g.ledger.Complete(ctx, session, req.Key, result)
 	g.limits.release(req.Key)
 	if err != nil {
 		switch {
@@ -785,6 +801,7 @@ func GrantFor(cfg sessioncfg.Config, agent string, mcp []config.MCPServerConfig)
 func resultOf(rec journal.Call, replayed bool) *Result {
 	return &Result{
 		Content:     rec.Content,
+		Parts:       rec.Parts,
 		IsError:     rec.IsError,
 		Replayed:    replayed,
 		Interrupted: rec.Interrupted,

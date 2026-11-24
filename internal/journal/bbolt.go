@@ -361,8 +361,8 @@ func (s *Bolt) Begin(_ context.Context, c Call) (Call, bool, error) {
 	return rec, created, err
 }
 
-// Complete marks a call done. The same content again is a no-op.
-func (s *Bolt) Complete(_ context.Context, session, key, content string, isError, interrupted bool) (Call, error) {
+// Complete marks a call done. The same result again is a no-op.
+func (s *Bolt) Complete(_ context.Context, session, key string, result Result) (Call, error) {
 	var rec Call
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		calls := tx.Bucket(bucketCalls).Bucket([]byte(session))
@@ -377,15 +377,17 @@ func (s *Bolt) Complete(_ context.Context, session, key, content string, isError
 			return fmt.Errorf("decode call record: %w", err)
 		}
 		if rec.State == CallDone {
-			if rec.Content == content && rec.IsError == isError && rec.Interrupted == interrupted {
+			if rec.Content == result.Content && rec.IsError == result.IsError &&
+				rec.Interrupted == result.Interrupted && partsEqual(rec.Parts, result.Parts) {
 				return nil
 			}
 			return fmt.Errorf("%w: %s", ErrCallConflict, key)
 		}
 		rec.State = CallDone
-		rec.Content = content
-		rec.IsError = isError
-		rec.Interrupted = interrupted
+		rec.Content = result.Content
+		rec.Parts = cloneParts(result.Parts)
+		rec.IsError = result.IsError
+		rec.Interrupted = result.Interrupted
 		rec.DoneAt = time.Now().UTC()
 		payload, err := json.Marshal(rec)
 		if err != nil {

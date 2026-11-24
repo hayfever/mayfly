@@ -20,6 +20,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	"github.com/hayfever/mayfly/internal/content"
 	"github.com/hayfever/mayfly/internal/sessioncfg"
 )
 
@@ -329,6 +330,10 @@ type LLMConfig struct {
 	Headers      map[string]string `yaml:"headers"`
 	APIKey       string            `yaml:"-"`
 	MaxBodyBytes int64             `yaml:"max_body_bytes"`
+	// ToolResultImages reports that the assigned provider accepts image
+	// content parts in tool messages. nil means true. An explicit false
+	// replaces each image with a labeled text placeholder.
+	ToolResultImages *bool `yaml:"tool_result_images"`
 }
 
 // ArtifactsConfig configures durable artifact export.
@@ -418,10 +423,42 @@ type SourcesConfig struct {
 	JobTimeout Duration `yaml:"job_timeout"`
 }
 
-// MCPConfig lists MCP servers that sessions can use.
+// MCPConfig lists MCP servers that sessions can use and bounds the image
+// content their tool results may carry.
 type MCPConfig struct {
 	Servers []MCPServerConfig `yaml:"servers"`
+	// MaxImageBytes bounds one image in a tool result.
+	MaxImageBytes int64 `yaml:"max_image_bytes"`
+	// MaxResultImageBytes bounds the images in one tool result. A result that
+	// exceeds it is recorded as an error, never truncated mid-image.
+	MaxResultImageBytes int64 `yaml:"max_result_image_bytes"`
+	// MaxSessionImageBytes bounds the images one session may deliver. It also
+	// keeps a model request under the default broker body bound after base64
+	// expansion.
+	MaxSessionImageBytes int64 `yaml:"max_session_image_bytes"`
+	// MaxRequestBytes bounds one tool gateway request body. A complete report
+	// carries the image parts the runtime stored.
+	MaxRequestBytes int64 `yaml:"max_request_bytes"`
 }
+
+// ContentLimits returns the image bounds for the gateway and the runtime.
+func (c MCPConfig) ContentLimits() content.Limits {
+	return content.Limits{
+		MaxImageBytes:        c.MaxImageBytes,
+		MaxResultImageBytes:  c.MaxResultImageBytes,
+		MaxSessionImageBytes: c.MaxSessionImageBytes,
+	}.WithDefaults()
+}
+
+// RequestBytes returns the tool gateway request body bound.
+func (c MCPConfig) RequestBytes() int64 {
+	if c.MaxRequestBytes > 0 {
+		return c.MaxRequestBytes
+	}
+	return defaultMCPRequestBytes
+}
+
+const defaultMCPRequestBytes = 16 << 20
 
 // MCPServerConfig describes one MCP server. HTTP servers are proxied by the
 // control plane; header values may use "env:NAME" to inject a secret from the
@@ -571,7 +608,12 @@ func Default() *Config {
 			MaxBytes: 256 << 20,
 		},
 		Skills: SkillsConfig{},
-		MCP:    MCPConfig{},
+		MCP: MCPConfig{
+			MaxImageBytes:        content.DefaultMaxImageBytes,
+			MaxResultImageBytes:  content.DefaultMaxResultImageBytes,
+			MaxSessionImageBytes: content.DefaultMaxSessionImageBytes,
+			MaxRequestBytes:      defaultMCPRequestBytes,
+		},
 		Sources: SourcesConfig{
 			MaxArtifactBytes: 16 << 20,
 			Concurrency:      4,
@@ -673,6 +715,18 @@ func (c *Config) applyDefaults() {
 	}
 	if c.LLM.MaxBodyBytes <= 0 {
 		c.LLM.MaxBodyBytes = 16 << 20
+	}
+	if c.MCP.MaxImageBytes <= 0 {
+		c.MCP.MaxImageBytes = content.DefaultMaxImageBytes
+	}
+	if c.MCP.MaxResultImageBytes <= 0 {
+		c.MCP.MaxResultImageBytes = content.DefaultMaxResultImageBytes
+	}
+	if c.MCP.MaxSessionImageBytes <= 0 {
+		c.MCP.MaxSessionImageBytes = content.DefaultMaxSessionImageBytes
+	}
+	if c.MCP.MaxRequestBytes <= 0 {
+		c.MCP.MaxRequestBytes = defaultMCPRequestBytes
 	}
 	if c.Artifacts.MaxBytes <= 0 {
 		c.Artifacts.MaxBytes = 256 << 20
@@ -1023,6 +1077,22 @@ func (c *Config) Validate() error {
 	}
 	if c.Journal.MaxSessionBytes < c.Journal.MaxEntryBytes {
 		return fmt.Errorf("journal.max_session_bytes must be at least journal.max_entry_bytes")
+	}
+	if c.MCP.MaxResultImageBytes < c.MCP.MaxImageBytes {
+		return fmt.Errorf("mcp.max_result_image_bytes must be at least mcp.max_image_bytes")
+	}
+	if c.MCP.MaxSessionImageBytes < c.MCP.MaxImageBytes {
+		return fmt.Errorf("mcp.max_session_image_bytes must be at least mcp.max_image_bytes")
+	}
+	// A tool result reaches the journal as one step, and the complete report
+	// reaches the gateway as one JSON body. Base64 expands 4 bytes to 3, so
+	// the image bound must leave room for text and JSON in both.
+	encodedResult := (c.MCP.MaxResultImageBytes*4 + 2) / 3
+	if c.MCP.MaxRequestBytes < encodedResult+(64<<10) {
+		return fmt.Errorf("mcp.max_request_bytes must fit one result of mcp.max_result_image_bytes after base64 expansion")
+	}
+	if c.Journal.MaxEntryBytes < encodedResult+(512<<10) {
+		return fmt.Errorf("journal.max_entry_bytes must fit one image result of mcp.max_result_image_bytes after base64 expansion")
 	}
 	if c.Plugins.ReconcileInterval.Std() < 10*time.Second {
 		return fmt.Errorf("plugins.reconcile_interval must be at least 10s")
