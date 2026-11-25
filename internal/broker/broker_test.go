@@ -468,6 +468,43 @@ func TestLLMAdmitOutputLimit(t *testing.T) {
 	}
 }
 
+func TestLLMTransportFailure(t *testing.T) {
+	// Nothing listens on the closed server's address, so the dial fails after
+	// the admit hook reserved the call. That is the same result as the
+	// response-header timeout: Forwarded=true and no provider status.
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	baseURL := upstream.URL
+	upstream.Close()
+	b := New(config.LLMConfig{BaseURL: baseURL + "/v1", Model: "stub", MaxBodyBytes: 1 << 20}, testLogger())
+
+	body := `{"model":"stub","max_completion_tokens":256,"messages":[]}`
+	var gotMax int64
+	rec := httptest.NewRecorder()
+	res := b.ServeLLM(rec, httptest.NewRequest(http.MethodPost, "/internal/v1/llm/chat/completions", strings.NewReader(body)), "stub",
+		func(_ int64, maxOut int64) error {
+			gotMax = maxOut
+			return nil
+		})
+	if !res.Forwarded {
+		t.Fatal("forwarded = false, want true after the admit hook reserved the call")
+	}
+	if !res.TransportErr {
+		t.Fatal("transport error not reported")
+	}
+	if res.Status != http.StatusBadGateway || rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d result=%d, want 502", rec.Code, res.Status)
+	}
+	if res.MaxOut != 256 || gotMax != 256 {
+		t.Fatalf("reserved cap = %d admit=%d, want 256", res.MaxOut, gotMax)
+	}
+	if res.ReqBytes != int64(len(body)) {
+		t.Fatalf("request bytes = %d, want %d", res.ReqBytes, len(body))
+	}
+	if res.Reported {
+		t.Fatal("a failed transport reported usage")
+	}
+}
+
 func TestUsageScannerSplitsIdentically(t *testing.T) {
 	stream := []byte("event: message\n" +
 		"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +

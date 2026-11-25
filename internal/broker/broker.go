@@ -139,8 +139,9 @@ func (b *Broker) ServeLLM(w http.ResponseWriter, r *http.Request, sessionModel s
 	}
 
 	res.ReqBytes = int64(len(body))
+	res.MaxOut = outputLimit(probe.MaxCompletionTokens, probe.MaxTokens)
 	if admit != nil {
-		if err := admit(res.ReqBytes, outputLimit(probe.MaxCompletionTokens, probe.MaxTokens)); err != nil {
+		if err := admit(res.ReqBytes, res.MaxOut); err != nil {
 			res.Status, res.RespBytes = writeRefusal(w, err)
 			return res
 		}
@@ -166,6 +167,7 @@ func (b *Broker) ServeLLM(w http.ResponseWriter, r *http.Request, sessionModel s
 	resp, err := b.client.Do(req)
 	if err != nil {
 		b.logger.Warn("llm upstream request failed", "error", err)
+		res.TransportErr = true
 		res.Status = http.StatusBadGateway
 		res.RespBytes = writeError(w, res.Status, "model backend unavailable")
 		return res

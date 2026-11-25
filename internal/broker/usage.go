@@ -12,8 +12,11 @@ import (
 type Usage struct{ Prompt, Completion int64 }
 
 // CallResult describes one ServeLLM call. Later packages charge Usage when
-// Reported is true. When Reported is false they estimate from
-// ReqBytes/4 + RespBytes/4.
+// Reported is true. A TransportErr charges the full reservation ReqBytes/4 +
+// MaxOut, because the provider may have billed a request whose response never
+// arrived. Otherwise a 2xx or 5xx is estimated from ReqBytes/4 + RespBytes/4.
+// A forwarded 4xx costs no tokens, and no request that was not forwarded costs
+// anything.
 type CallResult struct {
 	Status    int
 	Usage     Usage
@@ -22,6 +25,12 @@ type CallResult struct {
 	ReqBytes  int64 // forwarded request body
 	RespBytes int64 // bytes written to the session
 	Forwarded bool  // an upstream request was made
+	// TransportErr reports that the request was sent but no response arrived:
+	// a dial or TLS failure, or the wait for response headers timed out. Status
+	// is then 502 from Mayfly, not a provider status.
+	TransportErr bool
+	// MaxOut is the completion cap the admit hook reserved for this call.
+	MaxOut int64
 }
 
 // Refusal is an admit-hook refusal. The broker writes Status and the JSON body
