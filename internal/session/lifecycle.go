@@ -977,6 +977,10 @@ func (m *Manager) adoptPods(ctx context.Context, pods []corev1.Pod, only map[str
 		m.hub.Create(id)
 		m.persistInstance(inst)
 		m.hub.Append(id, model.Event{Type: model.EventSystem, Actor: "mayfly", Text: "Session recovered by control plane restart."})
+		// A seeded ledger at its limit has nothing left to pay for, and no
+		// queued turn can run. Close before any redelivery so the session does
+		// not start work it cannot charge.
+		m.closeExhaustedAdopted(inst)
 		m.restoreJournalThread(id)
 		m.redeliverPending(inst)
 		m.logger.Info("adopted session", "session", id, "pod", pod.Name, "restarts", inst.restarts)
@@ -1086,6 +1090,10 @@ func (m *Manager) adoptPodless(ctx context.Context, id string, objs k8s.OrphanOb
 	m.hub.Create(id)
 	m.persistInstance(inst)
 	m.hub.Append(id, model.Event{Type: model.EventSystem, Actor: "mayfly", Text: "Session recovered by control plane restart."})
+	// A seeded ledger at its limit has nothing left to pay for, and no queued
+	// turn can run. Close before any redelivery; the replacement start that
+	// follows is a no-op once the session is closing.
+	m.closeExhaustedAdopted(inst)
 	m.restoreJournalThread(id)
 	m.redeliverPending(inst)
 	m.logger.Info("adopted session without a pod; starting a replacement", "session", id)

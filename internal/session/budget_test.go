@@ -735,6 +735,54 @@ func TestAdoptMemoryBackendStartsAtZero(t *testing.T) {
 	}
 }
 
+// TestAdoptClosesExhaustedSession is the regression for a seeded ledger that is
+// already at its limit. Adoption restored the counters but nothing closed the
+// session, so it kept running with every model call refused. The recovery
+// charge of the interrupted call's reservation can be what pushes the usage
+// over the budget.
+func TestAdoptClosesExhaustedSession(t *testing.T) {
+	cases := []struct {
+		name    string
+		usage   model.LLMUsage
+		pending int64
+	}{
+		{name: "usage at the limit", usage: model.LLMUsage{PromptTokens: 1000, Requests: 2}},
+		{name: "recovered reservation over the limit", usage: model.LLMUsage{PromptTokens: 900, Requests: 2}, pending: 200},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			usage := tc.usage
+			rec := &Record{Version: RecordFormatVersion, Session: model.Session{
+				ID:               "e1",
+				Status:           model.StatusRunning,
+				Prompt:           "hello",
+				LLMUsage:         &usage,
+				LLMPendingTokens: tc.pending,
+			}}
+			m := adoptBudgetSession(t, "e1", sessioncfg.Config{MaxLLMTokens: 1000, MaxLLMRequests: 5}, rec)
+			inst, ok := m.instance("e1")
+			if !ok {
+				t.Fatal("session was not adopted")
+			}
+			inst.mu.Lock()
+			status, reason, errText := inst.sess.Status, inst.closeReason, inst.sess.Error
+			inst.mu.Unlock()
+			if status != model.StatusClosing {
+				t.Fatalf("status = %s, want %s", status, model.StatusClosing)
+			}
+			if reason != llmCloseReason {
+				t.Fatalf("close reason = %q", reason)
+			}
+			if errText == "" {
+				t.Fatal("exhausted session has no error message")
+			}
+			if err := m.AdmitLLM("e1", 0, 0); refusalCode(err) != CodeLLMBudgetExhausted {
+				t.Fatalf("admit after adoption = %v", err)
+			}
+		})
+	}
+}
+
 // TestLLMConcurrentAdmit is the race test: one budgeted session admits two
 // callers at once. Exactly one wins, the other is busy, and one in-flight call
 // never becomes two.

@@ -220,6 +220,23 @@ func (inst *instance) settleLLM(res broker.CallResult) (exhausted bool, message 
 	return inst.llm.exhausted, inst.llm.exhaustedMessage(), budgeted
 }
 
+// closeExhaustedAdopted closes a session that came back already over its
+// budget. Nothing can pay for another call, so it takes the same graceful
+// close path a charge at the limit takes. The seed includes the reservation of
+// the call that was in flight when the previous control plane stopped, and
+// that charge can push a session that was under its limit over it.
+func (m *Manager) closeExhaustedAdopted(inst *instance) {
+	inst.llmMu.Lock()
+	message := ""
+	if inst.llm.exhausted {
+		message = inst.llm.exhaustedMessage()
+	}
+	inst.llmMu.Unlock()
+	if message != "" {
+		m.exhaustLLM(inst, message)
+	}
+}
+
 // exhaustLLM records the exhausted budget and asks the runtime to finalize.
 // Close goes through the runtime's graceful path, so the artifact export still
 // happens.
