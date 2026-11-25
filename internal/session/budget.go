@@ -201,17 +201,19 @@ func (inst *instance) settleLLM(res broker.CallResult) (exhausted bool, message 
 		inst.llmMu.Unlock()
 		return false, "", false
 	}
-	// Release the slot even if the charge itself panics, so a stuck inflight
-	// counter cannot refuse every later call as llm_busy. The snapshot below
-	// already carries the released state.
+	// Release one slot even if the charge itself panics, so a stuck counter
+	// cannot refuse every later call as llm_busy. A budgetless session may
+	// have several calls in flight, so the release is a decrement: a reset
+	// would settle the other calls too and drop their charges.
 	defer func() {
-		inst.llm.inflight = 0
+		if inst.llm.inflight > 0 {
+			inst.llm.inflight--
+		}
 		inst.llm.pending = 0
 		inst.llmMu.Unlock()
 	}()
 	budgeted = inst.llm.budgeted()
 	inst.llm.charge(res)
-	inst.llm.inflight--
 	inst.llm.pending = 0
 	inst.llm.exhausted = budgeted && inst.llm.exhaustedMessage() != ""
 	inst.writeLLMLocked()

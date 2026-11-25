@@ -445,6 +445,38 @@ func TestLLMNoBudgetSkipsPersist(t *testing.T) {
 	}
 }
 
+// TestLLMNoBudgetCountsOverlappingCharges is the regression for a settled call
+// releasing every in-flight slot instead of its own. A session without a budget
+// admits concurrent calls, so both charges must land.
+func TestLLMNoBudgetCountsOverlappingCharges(t *testing.T) {
+	m := testManager(t)
+	inst := budgetInstance(m, "s1", 0, 0)
+
+	if err := m.AdmitLLM("s1", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AdmitLLM("s1", 0, 0); err != nil {
+		t.Fatalf("second unbudgeted admit: %v", err)
+	}
+	if err := m.ChargeLLM("s1", reported(10)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ChargeLLM("s1", reported(20)); err != nil {
+		t.Fatal(err)
+	}
+
+	usage := liveUsage(t, m, "s1")
+	if usage.PromptTokens != 30 || usage.Requests != 2 {
+		t.Fatalf("usage = %+v, want 30 tokens over 2 requests", usage)
+	}
+	inst.llmMu.Lock()
+	inflight := inst.llm.inflight
+	inst.llmMu.Unlock()
+	if inflight != 0 {
+		t.Fatalf("in-flight count = %d after both charges, want 0", inflight)
+	}
+}
+
 func TestLLMCountersSaturate(t *testing.T) {
 	l := &llmLedger{maxTokens: math.MaxInt64, maxRequests: 1}
 	l.spent.PromptTokens = math.MaxInt64 - 1
