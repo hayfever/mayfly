@@ -213,8 +213,8 @@ type SessionsConfig struct {
 	InboxBufferBytes int `yaml:"inbox_buffer_bytes"`
 	// MaxLLMTokens and MaxLLMRequests bound the model calls one session may
 	// make: prompt plus completion tokens, and forwarded requests. Zero means
-	// no limit. An agent manifest can lower either value with maxLLMTokens or
-	// maxLLMRequests.
+	// no limit. An agent manifest overrides either value with maxLLMTokens or
+	// maxLLMRequests, raising or lowering it.
 	MaxLLMTokens       int      `yaml:"max_llm_tokens"`
 	MaxLLMRequests     int      `yaml:"max_llm_requests"`
 	MaxSteps           int      `yaml:"max_steps"`
