@@ -67,14 +67,20 @@ func (l *llmLedger) exhaustedMessage() string {
 }
 
 // charge adds one call to the ledger. A call that never reached a provider
-// costs nothing. Reported usage wins. Otherwise a 2xx or a 5xx is charged the
-// size-based estimate, because the provider may already have billed the call
-// (a 502 also covers a timeout after the upstream request was made). Any other
-// forwarded status is charged no tokens: the request already counted at
-// admit.
+// costs nothing. A transport failure is charged the full reservation the admit
+// hook recorded, ReqBytes/4 + MaxOut: the provider may have billed a request
+// whose response never arrived, and a 502 after the response-header timeout is
+// that case. Reported usage wins over any estimate. Otherwise a 2xx or a 5xx is
+// charged the size-based estimate, because the provider may already have
+// billed the call. Any other forwarded status is charged no tokens: the
+// request already counted at admit.
 func (l *llmLedger) charge(res broker.CallResult) {
 	switch {
 	case !res.Forwarded:
+	case res.TransportErr:
+		l.spent.PromptTokens = satAdd(l.spent.PromptTokens, byteEstimate(res.ReqBytes))
+		l.spent.CompletionTokens = satAdd(l.spent.CompletionTokens, nonNegative(res.MaxOut))
+		l.spent.EstimatedCalls = satAdd(l.spent.EstimatedCalls, 1)
 	case res.Reported:
 		l.spent.PromptTokens = satAdd(l.spent.PromptTokens, res.Usage.Prompt)
 		l.spent.CompletionTokens = satAdd(l.spent.CompletionTokens, res.Usage.Completion)

@@ -200,9 +200,8 @@ func TestLLMChargeEstimate(t *testing.T) {
 			prompt: 200, completion: 20, estimated: 1,
 		},
 		{
-			// A timeout after the upstream request surfaces as a 502, and the
-			// provider may already have billed it.
-			name:   "timeout behind a 502",
+			// A 502 the upstream itself sent is a 5xx: estimate from bytes.
+			name:   "upstream 502 without usage",
 			res:    broker.CallResult{Status: 502, Forwarded: true, ReqBytes: 400, RespBytes: 0},
 			prompt: 100, estimated: 1,
 		},
@@ -229,6 +228,120 @@ func TestLLMChargeEstimate(t *testing.T) {
 					usage, tc.prompt, tc.completion, tc.estimated)
 			}
 		})
+	}
+}
+
+// TestLLMChargePolicy pins the charging policy per call outcome: a transport
+// failure costs the full reservation, an upstream 5xx or a 2xx without usage
+// costs the size estimate, a forwarded 4xx costs no tokens, and a call that was
+// never forwarded costs nothing. Every admitted call still counts one request.
+func TestLLMChargePolicy(t *testing.T) {
+	cases := []struct {
+		name       string
+		res        broker.CallResult
+		prompt     int64
+		completion int64
+		estimated  int64
+		total      int64
+	}{
+		{
+			// The 180s header timeout surfaces as a 502; the provider may
+			// already have billed the whole reservation.
+			name:       "transport failure charges the reservation",
+			res:        broker.CallResult{Status: 502, Forwarded: true, TransportErr: true, ReqBytes: 400, MaxOut: 100},
+			prompt:     100,
+			completion: 100,
+			estimated:  1,
+		},
+		{
+			name:       "transport failure without a cap",
+			res:        broker.CallResult{Status: 502, Forwarded: true, TransportErr: true, ReqBytes: 400},
+			prompt:     100,
+			completion: 0,
+			estimated:  1,
+		},
+		{
+			name:       "transport failure saturates",
+			res:        broker.CallResult{Status: 502, Forwarded: true, TransportErr: true, ReqBytes: math.MaxInt64, MaxOut: math.MaxInt64},
+			prompt:     math.MaxInt64 / 4,
+			completion: math.MaxInt64,
+			estimated:  1,
+			total:      math.MaxInt64,
+		},
+		{
+			name:       "upstream 5xx estimates from bytes",
+			res:        broker.CallResult{Status: 503, Forwarded: true, ReqBytes: 400, RespBytes: 800},
+			prompt:     100,
+			completion: 200,
+			estimated:  1,
+		},
+		{
+			name:   "forwarded 4xx charges nothing",
+			res:    broker.CallResult{Status: 429, Forwarded: true, ReqBytes: 400, RespBytes: 800, MaxOut: 100},
+			prompt: 0, completion: 0, estimated: 0,
+		},
+		{
+			name:   "not forwarded charges nothing",
+			res:    broker.CallResult{Status: 429, Forwarded: false, ReqBytes: 400, RespBytes: 800, MaxOut: 100},
+			prompt: 0, completion: 0, estimated: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := testManager(t)
+			inst := budgetInstance(m, "s1", math.MaxInt64, 10)
+			if err := m.AdmitLLM("s1", tc.res.ReqBytes, tc.res.MaxOut); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.ChargeLLM("s1", tc.res); err != nil {
+				t.Fatal(err)
+			}
+			usage := liveUsage(t, m, "s1")
+			if usage.PromptTokens != tc.prompt || usage.CompletionTokens != tc.completion ||
+				usage.EstimatedCalls != tc.estimated || usage.Requests != 1 {
+				t.Fatalf("usage = %+v, want prompt=%d completion=%d estimated=%d requests=1",
+					usage, tc.prompt, tc.completion, tc.estimated)
+			}
+			if tc.total != 0 && usage.Total() != tc.total {
+				t.Fatalf("total = %d, want %d", usage.Total(), tc.total)
+			}
+			inst.llmMu.Lock()
+			inflight, pending := inst.llm.inflight, inst.llm.pending
+			inst.llmMu.Unlock()
+			if inflight != 0 || pending != 0 {
+				t.Fatalf("ledger = inflight %d pending %d, want both zero", inflight, pending)
+			}
+		})
+	}
+}
+
+// TestLLMRefusedAdmitThenChargeChangesNothing covers the broker's refusal path:
+// when the admit hook refuses, the result is not forwarded and the ledger has
+// already counted no request, reserved nothing, and holds no in-flight slot.
+func TestLLMRefusedAdmitThenChargeChangesNothing(t *testing.T) {
+	m := testManager(t)
+	inst := budgetInstance(m, "s1", 10, 1)
+	if err := m.AdmitLLM("s1", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ChargeLLM("s1", reported(10)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AdmitLLM("s1", 400, 100); refusalCode(err) != CodeLLMBudgetExhausted {
+		t.Fatalf("admit after exhaustion = %v", err)
+	}
+	if err := m.ChargeLLM("s1", broker.CallResult{Status: 429, Forwarded: false, ReqBytes: 400, RespBytes: 80, MaxOut: 100}); err != nil {
+		t.Fatal(err)
+	}
+	usage := liveUsage(t, m, "s1")
+	if usage.Requests != 1 || usage.PromptTokens != 10 || usage.CompletionTokens != 0 || usage.EstimatedCalls != 0 {
+		t.Fatalf("refused call changed usage: %+v", usage)
+	}
+	inst.llmMu.Lock()
+	inflight, pending, exhausted := inst.llm.inflight, inst.llm.pending, inst.llm.exhausted
+	inst.llmMu.Unlock()
+	if inflight != 0 || pending != 0 || !exhausted {
+		t.Fatalf("ledger = inflight %d pending %d exhausted %v", inflight, pending, exhausted)
 	}
 }
 
