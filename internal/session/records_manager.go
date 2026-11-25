@@ -326,6 +326,9 @@ func (m *Manager) persistInstanceErr(inst *instance) error {
 	inst.persistMu.Lock()
 	defer inst.persistMu.Unlock()
 	sess := m.copySession(inst)
+	if sess.ID == "" {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), recordTimeout)
 	defer cancel()
 	if err := m.records.Save(ctx, Record{Version: RecordFormatVersion, Session: sess}); err != nil {

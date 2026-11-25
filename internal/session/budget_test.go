@@ -641,6 +641,27 @@ func TestLLMExhaustionSurvivesEmptyFinalize(t *testing.T) {
 	}
 }
 
+// TestPersistInstanceErrSkipsEmptyID keeps an instance without a session ID out
+// of the record store: a bare instance carries a zero snapshot.
+func TestPersistInstanceErrSkipsEmptyID(t *testing.T) {
+	m := testManager(t)
+	store := &failingRecords{RecordStore: NewMemoryRecords()}
+	m.SetRecords(store)
+	if err := m.persistInstanceErr(&instance{}); err != nil {
+		t.Fatal(err)
+	}
+	if saves := store.saveCount(); saves != 0 {
+		t.Fatalf("saves = %d, want none without an ID", saves)
+	}
+	records, err := m.records.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("records = %+v", records)
+	}
+}
+
 func TestLLMCountersSaturate(t *testing.T) {
 	l := &llmLedger{maxTokens: math.MaxInt64, maxRequests: 1}
 	l.spent.PromptTokens = math.MaxInt64 - 1
