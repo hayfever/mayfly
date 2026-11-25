@@ -477,6 +477,57 @@ func TestLLMNoBudgetCountsOverlappingCharges(t *testing.T) {
 	}
 }
 
+// TestLLMExhaustionSurvivesEmptyFinalize is the regression for finalize
+// overwriting the exhaustion error with the runtime's empty errMsg. The
+// runtime reports no error for a graceful stop, so the budget message is the
+// only record of why the session ended.
+func TestLLMExhaustionSurvivesEmptyFinalize(t *testing.T) {
+	m := testManager(t)
+	inst := budgetInstance(m, "s1", 10, 0)
+	const token = "runtime-token"
+	inst.token = token
+	inst.tokenHash = hashToken(token)
+	m.mu.Lock()
+	m.tokenIndex[inst.tokenHash] = "s1"
+	m.mu.Unlock()
+
+	if err := m.AdmitLLM("s1", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ChargeLLM("s1", reported(10)); err != nil {
+		t.Fatal(err)
+	}
+	const want = "LLM token budget exhausted: used 10 of 10 tokens"
+	if err := m.Complete("s1", token, model.StatusCompleted, llmCloseReason, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, ok := m.Get("s1")
+	if !ok {
+		t.Fatal("session disappeared")
+	}
+	if sess.Status != model.StatusCompleted {
+		t.Fatalf("status = %s", sess.Status)
+	}
+	if sess.Error != want {
+		t.Fatalf("session error = %q, want the exhaustion message", sess.Error)
+	}
+	rec, ok := storedRecord(t, m, "s1")
+	if !ok || rec.Error != want {
+		t.Fatalf("stored record error = %q", rec.Error)
+	}
+	var status model.StatusData
+	var found bool
+	for _, ev := range m.hub.EventsAfter("s1", 0) {
+		if data, ok := ev.Data.(model.StatusData); ok && ev.Type == model.EventStatus && data.Status == model.StatusCompleted {
+			status, found = data, true
+		}
+	}
+	if !found || status.Reason != llmCloseReason || status.Error != want {
+		t.Fatalf("final status event = %+v", status)
+	}
+}
+
 func TestLLMCountersSaturate(t *testing.T) {
 	l := &llmLedger{maxTokens: math.MaxInt64, maxRequests: 1}
 	l.spent.PromptTokens = math.MaxInt64 - 1

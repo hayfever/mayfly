@@ -536,7 +536,15 @@ func (m *Manager) finalize(inst *instance, status model.SessionStatus, reason, e
 		}
 	}
 	inst.sess.Status = final
-	inst.sess.Error = errMsg
+	// A session closed for its budget keeps the message exhaustLLM recorded:
+	// the runtime reports no error of its own for a graceful stop, so an empty
+	// errMsg would erase the only record of why the session ended.
+	errText := errMsg
+	if errText == "" && inst.sess.Error != "" &&
+		(inst.closeReason == llmCloseReason || reason == llmCloseReason) {
+		errText = inst.sess.Error
+	}
+	inst.sess.Error = errText
 	inst.sess.ClosedAt = &now
 	inst.sess.LastActivity = now
 	hash := inst.tokenHash
@@ -546,14 +554,14 @@ func (m *Manager) finalize(inst *instance, status model.SessionStatus, reason, e
 
 	m.removeToken(hash)
 	text := "Session " + string(final) + "."
-	if errMsg != "" {
-		text += " " + errMsg
+	if errText != "" {
+		text += " " + errText
 	}
 	m.hub.Append(inst.sess.ID, model.Event{
 		Type:  model.EventStatus,
 		Actor: "mayfly",
 		Text:  text,
-		Data:  model.StatusData{Status: final, Reason: reason, Error: errMsg},
+		Data:  model.StatusData{Status: final, Reason: reason, Error: errText},
 	})
 	// Shutdown waits for cleanup. A control plane that exits partway through
 	// would otherwise leave objects that adoption reads as a resumable
