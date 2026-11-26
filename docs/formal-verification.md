@@ -653,6 +653,13 @@ The model abstracts these details:
   boundary seeds at the cap, one byte over, and a straddling rune.
   `FuzzGitHubParse` applies the UTF-8 assertion to every input, and one seed
   carries a non-UTF-8 `X-GitHub-Event` header.
+- `FuzzParseUntrusted` asserts the delivery-key rule across every trigger kind:
+  a key from `X-GitHub-Delivery`, Slack `trigger_id`, or `Idempotency-Key` is
+  accepted only when it is valid UTF-8, and an accepted key is used verbatim,
+  so two different raw keys can never share one dedupe identity. The seed
+  `testdata/fuzz/FuzzParseUntrusted/085a2b2b0c4ae5ad` carries a lone `0xB0`
+  byte in `X-GitHub-Delivery` and is the regression from the scheduled verify
+  run that sanitized the key to U+FFFD.
 - `FuzzWorkerHandlerPanic` (`internal/queue`) runs a handler that panics on
   fuzz-chosen bytes. It asserts that the worker recovers, counts
   `max_attempts` attempts, buries the poison job, and still completes a healthy

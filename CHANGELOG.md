@@ -31,6 +31,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ### Fixed
 
+- A webhook delivery key (`X-GitHub-Delivery`, Slack `trigger_id`, or `Idempotency-Key`) that is not valid UTF-8 is rejected with `400` instead of sanitized to U+FFFD. Sanitizing mapped two different deliveries to one dedupe key, so the second was dropped as a duplicate. Accepted keys stay valid UTF-8 and are used verbatim, and `FuzzParseUntrusted` keeps the failing input as a seed (#61 follow-up, scheduled verify run 45635308722).
 - A model call that reports no usage is billed its request bytes over four plus its response bytes over four, and the completion part stops at the call's `max_tokens`. One estimated call therefore never charges more than the reservation the admit hook recorded (#49).
 - A model call that panics after it was admitted is counted in `mayfly_llm_requests_total` and `mayfly_llm_request_duration_seconds`, and a reservation the record store cannot keep is labeled `persist_failed` in `mayfly_llm_requests_total` instead of `error` (#49).
 - A Streamable HTTP MCP server that answers with `text/event-stream` can deliver a legal image tool result: the SSE decoder, the HTTP JSON body, and the stdio line share an 8 MiB response bound instead of a 4 MiB SSE line bound (#71).
