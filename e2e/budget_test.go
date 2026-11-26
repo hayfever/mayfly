@@ -256,7 +256,10 @@ func TestSessionBudgetMetrics(t *testing.T) {
 	estimatedBefore := metricValue(t, "mayfly_llm_usage_estimated_total", estimated)
 
 	s := env.createSession(t, map[string]any{
-		"prompt": "budget metrics " + randomHex(4),
+		// The second line is the stub's no-usage directive. It is inert on a
+		// stub that sends no usage, and keeps this case on the estimate path
+		// once the stub can report usage.
+		"prompt": "budget metrics " + randomHex(4) + "\nno-usage",
 		"agent":  "budget-tokens",
 	})
 	env.waitStatus(t, s.ID, "running", 2*time.Minute)
