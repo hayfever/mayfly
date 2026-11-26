@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"time"
 
 	"github.com/hayfever/mayfly/internal/broker"
 	"github.com/hayfever/mayfly/internal/model"
@@ -66,29 +67,42 @@ func (l *llmLedger) exhaustedMessage() string {
 	return ""
 }
 
-// charge adds one call to the ledger. A call that never reached a provider
-// costs nothing. A transport failure is charged the full reservation the admit
-// hook recorded, ReqBytes/4 + MaxOut: the provider may have billed a request
-// whose response never arrived, and a 502 after the response-header timeout is
-// that case. Reported usage wins over any estimate. Otherwise a 2xx or a 5xx is
-// charged the size-based estimate, because the provider may already have
-// billed the call. Any other forwarded status is charged no tokens: the
-// request already counted at admit.
-func (l *llmLedger) charge(res broker.CallResult) {
+// charge adds one call to the ledger and returns the tokens it added.
+// estimated reports that the charge came from a size estimate or from the
+// transport-failure reservation rather than from reported usage. A call that
+// never reached a provider costs nothing. A transport failure is charged the
+// full reservation the admit hook recorded, ReqBytes/4 + MaxOut: the provider
+// may have billed a request whose response never arrived, and a 502 after the
+// response-header timeout is that case. Reported usage wins over any estimate.
+// Otherwise a 2xx or a 5xx is charged the size-based estimate, because the
+// provider may already have billed the call. Any other forwarded status is
+// charged no tokens: the request already counted at admit.
+func (l *llmLedger) charge(res broker.CallResult) (delta broker.Usage, estimated bool) {
+	var added broker.Usage
 	switch {
 	case !res.Forwarded:
 	case res.TransportErr:
-		l.spent.PromptTokens = satAdd(l.spent.PromptTokens, byteEstimate(res.ReqBytes))
-		l.spent.CompletionTokens = satAdd(l.spent.CompletionTokens, nonNegative(res.MaxOut))
-		l.spent.EstimatedCalls = satAdd(l.spent.EstimatedCalls, 1)
+		added = broker.Usage{Prompt: byteEstimate(res.ReqBytes), Completion: nonNegative(res.MaxOut)}
+		estimated = true
 	case res.Reported:
-		l.spent.PromptTokens = satAdd(l.spent.PromptTokens, res.Usage.Prompt)
-		l.spent.CompletionTokens = satAdd(l.spent.CompletionTokens, res.Usage.Completion)
+		added = broker.Usage{Prompt: nonNegative(res.Usage.Prompt), Completion: nonNegative(res.Usage.Completion)}
 	case res.Status >= 500 || (res.Status >= 200 && res.Status < 300):
-		l.spent.PromptTokens = satAdd(l.spent.PromptTokens, byteEstimate(res.ReqBytes))
-		l.spent.CompletionTokens = satAdd(l.spent.CompletionTokens, byteEstimate(res.RespBytes))
+		added = broker.Usage{Prompt: byteEstimate(res.ReqBytes), Completion: byteEstimate(res.RespBytes)}
+		estimated = true
+	}
+	promptBefore, completionBefore := l.spent.PromptTokens, l.spent.CompletionTokens
+	l.spent.PromptTokens = satAdd(l.spent.PromptTokens, added.Prompt)
+	l.spent.CompletionTokens = satAdd(l.spent.CompletionTokens, added.Completion)
+	if estimated {
 		l.spent.EstimatedCalls = satAdd(l.spent.EstimatedCalls, 1)
 	}
+	// Report what the counters gained, not the requested charge, so a
+	// saturated ledger does not overstate its own delta.
+	delta = broker.Usage{
+		Prompt:     l.spent.PromptTokens - promptBefore,
+		Completion: l.spent.CompletionTokens - completionBefore,
+	}
+	return delta, estimated
 }
 
 // Admission and charging.
@@ -122,9 +136,10 @@ func (m *Manager) admitLLM(inst *instance, reqBytes, maxOut int64) error {
 	if inst.llm.inflight >= 1 {
 		inst.llmMu.Unlock()
 		return &broker.Refusal{
-			Status:  http.StatusTooManyRequests,
-			Code:    CodeLLMBusy,
-			Message: "another model call is in flight",
+			Status:     http.StatusTooManyRequests,
+			Code:       CodeLLMBusy,
+			Message:    "another model call is in flight",
+			RetryAfter: time.Second,
 		}
 	}
 	// exhausted is sticky once a charge reaches a limit; the live counters are
@@ -148,14 +163,22 @@ func (m *Manager) admitLLM(inst *instance, reqBytes, maxOut int64) error {
 	inst.llmMu.Unlock()
 
 	// The reservation is durable before the upstream call, so a crash in the
-	// middle of it cannot lose the charge.
-	if err := m.persistInstanceErr(inst); err != nil {
+	// middle of it cannot lose the charge. A failed or panicking write must
+	// release the slot again: nothing was reserved, so nothing may stay
+	// in flight and refuse every later call as llm_busy.
+	recorded := false
+	defer func() {
+		if recorded {
+			return
+		}
 		inst.llmMu.Lock()
 		inst.llm.inflight = 0
 		inst.llm.spent.Requests = previousRequests
 		inst.llm.pending = previousPending
 		inst.writeLLMLocked()
 		inst.llmMu.Unlock()
+	}()
+	if err := m.persistInstanceErr(inst); err != nil {
 		m.logger.Warn("reserve model call", "session", inst.sess.ID, "error", err)
 		return &broker.Refusal{
 			Status:  http.StatusServiceUnavailable,
@@ -163,49 +186,62 @@ func (m *Manager) admitLLM(inst *instance, reqBytes, maxOut int64) error {
 			Message: "cannot record the model call",
 		}
 	}
+	recorded = true
 	return nil
 }
 
-// ChargeLLM settles a call that AdmitLLM admitted. It releases the in-flight
-// slot, charges the usage or its estimate, and persists the result. When the
-// charge reaches a limit it emits an error event and closes the session with
-// reason llm_budget_exhausted. A session without a budget keeps its usage in
-// memory and writes it on the next ordinary transition.
+// ChargeLLM settles the call whose admission the session holds. It releases
+// the in-flight slot, charges the usage or its estimate, and persists the
+// result. It returns the tokens this call added and whether they came from an
+// estimate. When the charge reaches a limit it emits an error event and closes
+// the session with reason llm_budget_exhausted. A session without a budget
+// keeps its usage in memory and writes it on the next ordinary transition.
 //
-// It is safe to call after a failed call and when no call is in flight: with
-// no admission the method does nothing.
-func (m *Manager) ChargeLLM(id string, res broker.CallResult) error {
+// The method is not tied to a particular request: it settles whatever call the
+// session holds in flight. Call it only for a call that AdmitLLM admitted. A
+// charge after a refusal of a second call would settle the call that is still
+// running and release its slot.
+func (m *Manager) ChargeLLM(id string, res broker.CallResult) (delta broker.Usage, estimated bool, err error) {
 	inst, ok := m.instance(id)
 	if !ok {
-		return ErrNotFound
+		return broker.Usage{}, false, ErrNotFound
 	}
 	return m.chargeLLM(inst, res)
 }
 
-func (m *Manager) chargeLLM(inst *instance, res broker.CallResult) error {
-	exhausted, message, budgeted := inst.settleLLM(res)
+func (m *Manager) chargeLLM(inst *instance, res broker.CallResult) (broker.Usage, bool, error) {
+	settled := inst.settleLLM(res)
 	var err error
-	if budgeted {
+	if settled.budgeted {
 		if err = m.persistInstanceErr(inst); err != nil {
 			// The charge stays in memory, so the next admission sees it and
 			// the in-flight slot is already free. Only durability is at risk.
 			m.logger.Warn("persist model usage", "session", inst.sess.ID, "error", err)
 		}
 	}
-	if exhausted {
-		m.exhaustLLM(inst, message)
+	if settled.exhausted {
+		m.exhaustLLM(inst, settled.message)
 	}
-	return err
+	return settled.delta, settled.estimated, err
+}
+
+// llmSettlement is the outcome of one ChargeLLM call.
+type llmSettlement struct {
+	delta     broker.Usage
+	estimated bool
+	exhausted bool
+	message   string
+	budgeted  bool
 }
 
 // settleLLM applies one call result and releases the in-flight slot. It
-// reports whether the budget is now exhausted and whether the ledger is
-// budgeted (and therefore needs a durable write).
-func (inst *instance) settleLLM(res broker.CallResult) (exhausted bool, message string, budgeted bool) {
+// reports the tokens the call added, whether the budget is now exhausted, and
+// whether the ledger is budgeted (and therefore needs a durable write).
+func (inst *instance) settleLLM(res broker.CallResult) llmSettlement {
 	inst.llmMu.Lock()
 	if inst.llm.inflight == 0 {
 		inst.llmMu.Unlock()
-		return false, "", false
+		return llmSettlement{}
 	}
 	// Release one slot even if the charge itself panics, so a stuck counter
 	// cannot refuse every later call as llm_busy. A budgetless session may
@@ -218,12 +254,18 @@ func (inst *instance) settleLLM(res broker.CallResult) (exhausted bool, message 
 		inst.llm.pending = 0
 		inst.llmMu.Unlock()
 	}()
-	budgeted = inst.llm.budgeted()
-	inst.llm.charge(res)
+	budgeted := inst.llm.budgeted()
+	delta, estimated := inst.llm.charge(res)
 	inst.llm.pending = 0
 	inst.llm.exhausted = budgeted && inst.llm.exhaustedMessage() != ""
 	inst.writeLLMLocked()
-	return inst.llm.exhausted, inst.llm.exhaustedMessage(), budgeted
+	return llmSettlement{
+		delta:     delta,
+		estimated: estimated,
+		exhausted: inst.llm.exhausted,
+		message:   inst.llm.exhaustedMessage(),
+		budgeted:  budgeted,
+	}
 }
 
 // closeExhaustedAdopted closes a session that came back already over its
@@ -231,16 +273,21 @@ func (inst *instance) settleLLM(res broker.CallResult) (exhausted bool, message 
 // close path a charge at the limit takes. The seed includes the reservation of
 // the call that was in flight when the previous control plane stopped, and
 // that charge can push a session that was under its limit over it.
-func (m *Manager) closeExhaustedAdopted(inst *instance) {
+//
+// It reports whether it asked the session to close, and the message it
+// recorded. An adopted session with no pod has no runtime to finalize, so its
+// caller must complete the close itself.
+func (m *Manager) closeExhaustedAdopted(inst *instance) (closed bool, message string) {
 	inst.llmMu.Lock()
-	message := ""
 	if inst.llm.exhausted {
 		message = inst.llm.exhaustedMessage()
 	}
 	inst.llmMu.Unlock()
-	if message != "" {
-		m.exhaustLLM(inst, message)
+	if message == "" {
+		return false, ""
 	}
+	m.exhaustLLM(inst, message)
+	return true, message
 }
 
 // exhaustLLM records the exhausted budget and asks the runtime to finalize.

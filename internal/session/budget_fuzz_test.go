@@ -249,7 +249,7 @@ func (h *ledgerHarness) concurrentAdmit(t *testing.T) {
 func (h *ledgerHarness) settle(t *testing.T, res broker.CallResult, charged int64) {
 	t.Helper()
 	before := h.usage()
-	err := h.m.ChargeLLM("fz", res)
+	_, _, err := h.m.ChargeLLM("fz", res)
 	if h.inflight == 0 {
 		if err != nil {
 			t.Fatalf("stray charge: %v", err)

@@ -131,7 +131,7 @@ func TestLLMAdmitCharge(t *testing.T) {
 		t.Fatalf("busy refusal counted a request: %+v", usage)
 	}
 
-	if err := m.ChargeLLM("s1", broker.CallResult{
+	if _, _, err := m.ChargeLLM("s1", broker.CallResult{
 		Status: 200, Reported: true, Forwarded: true,
 		Usage: broker.Usage{Prompt: 30, Completion: 12},
 	}); err != nil {
@@ -150,7 +150,7 @@ func TestLLMAdmitCharge(t *testing.T) {
 	}
 
 	// A charge without an admission is a no-op.
-	if err := m.ChargeLLM("s1", broker.CallResult{Status: 200, Reported: true, Forwarded: true, Usage: broker.Usage{Prompt: 1000}}); err != nil {
+	if _, _, err := m.ChargeLLM("s1", broker.CallResult{Status: 200, Reported: true, Forwarded: true, Usage: broker.Usage{Prompt: 1000}}); err != nil {
 		t.Fatal(err)
 	}
 	if usage := liveUsage(t, m, "s1"); usage.PromptTokens != 30 {
@@ -164,7 +164,7 @@ func TestLLMChargeWithoutForwardedCostsNothing(t *testing.T) {
 	if err := m.AdmitLLM("s1", 400, 100); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.ChargeLLM("s1", broker.CallResult{Status: 200, Forwarded: false}); err != nil {
+	if _, _, err := m.ChargeLLM("s1", broker.CallResult{Status: 200, Forwarded: false}); err != nil {
 		t.Fatal(err)
 	}
 	usage := liveUsage(t, m, "s1")
@@ -218,8 +218,15 @@ func TestLLMChargeEstimate(t *testing.T) {
 			if err := m.AdmitLLM("s1", tc.res.ReqBytes, 100); err != nil {
 				t.Fatal(err)
 			}
-			if err := m.ChargeLLM("s1", tc.res); err != nil {
+			delta, estimated, err := m.ChargeLLM("s1", tc.res)
+			if err != nil {
 				t.Fatal(err)
+			}
+			if delta != (broker.Usage{Prompt: tc.prompt, Completion: tc.completion}) {
+				t.Fatalf("delta = %+v, want prompt=%d completion=%d", delta, tc.prompt, tc.completion)
+			}
+			if estimated != (tc.estimated == 1) {
+				t.Fatalf("estimated = %v, want %v", estimated, tc.estimated == 1)
 			}
 			usage := liveUsage(t, m, "s1")
 			if usage.PromptTokens != tc.prompt || usage.CompletionTokens != tc.completion ||
@@ -228,6 +235,20 @@ func TestLLMChargeEstimate(t *testing.T) {
 					usage, tc.prompt, tc.completion, tc.estimated)
 			}
 		})
+	}
+}
+
+// TestLLMChargeWithoutAdmissionReturnsNoDelta keeps the metric contract: a
+// charge with no in-flight call adds no tokens, so a caller records nothing.
+func TestLLMChargeWithoutAdmissionReturnsNoDelta(t *testing.T) {
+	m := testManager(t)
+	budgetInstance(m, "s1", 1000, 10)
+	delta, estimated, err := m.ChargeLLM("s1", reported(50))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta != (broker.Usage{}) || estimated {
+		t.Fatalf("stray charge returned delta %+v estimated %v", delta, estimated)
 	}
 }
 
@@ -293,7 +314,7 @@ func TestLLMChargePolicy(t *testing.T) {
 			if err := m.AdmitLLM("s1", tc.res.ReqBytes, tc.res.MaxOut); err != nil {
 				t.Fatal(err)
 			}
-			if err := m.ChargeLLM("s1", tc.res); err != nil {
+			if _, _, err := m.ChargeLLM("s1", tc.res); err != nil {
 				t.Fatal(err)
 			}
 			usage := liveUsage(t, m, "s1")
@@ -324,13 +345,13 @@ func TestLLMRefusedAdmitThenChargeChangesNothing(t *testing.T) {
 	if err := m.AdmitLLM("s1", 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.ChargeLLM("s1", reported(10)); err != nil {
+	if _, _, err := m.ChargeLLM("s1", reported(10)); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.AdmitLLM("s1", 400, 100); refusalCode(err) != CodeLLMBudgetExhausted {
 		t.Fatalf("admit after exhaustion = %v", err)
 	}
-	if err := m.ChargeLLM("s1", broker.CallResult{Status: 429, Forwarded: false, ReqBytes: 400, RespBytes: 80, MaxOut: 100}); err != nil {
+	if _, _, err := m.ChargeLLM("s1", broker.CallResult{Status: 429, Forwarded: false, ReqBytes: 400, RespBytes: 80, MaxOut: 100}); err != nil {
 		t.Fatal(err)
 	}
 	usage := liveUsage(t, m, "s1")
@@ -352,14 +373,14 @@ func TestLLMOvershootAtMostOneResponse(t *testing.T) {
 	if err := m.AdmitLLM("s1", 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.ChargeLLM("s1", reported(90)); err != nil {
+	if _, _, err := m.ChargeLLM("s1", reported(90)); err != nil {
 		t.Fatal(err)
 	}
 	// 90 of 100 tokens used, so one more call may start.
 	if err := m.AdmitLLM("s1", 0, 0); err != nil {
 		t.Fatalf("admit below the cap: %v", err)
 	}
-	if err := m.ChargeLLM("s1", reported(50)); err != nil {
+	if _, _, err := m.ChargeLLM("s1", reported(50)); err != nil {
 		t.Fatal(err)
 	}
 	usage := liveUsage(t, m, "s1")
@@ -383,7 +404,7 @@ func TestLLMRequestCapOvershootsByZero(t *testing.T) {
 	if err := m.AdmitLLM("s1", 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.ChargeLLM("s1", reported(1)); err != nil {
+	if _, _, err := m.ChargeLLM("s1", reported(1)); err != nil {
 		t.Fatal(err)
 	}
 	err := m.AdmitLLM("s1", 0, 0)
@@ -401,7 +422,7 @@ func TestLLMExhaustionClosesSession(t *testing.T) {
 	if err := m.AdmitLLM("s1", 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.ChargeLLM("s1", reported(10)); err != nil {
+	if _, _, err := m.ChargeLLM("s1", reported(10)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -474,6 +495,64 @@ func (s *failingRecords) saveCount() int {
 	return s.saves
 }
 
+// panickingRecords panics from Save while panicOnSave is set.
+type panickingRecords struct {
+	RecordStore
+	mu          sync.Mutex
+	panicOnSave bool
+}
+
+func (s *panickingRecords) Save(ctx context.Context, rec Record) error {
+	s.mu.Lock()
+	panicOnSave := s.panicOnSave
+	s.mu.Unlock()
+	if panicOnSave {
+		panic("record store panic")
+	}
+	return s.RecordStore.Save(ctx, rec)
+}
+
+func (s *panickingRecords) setPanic(on bool) {
+	s.mu.Lock()
+	s.panicOnSave = on
+	s.mu.Unlock()
+}
+
+// TestLLMAdmitRollsBackOnPersistPanic is the regression for a store that
+// panics while the reservation is recorded. The rollback ran only on a
+// returned error, so the in-flight slot stayed set and every later call was
+// refused as llm_busy.
+func TestLLMAdmitRollsBackOnPersistPanic(t *testing.T) {
+	m := testManager(t)
+	store := &panickingRecords{RecordStore: NewMemoryRecords(), panicOnSave: true}
+	m.SetRecords(store)
+	inst := budgetInstance(m, "s1", 1000, 10)
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("admit swallowed the record store panic")
+			}
+		}()
+		_ = m.AdmitLLM("s1", 400, 100)
+	}()
+
+	inst.llmMu.Lock()
+	ledger := inst.llm
+	inst.llmMu.Unlock()
+	if ledger.inflight != 0 || ledger.pending != 0 || ledger.spent.Requests != 0 {
+		t.Fatalf("panicked admission left state behind: %+v", ledger)
+	}
+
+	store.setPanic(false)
+	if err := m.AdmitLLM("s1", 400, 100); err != nil {
+		t.Fatalf("admit after a panicking persist = %v", err)
+	}
+	if _, _, err := m.ChargeLLM("s1", reported(5)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLLMAdmitFailsClosedWhenReservationIsNotDurable(t *testing.T) {
 	m := testManager(t)
 	store := &failingRecords{RecordStore: NewMemoryRecords(), fail: true}
@@ -503,7 +582,7 @@ func TestLLMAdmitFailsClosedWhenReservationIsNotDurable(t *testing.T) {
 	if err := m.AdmitLLM("s1", 400, 100); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.ChargeLLM("s1", reported(5)); err != nil {
+	if _, _, err := m.ChargeLLM("s1", reported(5)); err != nil {
 		t.Fatal(err)
 	}
 	if usage := liveUsage(t, m, "s1"); usage.PromptTokens != 5 {
@@ -521,7 +600,7 @@ func TestLLMChargeKeepsMemoryWhenPersistFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.setFail(true)
-	if err := m.ChargeLLM("s1", reported(25)); err == nil {
+	if _, _, err := m.ChargeLLM("s1", reported(25)); err == nil {
 		t.Fatal("a failed usage write was not reported")
 	}
 	if usage := liveUsage(t, m, "s1"); usage.PromptTokens != 25 {
@@ -543,7 +622,7 @@ func TestLLMNoBudgetSkipsPersist(t *testing.T) {
 	if err := m.AdmitLLM("s1", 400, 100); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.ChargeLLM("s1", reported(9)); err != nil {
+	if _, _, err := m.ChargeLLM("s1", reported(9)); err != nil {
 		t.Fatal(err)
 	}
 	if saves := store.saveCount(); saves != 0 {
@@ -571,10 +650,10 @@ func TestLLMNoBudgetCountsOverlappingCharges(t *testing.T) {
 	if err := m.AdmitLLM("s1", 0, 0); err != nil {
 		t.Fatalf("second unbudgeted admit: %v", err)
 	}
-	if err := m.ChargeLLM("s1", reported(10)); err != nil {
+	if _, _, err := m.ChargeLLM("s1", reported(10)); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.ChargeLLM("s1", reported(20)); err != nil {
+	if _, _, err := m.ChargeLLM("s1", reported(20)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -607,7 +686,7 @@ func TestLLMExhaustionSurvivesEmptyFinalize(t *testing.T) {
 	if err := m.AdmitLLM("s1", 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.ChargeLLM("s1", reported(10)); err != nil {
+	if _, _, err := m.ChargeLLM("s1", reported(10)); err != nil {
 		t.Fatal(err)
 	}
 	const want = "LLM token budget exhausted: used 10 of 10 tokens"
@@ -953,7 +1032,7 @@ func TestLLMConcurrentAdmit(t *testing.T) {
 	if admitted != 1 || busy != 1 {
 		t.Fatalf("admitted = %d busy = %d", admitted, busy)
 	}
-	if err := m.ChargeLLM("s1", reported(10)); err != nil {
+	if _, _, err := m.ChargeLLM("s1", reported(10)); err != nil {
 		t.Fatal(err)
 	}
 	usage := liveUsage(t, m, "s1")
