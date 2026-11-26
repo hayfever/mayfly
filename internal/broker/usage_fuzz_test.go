@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"math"
 	"testing"
 )
 
@@ -80,9 +79,6 @@ func FuzzUsageJSON(f *testing.F) {
 		usage, reported := decodeUsage(body)
 		if usage.Prompt < 0 || usage.Completion < 0 {
 			t.Fatalf("negative usage: %+v", usage)
-		}
-		if usage.Prompt > math.MaxInt64 || usage.Completion > math.MaxInt64 {
-			t.Fatalf("usage overflowed: %+v", usage)
 		}
 		if !reported && (usage.Prompt != 0 || usage.Completion != 0) {
 			t.Fatalf("unreported usage carries counts: %+v", usage)
