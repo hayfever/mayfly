@@ -546,7 +546,7 @@ The e2e cases in `e2e/budget_test.go` run against the deployed release. They
 cover exhaustion and the 429 refusal, two overlapping calls with `llm_busy`,
 the session fields and the CLI tokens line, the token and estimate counters,
 usage across a control-plane restart with bbolt, a per-agent override, and the
-defaults-off case. Two of them suspend the session's agent process with
+defaults-off case. The exhaustion case suspends the session's agent process with
 `kill -STOP 1` so the test, not the agent, spends the budget; the cleanup
 resumes it.
 
