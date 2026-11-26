@@ -24,9 +24,12 @@ const (
 	// label is a route template, never a raw path, so the set stays small.
 	RouteUnmatched = "unmatched"
 	// ResultOK and ResultError label an outcome that is only success or
-	// failure, such as a proxied model call.
-	ResultOK    = "ok"
-	ResultError = "error"
+	// failure, such as a proxied model call. ResultBusy and ResultOverBudget
+	// label a model call the budget refused before any upstream request.
+	ResultOK         = "ok"
+	ResultError      = "error"
+	ResultBusy       = "busy"
+	ResultOverBudget = "over_budget"
 	// AttemptSucceeded, AttemptFailed, and AttemptRetryLater label one queue
 	// job attempt.
 	AttemptSucceeded  = "succeeded"
@@ -100,6 +103,8 @@ type Metrics struct {
 	httpDuration     *prometheus.HistogramVec
 	llmRequests      *prometheus.CounterVec
 	llmDuration      *prometheus.HistogramVec
+	llmTokens        *prometheus.CounterVec
+	llmEstimated     *prometheus.CounterVec
 	gatewayCalls     *prometheus.CounterVec
 }
 
@@ -138,12 +143,20 @@ func New(src Sources, build BuildInfo) *Metrics {
 		}, []string{"route", "method"}),
 		llmRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mayfly_llm_requests_total",
-			Help: "Model calls proxied to the upstream provider, by model and result.",
+			Help: "Model calls by model and result. A call the budget refused was not forwarded and is labeled busy or over_budget.",
 		}, []string{"model", "result"}),
 		llmDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "mayfly_llm_request_duration_seconds",
 			Help:    "Model call duration in seconds, by model.",
 			Buckets: []float64{0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300},
+		}, []string{"model"}),
+		llmTokens: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mayfly_llm_tokens_total",
+			Help: "Tokens charged to sessions, by model and kind. Includes estimated tokens.",
+		}, []string{"model", "kind"}),
+		llmEstimated: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mayfly_llm_usage_estimated_total",
+			Help: "Model calls charged from a size estimate or a transport-failure reservation, by model.",
 		}, []string{"model"}),
 		gatewayCalls: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mayfly_gateway_calls_total",
@@ -171,6 +184,8 @@ func New(src Sources, build BuildInfo) *Metrics {
 		m.httpDuration,
 		m.llmRequests,
 		m.llmDuration,
+		m.llmTokens,
+		m.llmEstimated,
 		m.gatewayCalls,
 		buildInfo,
 	)
@@ -284,6 +299,25 @@ func (m *Metrics) LLMRequest(modelName, result string, duration time.Duration) {
 	}
 	m.llmRequests.WithLabelValues(modelName, result).Inc()
 	m.llmDuration.WithLabelValues(modelName).Observe(duration.Seconds())
+}
+
+// LLMTokens records the tokens one settled model call added to a session's
+// ledger. estimated reports that the charge came from a size estimate or a
+// transport-failure reservation rather than from reported usage. The caller
+// passes non-negative counts, so a counter cannot go backwards.
+func (m *Metrics) LLMTokens(modelName string, prompt, completion int64, estimated bool) {
+	if m == nil {
+		return
+	}
+	if prompt > 0 {
+		m.llmTokens.WithLabelValues(modelName, "prompt").Add(float64(prompt))
+	}
+	if completion > 0 {
+		m.llmTokens.WithLabelValues(modelName, "completion").Add(float64(completion))
+	}
+	if estimated {
+		m.llmEstimated.WithLabelValues(modelName).Inc()
+	}
 }
 
 // ToolCall records one finished or refused tool call. It satisfies the tool
