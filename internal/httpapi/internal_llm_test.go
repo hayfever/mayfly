@@ -3,12 +3,14 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hayfever/mayfly/internal/agents"
 	"github.com/hayfever/mayfly/internal/artifact"
@@ -36,12 +38,37 @@ type llmFixture struct {
 	mgr     *session.Manager
 	runner  *recordingRunner
 	metrics *metrics.Metrics
+	records *flakyRecords
 	id      string
 	token   string
 
 	mu      sync.Mutex
 	handler func(w http.ResponseWriter, r *http.Request, body []byte)
 	hits    int
+}
+
+// flakyRecords wraps the memory record store and refuses writes on demand, so
+// a test can reach the budget's fail-closed reservation path.
+type flakyRecords struct {
+	session.RecordStore
+	mu   sync.Mutex
+	fail bool
+}
+
+func (r *flakyRecords) setFail(fail bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fail = fail
+}
+
+func (r *flakyRecords) Save(ctx context.Context, rec session.Record) error {
+	r.mu.Lock()
+	fail := r.fail
+	r.mu.Unlock()
+	if fail {
+		return errors.New("record store unavailable")
+	}
+	return r.RecordStore.Save(ctx, rec)
 }
 
 // newLLMFixture starts a server whose sessions carry the given model budget.
@@ -88,6 +115,8 @@ func newLLMFixture(t *testing.T, tokens, requests int) *llmFixture {
 		t.Fatal(err)
 	}
 	f.mgr = mgr
+	f.records = &flakyRecords{RecordStore: session.NewMemoryRecords()}
+	mgr.SetRecords(f.records)
 	f.server = New(cfg, mgr, nil, testLogger(), WithMetrics(f.metrics))
 
 	sess, err := mgr.Create(context.Background(), session.CreateOptions{Prompt: "llm probe", Agent: "helper"})
@@ -300,6 +329,50 @@ func TestInternalLLMExhaustedBudget(t *testing.T) {
 	}
 }
 
+// TestInternalLLMPersistFailureRefusesAndLabels covers a reservation that the
+// record store cannot keep: the budget fails closed with a 503, the call never
+// reaches the provider, nothing is charged, and the metric names the refusal.
+func TestInternalLLMPersistFailureRefusesAndLabels(t *testing.T) {
+	f := newLLMFixture(t, 1000, 10)
+	before := f.usage()
+	hits := f.upstreamHits()
+	f.records.setFail(true)
+
+	rec := f.chat(llmTestBody)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("persist refusal has Retry-After %q", got)
+	}
+	var refused struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &refused); err != nil {
+		t.Fatalf("refusal body: %v (%s)", err, rec.Body.String())
+	}
+	if refused.Code != session.CodeLLMPersistFailed {
+		t.Fatalf("refusal code = %q body=%s", refused.Code, rec.Body.String())
+	}
+	if after := f.usage(); after != before {
+		t.Fatalf("refused call charged: %+v -> %+v", before, after)
+	}
+	if f.upstreamHits() != hits {
+		t.Fatalf("refused call reached the provider")
+	}
+
+	// The slot was released: the next call is admitted once the store
+	// recovers, not refused as llm_busy.
+	f.records.setFail(false)
+	if rec := f.chat(llmTestBody); rec.Code != http.StatusOK {
+		t.Fatalf("call after the refusal = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := f.scrape()
+	if !strings.Contains(body, `mayfly_llm_requests_total{model="stub",result="persist_failed"} 1`) {
+		t.Fatalf("persist refusal is not labeled persist_failed:\n%s", body)
+	}
+}
+
 // TestInternalLLMBusyDoesNotCharge covers two overlapping calls: the second is
 // refused with Retry-After, does not touch the running call's ledger, and the
 // first still settles its usage.
@@ -307,16 +380,24 @@ func TestInternalLLMBusyDoesNotCharge(t *testing.T) {
 	f := newLLMFixture(t, 1_000_000, 0)
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	var once sync.Once
+	var enteredOnce, releaseOnce sync.Once
+	// Release the fake upstream on any exit, so an assertion failure cannot
+	// leave the blocked call waiting until the test timeout.
+	releaseUpstream := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseUpstream)
 	f.setUpstream(func(w http.ResponseWriter, r *http.Request, _ []byte) {
-		once.Do(func() { close(entered) })
+		enteredOnce.Do(func() { close(entered) })
 		<-release
 		writeStubUsage(w, llmTestUsage)
 	})
 
 	first := make(chan *httptest.ResponseRecorder, 1)
 	go func() { first <- f.chat(llmTestBody) }()
-	<-entered
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the blocked call never reached the provider")
+	}
 
 	before := f.usage()
 	rec := f.chat(llmTestBody)
@@ -343,7 +424,7 @@ func TestInternalLLMBusyDoesNotCharge(t *testing.T) {
 		t.Fatalf("running call ledger = %+v", before)
 	}
 
-	close(release)
+	releaseUpstream()
 	rec = <-first
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first status = %d body=%s", rec.Code, rec.Body.String())
@@ -411,5 +492,14 @@ func TestInternalLLMPanicChargesReservation(t *testing.T) {
 	body := f.scrape()
 	if !strings.Contains(body, `mayfly_llm_usage_estimated_total{model="stub"} 1`) {
 		t.Fatalf("panic reservation is not counted as estimated:\n%s", body)
+	}
+	// The panic unwinds the proxy, so the request metric must be recorded by
+	// the deferred charge. A forwarded call that panics is a transport
+	// failure, not a refusal. The later call adds the second observation.
+	if !strings.Contains(body, `mayfly_llm_requests_total{model="stub",result="error"} 1`) {
+		t.Fatalf("panic call is not counted as an error:\n%s", body)
+	}
+	if !strings.Contains(body, `mayfly_llm_request_duration_seconds_count{model="stub"} 2`) {
+		t.Fatalf("panic call has no duration observation:\n%s", body)
 	}
 }

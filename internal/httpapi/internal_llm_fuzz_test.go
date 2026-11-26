@@ -14,42 +14,56 @@ import (
 )
 
 // FuzzServeLLMBudget drives the internal LLM route with random budgets,
-// responses, transport failures, busy overlaps, and panics after admit. It
-// asserts the token-ledger properties of the httpapi wiring:
+// responses, transport failures, busy overlaps, panics after admit, persist
+// failures, and unbudgeted sessions. It asserts the token-ledger properties of
+// the httpapi wiring:
 //
 //   - No charge after a refusal: a refused call changes neither the usage nor
 //     the in-flight call's settlement. A busy refusal must not release the
-//     running call's slot, and that call's reported usage must land after it
-//     finishes.
+//     running call's slot, and an exhausted or persist-failed refusal must not
+//     charge or count the call. The running call's reported usage must land
+//     after it finishes.
 //   - No leaked in-flight slot: once no call is in flight, a session below its
 //     limits admits the next call, and one at its limits is refused as
-//     over_budget rather than busy.
+//     over_budget rather than busy. A persist failure must not leave the slot
+//     set.
 //   - BudgetBound: billed tokens stay at or below Budget-1+MaxCall, and the
 //     request count never exceeds its cap.
+//   - An unbudgeted session counts usage but refuses nothing.
 //
 // MaxCall is the largest charge one call can make: the request estimate plus
 // the completion cap. Reported usage and estimated response bytes stay within
 // that bound, so the budget can overshoot by at most one response.
 func FuzzServeLLMBudget(f *testing.F) {
 	// Op bytes: 0 reported usage, 1 upstream 5xx, 2 forwarded 4xx, 3 transport
-	// failure, 4 two overlapping calls, 5 panic after admit, 6 probe.
-	f.Add(int64(10), int64(0), int64(5), []byte{0, 1, 2, 3})
-	f.Add(int64(1), int64(1), int64(1), []byte{0, 0})
-	f.Add(int64(100), int64(2), int64(20), []byte{0, 6, 0, 6})
-	f.Add(int64(5), int64(0), int64(3), []byte{3, 1, 3})
-	f.Add(int64(50), int64(3), int64(10), []byte{4, 0, 6})
-	f.Add(int64(20), int64(0), int64(8), []byte{5, 6, 0})
-	f.Add(int64(300), int64(0), int64(99), []byte{2, 2, 1, 1, 0})
+	// failure, 4 two overlapping calls, 5 panic after admit, 6 probe, 7 a 2xx
+	// with no usage (the size estimate), 8 a persist failure. An unbudgeted
+	// seed runs 0-3 only.
+	f.Add(int64(10), int64(0), int64(5), int64(0), []byte{0, 1, 2, 3})
+	f.Add(int64(1), int64(1), int64(1), int64(0), []byte{0, 0})
+	f.Add(int64(100), int64(2), int64(20), int64(0), []byte{0, 6, 0, 6})
+	f.Add(int64(5), int64(0), int64(3), int64(0), []byte{3, 1, 3})
+	f.Add(int64(50), int64(3), int64(10), int64(0), []byte{4, 0, 6})
+	f.Add(int64(20), int64(0), int64(8), int64(0), []byte{5, 6, 0})
+	f.Add(int64(300), int64(0), int64(99), int64(0), []byte{2, 2, 1, 1, 0})
+	f.Add(int64(40), int64(2), int64(30), int64(0), []byte{7, 7, 8, 0})
+	f.Add(int64(499), int64(3), int64(10), int64(0), []byte{8, 0})
+	f.Add(int64(9), int64(3), int64(4), int64(1), []byte{0, 7, 3, 2})
 
-	f.Fuzz(func(t *testing.T, budgetSeed, requestSeed, maxOutSeed int64, ops []byte) {
+	f.Fuzz(func(t *testing.T, budgetSeed, requestSeed, maxOutSeed, unbudgetedSeed int64, ops []byte) {
 		budget := int64(uint64(budgetSeed)%500) + 1
 		maxRequests := int64(uint64(requestSeed) % 4)
 		maxOut := int64(uint64(maxOutSeed)%100) + 1
+		budgeted := unbudgetedSeed%2 == 0
+		if !budgeted {
+			budget, maxRequests = 0, 0
+		}
 
 		fixture := newLLMFixture(t, int(budget), int(maxRequests))
 		h := &llmFuzzHarness{
 			t:           t,
 			f:           fixture,
+			budgeted:    budgeted,
 			budget:      budget,
 			maxRequests: maxRequests,
 			maxOut:      maxOut,
@@ -72,6 +86,7 @@ func FuzzServeLLMBudget(f *testing.F) {
 type llmFuzzHarness struct {
 	t           *testing.T
 	f           *llmFixture
+	budgeted    bool
 	budget      int64
 	maxRequests int64
 	maxOut      int64
@@ -81,7 +96,20 @@ type llmFuzzHarness struct {
 }
 
 func (h *llmFuzzHarness) run(op byte) {
-	switch op % 7 {
+	if !h.budgeted {
+		switch op % 4 {
+		case 0:
+			h.reported(op)
+		case 1:
+			h.upstream5xx(op)
+		case 2:
+			h.forwarded4xx()
+		case 3:
+			h.transportFailure()
+		}
+		return
+	}
+	switch op % 9 {
 	case 0:
 		h.reported(op)
 	case 1:
@@ -96,11 +124,18 @@ func (h *llmFuzzHarness) run(op byte) {
 		h.panicAfterAdmit()
 	case 6:
 		h.probe()
+	case 7:
+		h.estimated2xx()
+	case 8:
+		h.persistFailure()
 	}
 }
 
 // atCapacity reports whether the session refuses a new call for its budget.
 func (h *llmFuzzHarness) atCapacity() bool {
+	if !h.budgeted {
+		return false
+	}
 	usage := h.usage()
 	if usage.Total() >= h.budget {
 		return true
@@ -236,9 +271,13 @@ func (h *llmFuzzHarness) busy() {
 	}
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	var once sync.Once
+	var enteredOnce, releaseOnce sync.Once
+	// Release the blocked call on any exit, so a failed assertion cannot leave
+	// this operation's goroutine waiting until the test timeout.
+	releaseUpstream := func() { releaseOnce.Do(func() { close(release) }) }
+	h.t.Cleanup(releaseUpstream)
 	h.f.setUpstream(func(w http.ResponseWriter, _ *http.Request, _ []byte) {
-		once.Do(func() { close(entered) })
+		enteredOnce.Do(func() { close(entered) })
 		<-release
 		// At least one reported token, so a slot released too early loses a
 		// visible charge.
@@ -249,7 +288,7 @@ func (h *llmFuzzHarness) busy() {
 	select {
 	case <-entered:
 	case <-time.After(10 * time.Second):
-		close(release)
+		releaseUpstream()
 		h.t.Fatal("the blocked call never reached the provider")
 	}
 
@@ -268,7 +307,7 @@ func (h *llmFuzzHarness) busy() {
 		h.t.Fatalf("busy refusal settled the running call: %+v -> %+v", before, after)
 	}
 
-	close(release)
+	releaseUpstream()
 	if code := <-first; code != http.StatusOK {
 		h.t.Fatalf("blocked call = %d", code)
 	}
@@ -276,6 +315,60 @@ func (h *llmFuzzHarness) busy() {
 	// The first call's usage must be the delta: a refusal that charged would
 	// have released its slot and lost this charge.
 	h.expectDelta(model.LLMUsage{PromptTokens: 1})
+}
+
+// estimated2xx charges the size estimate of a 2xx whose provider sent no
+// usage. That is how this branch's llmstub answers.
+func (h *llmFuzzHarness) estimated2xx() {
+	if h.atCapacity() {
+		h.expectRefusal()
+		return
+	}
+	const payload = `{"choices":[]}`
+	h.f.setUpstream(func(w http.ResponseWriter, _ *http.Request, _ []byte) {
+		writeStubUsage(w, payload)
+	})
+	rec := h.f.chat(h.body)
+	if rec.Code != http.StatusOK {
+		h.t.Fatalf("estimated call = %d body=%s", rec.Code, rec.Body.String())
+	}
+	h.expectDelta(model.LLMUsage{
+		PromptTokens:     int64(len(h.body)) / 4,
+		CompletionTokens: int64(len(payload)) / 4,
+		EstimatedCalls:   1,
+	})
+}
+
+// persistFailure covers a reservation the record store cannot keep. The budget
+// fails closed with a 503 before the provider, changes no usage, and releases
+// the slot it never reserved, so the next call is admitted.
+func (h *llmFuzzHarness) persistFailure() {
+	if h.atCapacity() {
+		h.expectRefusal()
+		return
+	}
+	before := h.usage()
+	hits := h.f.upstreamHits()
+	h.f.records.setFail(true)
+	rec := h.f.chat(h.body)
+	h.f.records.setFail(false)
+	if rec.Code != http.StatusServiceUnavailable {
+		h.t.Fatalf("persist refusal = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if code := refusalCodeOf(h.t, rec.Body.String()); code != session.CodeLLMPersistFailed {
+		h.t.Fatalf("persist refusal code = %q, want %q", code, session.CodeLLMPersistFailed)
+	}
+	if rec.Header().Get("Retry-After") != "" {
+		h.t.Fatalf("persist refusal carries Retry-After")
+	}
+	if after := h.usage(); after != before {
+		h.t.Fatalf("persist refusal changed usage: %+v -> %+v", before, after)
+	}
+	if h.f.upstreamHits() != hits {
+		h.t.Fatalf("persist refusal reached the provider")
+	}
+	// A leaked slot would refuse this probe as busy.
+	h.reported(0)
 }
 
 // panicAfterAdmit bills the reservation and must not leak the slot.
@@ -346,7 +439,7 @@ func (h *llmFuzzHarness) check() {
 		h.t.Fatalf("usage went backwards: %+v -> %+v", h.last, now)
 	}
 	limit := h.budget - 1 + h.maxCall
-	if now.Total() > limit {
+	if h.budgeted && h.budget > 0 && now.Total() > limit {
 		h.t.Fatalf("BudgetBound: billed %d > %d (budget %d, max call %d)", now.Total(), limit, h.budget, h.maxCall)
 	}
 	if h.maxRequests > 0 && now.Requests > h.maxRequests {
