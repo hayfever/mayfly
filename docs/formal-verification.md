@@ -517,8 +517,53 @@ The model abstracts these details:
   publish that passes `--latest=true` for an RC. The `make_latest` template in
   `.goreleaser.yaml` is the production reason the switch is FALSE.
 
+## Token budget model (#49)
+
+This branch has no `spec/tla/TokenBudget.tla`, no budget cfg, and no budget
+`_buggy.cfg`. The TLA+ model of the ledger, its positive cfgs, and its negative
+checks land with the formal-verification package for #49 (P5). This section
+maps the ledger actions to the Go code on this branch and lists the Go tests,
+fuzz targets, and e2e cases that sample each property.
+
+| TLA+ action | Go code it models |
+|---|---|
+| `Admit` | the `admit` closure in `internalLLM` (`internal/httpapi/internal.go`) and `session.Manager.AdmitLLM`/`admitLLM` (`internal/session/budget.go`). The closure records `admitted`, `reqBytes`, and `maxOut` only after the manager returns nil. `admitLLM` refuses a second call as `llm_busy`, refuses an exhausted session, records the reservation (one in flight, requests plus one, pending tokens), and persists it. A failed or panicking record write releases the slot and refuses with `llm_persist_failed` |
+| `Forward` | `broker.ServeLLM` (`internal/broker/broker.go`): sets `Forwarded` after the upstream request is built, `TransportErr` when no response arrives (dial, TLS, or response-header timeout), and `Usage`/`Reported` from the stream scanner or the response decoder |
+| `Charge` | the deferred charge in `internalLLM`, `session.Manager.ChargeLLM`/`chargeLLM`, `instance.settleLLM`, and `llmLedger.charge` (`internal/session/budget.go`). It runs only after an admission, releases the slot, adds the reported usage or the estimate, persists a budgeted ledger, and calls `exhaustLLM` when the counters reach a limit. A forwarded transport failure or a panic after admit charges the full reservation `ReqBytes/4 + MaxOut` |
+| `Refuse` | `broker.Refusal` written by `writeRefusal`: `llm_busy` is 429 with `Retry-After`, `llm_budget_exhausted` is 429 without it, and `llm_persist_failed` is 503. A refusal is not forwarded and changes no counter |
+| `Recover` | `instance.seedLLM`, `Manager.closeExhaustedAdopted`, and the `finalize` call in `Manager.adoptPodless` (`internal/session/budget.go`, `lifecycle.go`). Adoption restores the counters and charges the recorded reservation as prompt tokens. A live session already at a limit takes the graceful close; a podless one completes without an artifact because no runtime can export it |
+| `Exhaust` | `Manager.exhaustLLM`: one error event, then `Close` with reason `llm_budget_exhausted`. The runtime's graceful finalize exports the artifact and ends `completed` |
+| `Record` | `Metrics.LLMRequest` and `Metrics.LLMTokens` (`internal/metrics/metrics.go`), recorded by `internalLLM` for every call, including a panic after admit |
+
+| Property | Meaning | Tests that sample it |
+|---|---|---|
+| `BudgetBound` | Billed tokens never exceed one call past the limit, and the request count never exceeds its cap | `FuzzTokenLedger`, `FuzzServeLLMBudget`, `TestLLMOvershootAtMostOneResponse`, `TestLLMRequestCapOvershootsByZero`, e2e `TestSessionBudgetExhaustion` |
+| `NoChargeLost` | A charged call always settles: the in-memory ledger and the durable record never fall below the billed tokens, and a refusal never releases a running call's slot | `FuzzTokenLedger`, `FuzzServeLLMBudget`, `TestLLMAdmitCharge`, `TestLLMChargeKeepsMemoryWhenPersistFails`, `TestLLMAdmitRollsBackOnPersistPanic`, `TestLLMAdmitFailsClosedWhenReservationIsNotDurable`, `TestInternalLLMBusyDoesNotCharge`, `TestInternalLLMPanicChargesReservation`, e2e `TestSessionLLMBusyDoesNotCharge`, `TestSessionBudgetSurvivesRestart` |
+| `NoAdmitWhenExhausted` | An exhausted session refuses every call, and a refusal changes no ledger state | `FuzzTokenLedger`, `FuzzServeLLMBudget`, `TestInternalLLMExhaustedBudget`, `TestInternalLLMPersistFailureRefusesAndLabels`, `TestLLMRefusedAdmitThenChargeChangesNothing`, `TestAdoptClosesExhaustedSession`, e2e `TestSessionBudgetExhaustion` |
+| `ClosedAfterExhaust` | A charge that reaches a limit appends one error event, closes with reason `llm_budget_exhausted`, and ends `completed` | `TestLLMExhaustionClosesSession`, `TestLLMExhaustionSurvivesEmptyFinalize`, `TestInternalLLMExhaustedBudget`, `TestAdoptClosesExhaustedSession`, `TestAdoptClosesExhaustedPodlessSession`, e2e `TestSessionBudgetExhaustion` |
+
+The e2e cases in `e2e/budget_test.go` run against the deployed release. They
+cover exhaustion and the 429 refusal, two overlapping calls with `llm_busy`,
+the session fields and the CLI tokens line, the token and estimate counters,
+usage across a control-plane restart with bbolt, a per-agent override, and the
+defaults-off case. Two of them suspend the session's agent process with
+`kill -STOP 1` so the test, not the agent, spends the budget; the cleanup
+resumes it.
+
 ## Fuzz targets for the bounds
 
+- `FuzzTokenLedger` (`internal/session`) drives the real ledger with random
+  admit, charge, crash and recover, refusal, and save-failure sequences. It
+  asserts `BudgetBound`, `NoChargeLost`, and `NoAdmitWhenExhausted` against a
+  ghost total of every charge the provider billed. A 60-second run made 819
+  executions.
+- `FuzzServeLLMBudget` (`internal/httpapi`) drives the internal LLM route with
+  random budgets and responses: reported usage, a 2xx without usage, an
+  upstream 5xx, a forwarded 4xx, a transport failure, two overlapping calls,
+  a panic after admit, a persist failure, a probe at the limit, and an
+  unbudgeted session. It asserts that a refusal changes no usage and settles no
+  running call, that no in-flight slot leaks, and `BudgetBound`. A 60-second
+  run made 5,050 executions.
 - `FuzzHubAppendBudget` (`internal/hub`) drives appends, restores, and replays,
   and asserts the byte budget, the count cap, the contiguous suffix, and that
   the inbox keeps its human message.
@@ -657,6 +702,15 @@ ledger operations and replaying them through the model, is future work.
 A fuzz target checks the input handling of the package that adds it; the
 targets do not check the lifecycle. `hack/fuzz.sh` discovers targets
 automatically; a branch with no fuzz target exits 0 and says so.
+
+The token budget has no TLA+ model on this branch. `FuzzTokenLedger` and
+`FuzzServeLLMBudget` sample random action sequences, and the Go tests cover the
+named paths; neither proves every interleaving of admit, forward, charge, and
+recovery. The e2e budget cases run against `llmstub`, a fake provider, not a
+real one. This branch's stub reports no usage, so those cases exercise the size
+estimate; a stub that reports usage changes which counter moves. The e2e suite
+is not run on the development machine for this change (Docker is unavailable);
+CI runs it against the release.
 
 The release gate reads synthetic GitHub API payloads. Its Go tests and
 `FuzzDecide` cover run and job selection, but the live API's field names and
