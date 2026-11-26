@@ -24,12 +24,14 @@ const (
 	// label is a route template, never a raw path, so the set stays small.
 	RouteUnmatched = "unmatched"
 	// ResultOK and ResultError label an outcome that is only success or
-	// failure, such as a proxied model call. ResultBusy and ResultOverBudget
-	// label a model call the budget refused before any upstream request.
-	ResultOK         = "ok"
-	ResultError      = "error"
-	ResultBusy       = "busy"
-	ResultOverBudget = "over_budget"
+	// failure, such as a proxied model call. ResultBusy, ResultOverBudget,
+	// and ResultPersistFailed label a model call the budget refused before any
+	// upstream request.
+	ResultOK            = "ok"
+	ResultError         = "error"
+	ResultBusy          = "busy"
+	ResultOverBudget    = "over_budget"
+	ResultPersistFailed = "persist_failed"
 	// AttemptSucceeded, AttemptFailed, and AttemptRetryLater label one queue
 	// job attempt.
 	AttemptSucceeded  = "succeeded"
@@ -143,7 +145,7 @@ func New(src Sources, build BuildInfo) *Metrics {
 		}, []string{"route", "method"}),
 		llmRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mayfly_llm_requests_total",
-			Help: "Model calls by model and result. A call the budget refused was not forwarded and is labeled busy or over_budget.",
+			Help: "Model calls by model and result. A call the budget refused was not forwarded and is labeled busy, over_budget, or persist_failed.",
 		}, []string{"model", "result"}),
 		llmDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "mayfly_llm_request_duration_seconds",

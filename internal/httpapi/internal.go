@@ -405,6 +405,11 @@ func (s *Server) internalLLM(w http.ResponseWriter, r *http.Request) {
 				s.logger.Warn("charge model call after panic", "session", id, "error", err)
 			}
 			s.metrics.LLMTokens(sess.Model, delta.Prompt, delta.Completion, estimated)
+			// A panic unwinds the proxy, so the request metric below never
+			// runs. The call was admitted and forwarded, so it is a transport
+			// failure: record it before re-panicking or the request counter and
+			// duration miss the call entirely.
+			s.metrics.LLMRequest(sess.Model, metrics.ResultError, time.Since(start))
 			panic(p)
 		}
 		delta, estimated, err := s.mgr.ChargeLLM(id, res)
@@ -421,7 +426,8 @@ func (s *Server) internalLLM(w http.ResponseWriter, r *http.Request) {
 }
 
 // llmResult maps one proxy call to the metrics result label. A refusal is not
-// forwarded, so busy and exhausted calls stay distinct from upstream failures.
+// forwarded, so busy, exhausted, and persist-failed calls stay distinct from
+// upstream failures.
 func llmResult(res broker.CallResult, refusal error) string {
 	if refusal != nil {
 		var refused *broker.Refusal
@@ -431,6 +437,8 @@ func llmResult(res broker.CallResult, refusal error) string {
 				return metrics.ResultBusy
 			case session.CodeLLMBudgetExhausted:
 				return metrics.ResultOverBudget
+			case session.CodeLLMPersistFailed:
+				return metrics.ResultPersistFailed
 			}
 		}
 		return metrics.ResultError
