@@ -26,7 +26,8 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ### Changed
 
-- Every third-party GitHub Action in `.github/workflows` is pinned to a full commit SHA with the release tag in a trailing comment. Dependabot keeps the pins current (#51).
+- Every third-party GitHub Action in `.github/workflows` is pinned to a full commit SHA with the release tag in a trailing comment, and the root `Dockerfile` base images are pinned to their multi-arch index digests. Dependabot keeps the pins current (#51).
+- A successful health probe or metrics scrape (`GET /healthz`, `GET /readyz`, `GET /metrics`) logs at debug level instead of info. A failed probe or scrape, and every other request, stays at info (#51).
 - The release workflow gates every `v*` tag, including release candidates, on a green `ci` run and a successful 20-run `e2e-stability` run for the tagged commit. A failed gate fails before anything is built or published, and a successful rerun attempt counts for both workflows. A stability dispatch counts by `head_sha` or by an exact `sha=<40-hex>` run-name, so a run dispatched on `main` covers the commit it names. An annotated tag is peeled to its commit before the lookup (#50).
 - The GitHub release is created as a draft and stays a draft until the images, chart, and signatures exist; a final `publish` job makes it public with an explicit `latest` value. A final release is latest and an RC is not, decided by a goreleaser `make_latest` template and by the same check in `publish`. Image digests are signed before their tags are created, and `checksums.txt` carries a keyless cosign bundle that `cosign verify-blob` checks (#50).
 

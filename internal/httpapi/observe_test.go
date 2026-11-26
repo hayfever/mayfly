@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -184,9 +185,37 @@ func TestSeparateMetricsAddressMovesTheEndpoint(t *testing.T) {
 	}
 }
 
+func TestProbeRequestsLogAtDebug(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.Metrics.RequireAuth = new(false)
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	s := New(cfg, testManager(t, cfg), nil, logger,
+		WithMetrics(metrics.New(metrics.Sources{}, metrics.BuildInfo{})),
+		WithReadyCheck(func() error { return errors.New("storage unavailable") }))
+
+	serve := func(method, target string) string {
+		buf.Reset()
+		s.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(method, target, nil))
+		return buf.String()
+	}
+	if line := serve(http.MethodGet, "/healthz"); !strings.Contains(line, "level=DEBUG") || !strings.Contains(line, "route=/healthz") {
+		t.Fatalf("healthz log = %q, want debug level", line)
+	}
+	if line := serve(http.MethodGet, "/metrics"); !strings.Contains(line, "level=DEBUG") || !strings.Contains(line, "route=/metrics") {
+		t.Fatalf("metrics log = %q, want debug level", line)
+	}
+	if line := serve(http.MethodGet, "/readyz"); !strings.Contains(line, "level=INFO") || !strings.Contains(line, "status=503") {
+		t.Fatalf("failed readyz log = %q, want info level", line)
+	}
+	if line := serve(http.MethodGet, "/api/v1/sessions"); !strings.Contains(line, "level=INFO") {
+		t.Fatalf("api log = %q, want info level", line)
+	}
+}
+
 func TestRequestLogCarriesTheRouteAndStatus(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	s, _ := metricsServer(t, config.Default(), logger)
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
