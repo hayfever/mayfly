@@ -19,6 +19,13 @@ import (
 // arguments it chooses, which the automatic MCP flow cannot express.
 var toolDirectiveRE = regexp.MustCompile(`(?m)^[ \t]*tool:[ \t]*(\S+)[ \t]*(.*)$`)
 
+// noUsageDirectiveRE matches a prompt that asks the stub to report no usage:
+//
+//	no-usage
+//
+// A provider that omits usage exercises the budget's estimate path.
+var noUsageDirectiveRE = regexp.MustCompile(`(?m)^[ \t]*no-usage[ \t]*$`)
+
 // directive is one scripted tool call from the first user message.
 type directive struct {
 	name string
@@ -100,7 +107,61 @@ type llmRequest struct {
 			Name string `json:"name"`
 		} `json:"function"`
 	} `json:"tools"`
-	Stream bool `json:"stream"`
+	Stream        bool `json:"stream"`
+	StreamOptions *struct {
+		IncludeUsage bool `json:"include_usage"`
+	} `json:"stream_options"`
+}
+
+// llmUsage is the OpenAI usage object. The stub's counts are a stable function
+// of the request text, so tests can assert them.
+type llmUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// stubTokenCount is one token per four bytes of text, minimum one. It
+// approximates a tokenizer closely enough to exercise the budget path and is
+// deterministic for the same input.
+func stubTokenCount(parts []string) int {
+	n := 0
+	for _, part := range parts {
+		n += len(part)
+	}
+	return n/4 + 1
+}
+
+// usageFor counts the request text and the reply the stub is about to send.
+func usageFor(req llmRequest, content string, calls []llmToolCall) llmUsage {
+	parts := make([]string, 0, len(req.Messages)*3+len(req.Tools)*2)
+	for _, msg := range req.Messages {
+		parts = append(parts, msg.Role, msg.Content.text, msg.ToolCallID)
+		for _, call := range msg.ToolCalls {
+			parts = append(parts, call.ID, call.Function.Name, call.Function.Arguments)
+		}
+	}
+	for _, tool := range req.Tools {
+		parts = append(parts, tool.Type, tool.Function.Name)
+	}
+	prompt := stubTokenCount(parts)
+	parts = parts[:0]
+	parts = append(parts, content)
+	for _, call := range calls {
+		parts = append(parts, call.ID, call.Function.Name, call.Function.Arguments)
+	}
+	completion := stubTokenCount(parts)
+	return llmUsage{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: prompt + completion}
+}
+
+// noUsageRequested reports whether any message asks the stub to omit usage.
+func noUsageRequested(req llmRequest) bool {
+	for _, msg := range req.Messages {
+		if noUsageDirectiveRE.MatchString(msg.Content.text) {
+			return true
+		}
+	}
+	return false
 }
 
 // LLMHandler returns a deterministic OpenAI-compatible server. Its sequence is:
@@ -198,12 +259,20 @@ func handleLLM(w http.ResponseWriter, r *http.Request) {
 		content = "Completed. " + summarize(firstUser)
 	}
 
+	usage := usageFor(req, content, calls)
+	if noUsageRequested(req) {
+		usage = llmUsage{}
+	}
 	if req.Stream {
-		writeLLMStream(w, req.Model, calls, content, finish)
+		var streamUsage *llmUsage
+		if usage.TotalTokens > 0 && req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
+			streamUsage = &usage
+		}
+		writeLLMStream(w, req.Model, calls, content, finish, streamUsage)
 		return
 	}
 	msg := llmMessage{Role: "assistant", Content: llmContent{text: content}, ToolCalls: calls}
-	writeStubJSON(w, map[string]any{
+	body := map[string]any{
 		"id":      "chatcmpl-stub",
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
@@ -213,7 +282,11 @@ func handleLLM(w http.ResponseWriter, r *http.Request) {
 			"message":       msg,
 			"finish_reason": finish,
 		}},
-	})
+	}
+	if usage.TotalTokens > 0 {
+		body["usage"] = usage
+	}
+	writeStubJSON(w, body)
 }
 
 func summarize(prompt string) string {
@@ -227,7 +300,7 @@ func summarize(prompt string) string {
 	return "Handled task: " + prompt
 }
 
-func writeLLMStream(w http.ResponseWriter, model string, calls []llmToolCall, content, finish string) {
+func writeLLMStream(w http.ResponseWriter, model string, calls []llmToolCall, content, finish string, usage *llmUsage) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
@@ -265,6 +338,14 @@ func writeLLMStream(w http.ResponseWriter, model string, calls []llmToolCall, co
 	final := cloneMap(base)
 	final["choices"] = []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": finish}}
 	send(final)
+	if usage != nil {
+		// OpenAI sends a usage-only chunk with no choices after the finish
+		// chunk. Clients that ignore empty choices skip it.
+		last := cloneMap(base)
+		last["choices"] = []map[string]any{}
+		last["usage"] = usage
+		send(last)
+	}
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	if flusher != nil {
 		flusher.Flush()
