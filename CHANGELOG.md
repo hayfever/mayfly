@@ -6,6 +6,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ### Added
 
+- A per-session model budget. `sessions.max_llm_tokens` and `sessions.max_llm_requests` (both default `0`, which is off) cap forwarded model calls, and an agent manifest can override either value. The session object reports `llm_usage` and `llm_budget`, and the control plane exports `mayfly_llm_tokens_total` and `mayfly_llm_usage_estimated_total`. A call at the limit gets `429` with code `llm_budget_exhausted`, an overlapping call gets `429` with code `llm_busy` and `Retry-After`, and an exhausted budget appends an `error` event and closes the session with reason `llm_budget_exhausted` (#49).
 - A TLA+ model of the session lifecycle and resume protocol in `spec/tla`, checked by `hack/tlc.sh` and the `tlc` job in `.github/workflows/verify.yml`. See [docs/formal-verification.md](docs/formal-verification.md).
 - Native Go fuzz targets for webhook verification and parsing, persisted queue jobs, journal steps, session records, runtime events, HTTP request bodies, the hub, and bundles. `hack/fuzz.sh` runs every target, and the `fuzz-nightly` job runs them on a schedule.
 - `sessions.max_event_bytes` (default 64 KiB) caps one runtime event (#44).

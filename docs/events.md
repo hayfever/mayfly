@@ -114,14 +114,19 @@ the event.
 ### `status`
 
 A session lifecycle change. `status` is one of `pending`, `running`,
-`closing`, `completed`, `failed`, or `expired`. `reason` names the cause.
-`error` holds the failure message and is absent when there is no failure.
-`restart` is the replacement attempt number after a container restart.
+`closing`, `completed`, `failed`, or `expired`. `reason` names the cause, such
+as `closed`, `expired`, or `llm_budget_exhausted`. `error` holds the failure
+message and is absent when there is no failure. `restart` is the replacement
+attempt number after a container restart.
 
 ### `error`
 
 An error that does not change the session status. The field `text` holds the
-message.
+message. The model budget appends one `error` event with actor `mayfly` when
+the charged usage reaches a token or request limit. A `control` event with
+reason `llm_budget_exhausted` follows, and the session closes gracefully. A
+model call that the budget refuses before it reaches the provider adds no
+event.
 
 ### `system`
 
