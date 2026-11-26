@@ -99,6 +99,7 @@ func TestNewRegistersEveryMetric(t *testing.T) {
 	m.AuthFailure(AuthViaBearer)
 	m.HTTPRequest("/api/v1/sessions", "GET", 200, 5*time.Millisecond)
 	m.LLMRequest("gpt-test", "ok", time.Second)
+	m.LLMTokens("gpt-test", 3, 4, true)
 	m.ToolCall("plugin__tool", "ok")
 
 	got := gather(t, m)
@@ -114,6 +115,8 @@ func TestNewRegistersEveryMetric(t *testing.T) {
 		"mayfly_http_request_duration_seconds",
 		"mayfly_llm_requests_total",
 		"mayfly_llm_request_duration_seconds",
+		"mayfly_llm_tokens_total",
+		"mayfly_llm_usage_estimated_total",
 		"mayfly_gateway_calls_total",
 		"mayfly_build_info",
 	} {
@@ -221,6 +224,8 @@ func TestCountersMoveOnEveryCall(t *testing.T) {
 	m.QueueJobAttempt(AttemptRetryLater)
 	m.HTTPRequest("/api/v1/sessions", "GET", 201, time.Millisecond)
 	m.LLMRequest("gpt-test", "error", time.Millisecond)
+	m.LLMTokens("gpt-test", 10, 20, false)
+	m.LLMTokens("gpt-test", 5, 0, true)
 	m.ToolCall("plugin__tool", "error")
 
 	got := gather(t, m)
@@ -244,6 +249,15 @@ func TestCountersMoveOnEveryCall(t *testing.T) {
 	}
 	if value := find(t, got["mayfly_llm_requests_total"], map[string]string{"model": "gpt-test", "result": "error"}); value != 1 {
 		t.Fatalf("llm request = %v", value)
+	}
+	if value := find(t, got["mayfly_llm_tokens_total"], map[string]string{"model": "gpt-test", "kind": "prompt"}); value != 15 {
+		t.Fatalf("prompt tokens = %v", value)
+	}
+	if value := find(t, got["mayfly_llm_tokens_total"], map[string]string{"model": "gpt-test", "kind": "completion"}); value != 20 {
+		t.Fatalf("completion tokens = %v", value)
+	}
+	if value := find(t, got["mayfly_llm_usage_estimated_total"], map[string]string{"model": "gpt-test"}); value != 1 {
+		t.Fatalf("estimated calls = %v", value)
 	}
 	if value := find(t, got["mayfly_gateway_calls_total"], map[string]string{"tool": "plugin__tool", "result": "error"}); value != 1 {
 		t.Fatalf("gateway call = %v", value)
@@ -270,6 +284,26 @@ func TestHandlerServesTextFormat(t *testing.T) {
 	}
 }
 
+func TestLLMTokensCountsEstimatedUsage(t *testing.T) {
+	m := New(Sources{}, BuildInfo{})
+	m.LLMTokens("gpt-test", 10, 20, false)
+	m.LLMTokens("gpt-test", 5, 0, true)
+
+	got := gather(t, m)
+	if value := find(t, got["mayfly_llm_tokens_total"], map[string]string{"model": "gpt-test", "kind": "prompt"}); value != 15 {
+		t.Fatalf("prompt tokens = %v, want 15 including the estimate", value)
+	}
+	if value := find(t, got["mayfly_llm_tokens_total"], map[string]string{"model": "gpt-test", "kind": "completion"}); value != 20 {
+		t.Fatalf("completion tokens = %v, want 20", value)
+	}
+	if value := find(t, got["mayfly_llm_usage_estimated_total"], map[string]string{"model": "gpt-test"}); value != 1 {
+		t.Fatalf("estimated calls = %v, want 1", value)
+	}
+	if len(got["mayfly_llm_usage_estimated_total"]) != 1 {
+		t.Fatalf("estimated series = %d, want 1", len(got["mayfly_llm_usage_estimated_total"]))
+	}
+}
+
 func TestNilMetricsAcceptsEveryCall(t *testing.T) {
 	var m *Metrics
 	m.SessionCreated()
@@ -278,6 +312,7 @@ func TestNilMetricsAcceptsEveryCall(t *testing.T) {
 	m.Panic(ComponentQueue)
 	m.HTTPRequest("/", "GET", 500, time.Second)
 	m.LLMRequest("model", "error", time.Second)
+	m.LLMTokens("model", 1, 2, true)
 	m.ToolCall("tool", "error")
 }
 

@@ -33,15 +33,39 @@ type artifactInfo struct {
 	Partial bool  `json:"partial"`
 }
 
+// llmUsage mirrors model.LLMUsage in the session response.
+type llmUsage struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	Requests         int64 `json:"requests"`
+	EstimatedCalls   int64 `json:"estimated_calls"`
+}
+
+// llmBudget mirrors model.LLMBudget in the session response.
+type llmBudget struct {
+	MaxTokens   int64 `json:"max_tokens"`
+	MaxRequests int64 `json:"max_requests"`
+}
+
+// Total returns the charged prompt plus completion tokens.
+func (u *llmUsage) Total() int64 {
+	if u == nil {
+		return 0
+	}
+	return u.PromptTokens + u.CompletionTokens
+}
+
 type session struct {
-	ID       string        `json:"id"`
-	Title    string        `json:"title"`
-	Status   string        `json:"status"`
-	Agent    string        `json:"agent"`
-	Harness  string        `json:"harness"`
-	Trigger  triggerInfo   `json:"trigger"`
-	Artifact *artifactInfo `json:"artifact"`
-	Error    string        `json:"error"`
+	ID        string        `json:"id"`
+	Title     string        `json:"title"`
+	Status    string        `json:"status"`
+	Agent     string        `json:"agent"`
+	Harness   string        `json:"harness"`
+	Trigger   triggerInfo   `json:"trigger"`
+	Artifact  *artifactInfo `json:"artifact"`
+	LLMUsage  *llmUsage     `json:"llm_usage"`
+	LLMBudget *llmBudget    `json:"llm_budget"`
+	Error     string        `json:"error"`
 }
 
 type event struct {

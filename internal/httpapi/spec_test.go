@@ -90,13 +90,52 @@ func TestOpenAPISessionHidesInternals(t *testing.T) {
 	if !ok {
 		t.Fatal("spec has no Session schema")
 	}
-	for _, name := range []string{"backend", "pod_name"} {
+	for _, name := range []string{"backend", "pod_name", "llm_pending_tokens"} {
 		if _, ok := session.Properties[name]; ok {
 			t.Errorf("Session schema exposes %q", name)
 		}
 		for _, required := range session.Required {
 			if required == name {
 				t.Errorf("Session schema requires the internal field %q", name)
+			}
+		}
+	}
+	for _, name := range []string{"llm_usage", "llm_budget"} {
+		if _, ok := session.Properties[name]; !ok {
+			t.Errorf("Session schema does not expose %q", name)
+		}
+		for _, required := range session.Required {
+			if required == name {
+				t.Errorf("Session schema requires the optional field %q", name)
+			}
+		}
+	}
+	for schema, fields := range map[string][]string{
+		"LLMUsage":  {"prompt_tokens", "completion_tokens", "requests", "estimated_calls"},
+		"LLMBudget": {"max_tokens", "max_requests"},
+	} {
+		entry, ok := doc.Components.Schemas[schema]
+		if !ok {
+			t.Errorf("spec has no %s schema", schema)
+			continue
+		}
+		for _, field := range fields {
+			if _, ok := entry.Properties[field]; !ok {
+				t.Errorf("%s schema does not expose %q", schema, field)
+			}
+		}
+	}
+	agent, ok := doc.Components.Schemas["Agent"]
+	if !ok {
+		t.Fatal("spec has no Agent schema")
+	}
+	for _, name := range []string{"max_llm_tokens", "max_llm_requests"} {
+		if _, ok := agent.Properties[name]; !ok {
+			t.Errorf("Agent schema does not expose %q", name)
+		}
+		for _, required := range agent.Required {
+			if required == name {
+				t.Errorf("Agent schema requires the optional field %q", name)
 			}
 		}
 	}

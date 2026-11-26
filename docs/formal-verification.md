@@ -2,15 +2,16 @@
 
 Two checks cover behavior that unit tests can only sample: TLA+ models of the
 session lifecycle, hub retention, request-body deadlines, queue poison
-recovery, schedule time zones, and release gating, and native Go fuzz targets. A third check covers
+recovery, schedule time zones, release gating, and LLM token budgets, plus
+native Go fuzz targets. A third check covers
 the chart RBAC over its whole namespace configuration space. A fourth check
 covers the k3d image-name matcher with fixture JSON. Each has a script
 or command and a CI job.
 
 | Check | Script | CI job |
 |---|---|---|
-| TLC on `SessionResume.tla`, `HubRetention.tla`, `BodyReadDeadline.tla`, `QueuePoison.tla`, `AuthHardening.tla`, `CronTimezone.tla`, and `ReleaseGating.tla` | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
-| TLC with two sessions | `hack/tlc.sh --deep` | `tlc-deep` in verify.yml, nightly and on demand |
+| TLC on `SessionResume.tla`, `HubRetention.tla`, `BodyReadDeadline.tla`, `QueuePoison.tla`, `AuthHardening.tla`, `CronTimezone.tla`, `ReleaseGating.tla`, and `TokenBudget.tla` | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
+| TLC with two sessions and three budget callers | `hack/tlc.sh --deep` | `tlc-deep` in verify.yml, nightly and on demand |
 | Every fuzz target | `hack/fuzz.sh` | `fuzz-nightly` in verify.yml |
 | Chart RBAC property check | `MAYFLY_REQUIRE_HELM=1 go test ./test/chart/...` | `chart` step of the `test` job in [ci.yml](../.github/workflows/ci.yml) |
 | k3d image-name matcher fixtures | `hack/test-k3d-images.sh` | `shell` job in [ci.yml](../.github/workflows/ci.yml) |
@@ -97,6 +98,10 @@ fail on the invariant named in the cfg. See
 The model's fixed turn script is user, model, idempotent tool, non-idempotent
 tool, assistant. `ToolAt` names the tool of a step, so the call key is the same
 `<session>/<turn>/<step>` the gateway derives.
+
+The [token budget model](#token-budget-model) maps its own actions and
+invariants to `internal/session/budget.go` and `internal/broker` in its section
+below.
 
 ## Invariants and liveness
 
@@ -519,8 +524,113 @@ The model abstracts these details:
   publish that passes `--latest=true` for an RC. The `make_latest` template in
   `.goreleaser.yaml` is the production reason the switch is FALSE.
 
+## Token budget model (#49)
+
+`spec/tla/TokenBudget.tla` models the per-session LLM token budget from #49:
+the admit check before the upstream request, the in-flight cap, the durable
+reservation per call, the charge that lands in the counter and in the session
+record, the control-plane crash that loses memory only, the recovery that seeds
+the counter from the record plus its outstanding reservation, and the close
+that follows exhaustion. The flags tie to the exhaustion and concurrency
+decisions: a session at or over its budget refuses further calls and closes,
+and a session with a budget allows one call in flight with a durable
+reservation behind it.
+
+| TLA+ action | Go code it models |
+|---|---|
+| `Admit` | the budget hook: the per-session ledger admit under `llmMu` in `internal/session/budget.go`, called from `ServeLLM`'s `admit` hook (`internal/broker/broker.go`). The in-flight check, the `max_llm_tokens` and `max_llm_requests` checks, the request increment, the reservation, and the synchronous record write |
+| `Upstream` | `broker.ServeLLM` after `client.Do` and the usage scan in `internal/broker/usage.go`. The charge is the reported usage or the byte estimate `req_bytes/4 + resp_bytes/4`, whose completion part stops at the call's `max_tokens` |
+| `Charge` | the charge-after path of the ledger (`internal/session/budget.go`): usage into the counter and the record, reservation released, token metric updated |
+| `Refuse` | `broker.Refusal` written by `writeRefusal`: `llm_busy` is 429 with `Retry-After`, `llm_budget_exhausted` is 429 without it, and `llm_persist_failed` is 503. A refusal is not forwarded and changes no counter. The model represents `llm_busy` as a disabled `Admit` and `llm_persist_failed` as an `Admit` that does not happen |
+| `Crash` | a control-plane process restart; no single Go function, because the process is gone. Memory is lost; the record keeps the charge and the reservation |
+| `Recover` | `session.Manager.Start` listing records before `adopt`, and the seeding in `adoptPods` and `adoptPodless` (`internal/session/manager.go`, `lifecycle.go`): `spent = record.spent + record.pending` |
+| `Exhaust` | the `EventError` and `Close(id, "llm_budget_exhausted")` in the charge path, with `sess.Error` set |
+| none (metrics) | `Metrics.LLMRequest` and `Metrics.LLMTokens` (`internal/metrics/metrics.go`), recorded by `internalLLM` for every call, including a panic after admit. The model has no metric state |
+| `Stutter` | no Go function; no further call at the modeled bound |
+
+| Property | Meaning | Tests that sample it |
+|---|---|---|
+| `TypeOK` | Every variable stays in its declared domain | none; model well-formedness |
+| `BudgetBound` | Billed tokens never exceed one call past the limit, and the request count never exceeds its cap | `FuzzTokenLedger`, `FuzzServeLLMBudget`, `TestLLMOvershootAtMostOneResponse`, `TestLLMRequestCapOvershootsByZero`, e2e `TestSessionBudgetExhaustion` |
+| `NoChargeLost` | A charged call always settles: the in-memory ledger and the durable record never fall below the billed tokens, and a refusal never releases a running call's slot | `FuzzTokenLedger`, `FuzzServeLLMBudget`, `TestLLMAdmitCharge`, `TestLLMChargeKeepsMemoryWhenPersistFails`, `TestLLMAdmitRollsBackOnPersistPanic`, `TestLLMAdmitFailsClosedWhenReservationIsNotDurable`, `TestInternalLLMBusyDoesNotCharge`, `TestInternalLLMPanicChargesReservation`, e2e `TestSessionLLMBusyDoesNotCharge`, `TestSessionBudgetSurvivesRestart` |
+| `NoAdmitWhenExhausted` | An exhausted session refuses every call, and a refusal changes no ledger state | `FuzzTokenLedger`, `FuzzServeLLMBudget`, `TestInternalLLMExhaustedBudget`, `TestInternalLLMPersistFailureRefusesAndLabels`, `TestLLMRefusedAdmitThenChargeChangesNothing`, `TestAdoptClosesExhaustedSession`, e2e `TestSessionBudgetExhaustion` |
+| `ClosedAfterExhaust` | A charge that reaches a limit appends one error event, closes with reason `llm_budget_exhausted`, and ends `completed` | `TestLLMExhaustionClosesSession`, `TestLLMExhaustionSurvivesEmptyFinalize`, `TestInternalLLMExhaustedBudget`, `TestAdoptClosesExhaustedSession`, `TestAdoptClosesExhaustedPodlessSession`, e2e `TestSessionBudgetExhaustion` |
+
+The e2e cases in `e2e/budget_test.go` run against the deployed release. They
+cover exhaustion, two overlapping calls with `llm_busy`, the session fields and
+the CLI tokens line, the token and estimate counters, usage across a
+control-plane restart with bbolt, a per-agent override, and the defaults-off
+case. The exhaustion case spends the request cap through the proxy and then
+accepts either outcome for the next call: the `429 llm_budget_exhausted`
+refusal while the session is still open, or a `401` once the charge has closed
+the session and removed its scoped token. The usage must not change in either
+case.
+
+`TokenBudget.cfg` sets `Budget = 3`, `MaxCall = 2`, two callers, no crash, an
+in-flight cap of one, and the check, charge, and reservation writes on. It
+checks every invariant and the `ClosedAfterExhaust` liveness property under
+weak fairness on `Exhaust` and `Recover`: 92 states generated, 31 distinct,
+under one second. `TokenBudget_crash.cfg` adds two control-plane crashes: 748
+generated, 249 distinct. The negative cfgs each flip one switch:
+
+| Cfg | Constant | Expected violation |
+|---|---|---|
+| `TokenBudget_no_inflight_cap_buggy.cfg` | `InflightCap = 2` | `BudgetBound` |
+| `TokenBudget_check_after_buggy.cfg` | `CheckBefore = FALSE` | `BudgetBound` |
+| `TokenBudget_volatile_counter_buggy.cfg` | `PersistCharge = FALSE` | `NoChargeLost` |
+| `TokenBudget_no_pending_buggy.cfg` | `DurablePending = FALSE` | `NoChargeLost` |
+
+The runs stop quickly: no-in-flight-cap 222 states generated (73 distinct),
+check-after 123 (45), volatile-counter 76 (39), and no-pending 14 (11). With
+`InflightCap = 2` two callers are admitted at `Budget - 1` and both responses
+charge `MaxCall`, so the provider's total passes the one-response allowance.
+With `CheckBefore = FALSE` the counter is tested only after the charge, so a
+call is admitted with the counter already at the budget. With
+`PersistCharge = FALSE` the record never holds a settled charge and a restart
+loses it. With `DurablePending = FALSE` the reservation never reaches the
+record, so a charge has no durable coverage while it is in flight.
+`deep/TokenBudget_three_callers.cfg` runs nightly with three callers, budget
+16, and two crashes: 15,153 states generated, 4,894 distinct.
+
+The check-after cfg omits `NoAdmitWhenExhausted`, because admitting past the
+limit is that cfg's modeled bug; `BudgetBound` is the invariant that must bite.
+
+The model abstracts these details:
+
+- One call's charge is a nondeterministic value from 1 to `MaxCall`, and the
+  reservation is `MaxCall`. The model assumes that the estimate is an upper
+  bound. The Go reservation is `req_bytes/4` plus `max_tokens` (4096 by
+  default), which is a heuristic; the estimated completion stops at
+  `max_tokens`, so an estimated charge stays inside the reservation, while a
+  reported usage is charged as reported.
+- Tokens only. `max_llm_requests` is a second counter with no reservation and
+  no overshoot; it is outside the model.
+- Provider latency, streaming, retries, and SSE chunk boundaries are outside
+  the model. `Upstream` is one step, and the runtime's retry of a refused call
+  is not modeled.
+- One session. The resolved per-session limit is the constant `Budget`;
+  per-agent overrides resolve before the ledger sees them.
+- `Exhaust` is the close decision. Session finalize, final status, and artifact
+  export after the close are modeled by `SessionResume.tla`.
+- bbolt writes are atomic, as in the other models.
+
 ## Fuzz targets for the bounds
 
+- `FuzzTokenLedger` (`internal/session`) drives the real ledger with random
+  admit, charge, crash and recover, refusal, save-failure, and concurrent-admit
+  sequences. It asserts `BudgetBound`, `NoChargeLost`, and
+  `NoAdmitWhenExhausted` against a ghost total of every charge the provider
+  billed, so it is the Action-to-Go bridge for the
+  [token budget model](#token-budget-model). Each charge must also equal the
+  amount the harness expects, which fails a size estimate that bills past the
+  call's `max_tokens` cap. A 90-second run made 499,297 executions.
+- `FuzzServeLLMBudget` (`internal/httpapi`) drives the internal LLM route with
+  random budgets and responses: reported usage, a 2xx without usage, a 2xx
+  whose body is far past the completion cap, an upstream 5xx, a forwarded 4xx,
+  a transport failure, two overlapping calls, a panic after admit, a persist
+  failure, a probe at the limit, and an unbudgeted session. It asserts that a
+  refusal changes no usage and settles no running call, that no in-flight slot
+  leaks, and `BudgetBound`. A 90-second run made 49,600 executions.
 - `FuzzHubAppendBudget` (`internal/hub`) drives appends, restores, and replays,
   and asserts the byte budget, the count cap, the contiguous suffix, and that
   the inbox keeps its human message.
@@ -608,9 +718,25 @@ The model abstracts these details:
   empty jobs list, invalid JSON, a dispatch on another commit whose title names
   the target, and titles with a short, longer, unbounded, or prefix-sharing
   SHA. A 60-second run made 6,493,973 executions.
+- `FuzzSSEUsage` (`internal/broker`) feeds SSE bytes split at fuzzer-chosen
+  boundaries to the usage scan. It asserts that the scan matches the
+  single-chunk result, that a line over the line cap is skipped without growing
+  memory, that the forwarded bytes are unchanged, and that nothing panics.
+- `FuzzUsageJSON` (`internal/broker`) decodes arbitrary usage payloads. Tokens
+  never go negative, a huge or float value saturates instead of wrapping, and a
+  non-object is ignored.
+- `FuzzInjectStreamOptions` (`internal/broker`) rewrites streamed request
+  bodies. The output is valid JSON, `model` and every other key survive,
+  `include_usage` is true, existing `stream_options` keys are kept, and a
+  non-streamed body is unchanged.
 
 ## What is abstracted away
 
+- The token budget model abstracts one call's charge as a value from 1 to
+  `MaxCall` and assumes the reservation bounds it. The Go code keeps an
+  estimated charge inside that bound: the estimate's completion part stops at
+  the call's `max_tokens`. Byte counting, streaming, retries, the separate
+  request counter, and the finalize after the close are not modeled.
 - The release gating model abstracts each workflow job as an action. Job
   retries, runner availability, and the GitHub API's pagination and rate
   limits are not modeled. The model has one tag at a time.
@@ -660,6 +786,15 @@ A fuzz target checks the input handling of the package that adds it; the
 targets do not check the lifecycle. `hack/fuzz.sh` discovers targets
 automatically; a branch with no fuzz target exits 0 and says so.
 
+The token budget model is checked against the design. `FuzzTokenLedger` and
+`FuzzServeLLMBudget` sample random action sequences against the Go ledger and
+route, and the Go tests cover the named paths; neither proves every
+interleaving of the Go code. The e2e budget cases run against `llmstub`, a fake
+provider, not a real one. The stub reports usage unless the prompt carries its
+`no-usage` directive, which the metrics case uses to stay on the size estimate.
+The e2e suite is not run on the development machine for this change (Docker is
+unavailable); CI runs it against the release.
+
 The release gate reads synthetic GitHub API payloads. Its Go tests and
 `FuzzDecide` cover run and job selection, but the live API's field names and
 pagination are not verified. A change on the GitHub side fails the gate closed:
@@ -671,6 +806,22 @@ The k3d image fixtures check the matcher, not the cluster. They do not run
 discovery from Docker labels. The retry backoff and the per-node report run only
 in `hack/e2e.sh` and `hack/k3d-up.sh`. The 20-run stability gate is the only
 check of the live import path.
+
+The token budget model assumes the estimate bounds the charge. The Go estimate
+is a heuristic: `bytes/4` under-counts images and CJK text, so a provider can
+charge more for a call than the estimate. The ledger never bills an estimated
+call past its reservation, because the completion part stops at the call's
+`max_tokens`; the real cost can still exceed what the counter shows. A provider
+that reports usage is charged what it reports, and a reported prompt count can
+exceed `req_bytes/4`, so a reported charge can pass the reservation and the
+one-response overshoot remains possible. A provider
+that omits usage is charged the estimate, and whether each provider honors
+`stream_options.include_usage` is unverified: the broker injects it and accepts
+a missing object, but no live provider call is part of these checks. A
+third-party harness may reject the injected usage-only SSE chunk with an empty
+`choices` array; the built-in runtime ignores it. Cost in dollars, the
+gateway and MCP spend, and cross-session or per-project aggregate budgets are
+outside the model and the implementation.
 
 ## Chart RBAC property check
 

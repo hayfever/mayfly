@@ -42,13 +42,18 @@ type Definition struct {
 	MCPServers       *[]string `yaml:"mcpServers" json:"mcpServers"`
 	// Plugins names the plugin manifests the agent may call. Nil and an empty
 	// list both select none.
-	Plugins            *[]string  `yaml:"plugins" json:"plugins"`
-	AllowShell         *bool      `yaml:"allowShell" json:"allowShell"`
-	MaxSteps           int        `yaml:"maxSteps" json:"maxSteps"`
-	MaxHistoryMessages int        `yaml:"maxHistoryMessages" json:"maxHistoryMessages"`
-	Runtime            Runtime    `yaml:"runtime" json:"runtime"`
-	Schedules          []Schedule `yaml:"schedules" json:"schedules"`
-	Default            bool       `yaml:"default" json:"default"`
+	Plugins            *[]string `yaml:"plugins" json:"plugins"`
+	AllowShell         *bool     `yaml:"allowShell" json:"allowShell"`
+	MaxSteps           int       `yaml:"maxSteps" json:"maxSteps"`
+	MaxHistoryMessages int       `yaml:"maxHistoryMessages" json:"maxHistoryMessages"`
+	// MaxLLMTokens and MaxLLMRequests override sessions.max_llm_tokens and
+	// sessions.max_llm_requests for a session of this agent. Zero keeps the
+	// global value.
+	MaxLLMTokens   int        `yaml:"maxLLMTokens" json:"maxLLMTokens"`
+	MaxLLMRequests int        `yaml:"maxLLMRequests" json:"maxLLMRequests"`
+	Runtime        Runtime    `yaml:"runtime" json:"runtime"`
+	Schedules      []Schedule `yaml:"schedules" json:"schedules"`
+	Default        bool       `yaml:"default" json:"default"`
 }
 
 // Schedule runs one source on a cron expression.
@@ -127,7 +132,7 @@ func Build(def Definition, source string) (Agent, error) {
 	if strings.TrimSpace(def.SystemPromptFile) != "" {
 		return Agent{}, fmt.Errorf("%s: agent %q: systemPromptFile must be resolved by the project loader", path, def.Name)
 	}
-	if def.MaxSteps < 0 || def.MaxHistoryMessages < 0 {
+	if def.MaxSteps < 0 || def.MaxHistoryMessages < 0 || def.MaxLLMTokens < 0 || def.MaxLLMRequests < 0 {
 		return Agent{}, fmt.Errorf("%s: agent %q has a negative limit", path, def.Name)
 	}
 	if def.Runtime.Protocol == 0 {

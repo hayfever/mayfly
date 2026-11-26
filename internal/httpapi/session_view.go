@@ -29,6 +29,8 @@ type apiSession struct {
 	LastActivity time.Time           `json:"last_activity"`
 	MessageCount int                 `json:"message_count"`
 	Artifact     *apiArtifact        `json:"artifact,omitempty"`
+	LLMUsage     *model.LLMUsage     `json:"llm_usage,omitempty"`
+	LLMBudget    *model.LLMBudget    `json:"llm_budget,omitempty"`
 	Error        string              `json:"error,omitempty"`
 }
 
@@ -72,6 +74,14 @@ func newAPISession(sess model.Session) apiSession {
 			CreatedAt: sess.Artifact.CreatedAt,
 			Partial:   sess.Artifact.Partial,
 		}
+	}
+	if sess.LLMUsage != nil {
+		usage := *sess.LLMUsage
+		out.LLMUsage = &usage
+	}
+	if sess.LLMBudget != nil {
+		budget := *sess.LLMBudget
+		out.LLMBudget = &budget
 	}
 	return out
 }

@@ -136,13 +136,19 @@ type Config struct {
 	LLMTimeoutSeconds  int            `json:"llm_timeout_seconds"`
 	MaxSteps           int            `json:"max_steps"`
 	MaxHistoryMessages int            `json:"max_history_messages"`
-	TTLSeconds         int            `json:"ttl_seconds"`
-	IdleTimeoutSeconds int            `json:"idle_timeout_seconds"`
-	WorkspaceDir       string         `json:"workspace_dir"`
-	ArtifactsDir       string         `json:"artifacts_dir"`
-	AllowShell         bool           `json:"allow_shell"`
-	ShellTimeoutSecs   int            `json:"shell_timeout_seconds"`
-	ArtifactMaxBytes   int64          `json:"artifact_max_bytes"`
+	// MaxLLMTokens and MaxLLMRequests are the resolved per-session model
+	// budget. The control plane resolves the agent override before it writes
+	// this document, so adoption recovers the same budget. Zero means no
+	// limit.
+	MaxLLMTokens       int    `json:"max_llm_tokens"`
+	MaxLLMRequests     int    `json:"max_llm_requests"`
+	TTLSeconds         int    `json:"ttl_seconds"`
+	IdleTimeoutSeconds int    `json:"idle_timeout_seconds"`
+	WorkspaceDir       string `json:"workspace_dir"`
+	ArtifactsDir       string `json:"artifacts_dir"`
+	AllowShell         bool   `json:"allow_shell"`
+	ShellTimeoutSecs   int    `json:"shell_timeout_seconds"`
+	ArtifactMaxBytes   int64  `json:"artifact_max_bytes"`
 	// MaxImageBytes, MaxResultImageBytes, and MaxSessionImageBytes bound
 	// image content from MCP tool results. Zero applies the content package
 	// defaults, never an unlimited value.
@@ -218,6 +224,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxSteps <= 0 {
 		return errors.New("max_steps must be positive")
+	}
+	if c.MaxLLMTokens < 0 || c.MaxLLMRequests < 0 {
+		return errors.New("max_llm_tokens and max_llm_requests must not be negative")
 	}
 	limits := c.ContentLimits()
 	c.MaxImageBytes = limits.MaxImageBytes
