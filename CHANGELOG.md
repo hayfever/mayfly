@@ -30,6 +30,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ### Fixed
 
+- A model call that panics after it was admitted is counted in `mayfly_llm_requests_total` and `mayfly_llm_request_duration_seconds`, and a reservation the record store cannot keep is labeled `persist_failed` in `mayfly_llm_requests_total` instead of `error` (#49).
 - A Streamable HTTP MCP server that answers with `text/event-stream` can deliver a legal image tool result: the SSE decoder, the HTTP JSON body, and the stdio line share an 8 MiB response bound instead of a 4 MiB SSE line bound (#71).
 - An image tool result whose encoded base64 length cannot fit the configured limits is rejected before the base64 decode, so an oversized payload never allocates its decoded buffer and the caller still gets the existing rejected-image text part (#71).
 - A client that sends headers and then stalls the request body no longer pins a handler goroutine and connection. The handler sets a read deadline, answers `408 request_timeout`, and closes the connection. This covers `/api/v1` JSON bodies, `/hooks/{name}`, and the internal JSON endpoints; WebSocket attach, streams, the LLM proxy, and artifact uploads keep their own behavior (#48).

@@ -128,6 +128,11 @@ reason `llm_budget_exhausted` follows, and the session closes gracefully. A
 model call that the budget refuses before it reaches the provider adds no
 event.
 
+The graceful close goes through the runtime, so the artifact is exported. A
+session with no pod that adoption finds already over its budget has no runtime
+to finish the close. It closes `completed` with reason `llm_budget_exhausted`
+and has no artifact bundle.
+
 ### `system`
 
 A runtime notice. The first `system` event reports the runtime setup: `model`,

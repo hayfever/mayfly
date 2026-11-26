@@ -1149,8 +1149,9 @@ components:
       type: object
       description: >
         Model consumption of one session. Token counts include estimated usage
-        for calls whose provider reported none. The object is absent before the
-        session makes a model call.
+        for calls whose provider reported none. A budgeted session reports the
+        object from creation, at zeros. A session without a budget reports it
+        after it makes a model call.
       required: [prompt_tokens, completion_tokens, requests, estimated_calls]
       properties:
         prompt_tokens:

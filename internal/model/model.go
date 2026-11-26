@@ -93,8 +93,9 @@ type Session struct {
 	LastActivity time.Time     `json:"last_activity"`
 	MessageCount int           `json:"message_count"`
 	Artifact     *ArtifactInfo `json:"artifact,omitempty"`
-	// LLMUsage and LLMBudget report model consumption. Both are absent when
-	// the session made no model call or has no budget.
+	// LLMUsage and LLMBudget report model consumption. A budgeted session
+	// publishes both from creation, with usage at zeros. A session without a
+	// budget publishes usage after its first model call and no budget.
 	LLMUsage  *LLMUsage  `json:"llm_usage,omitempty"`
 	LLMBudget *LLMBudget `json:"llm_budget,omitempty"`
 	// LLMPendingTokens is the durable reservation of an in-flight model call.

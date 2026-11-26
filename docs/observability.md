@@ -29,7 +29,7 @@ On the main port, `/metrics` is part of the public API listener, so it requires 
 | `mayfly_auth_failures_total` | counter | `via` | Refused API credentials: `bearer` for an `Authorization` header, `web` for a browser sign-in or session cookie |
 | `mayfly_http_requests_total` | counter | `route`, `method`, `code` | Requests served. `method` is a standard HTTP method or `OTHER` |
 | `mayfly_http_request_duration_seconds` | histogram | `route`, `method` | Request duration |
-| `mayfly_llm_requests_total` | counter | `model`, `result` | Model calls by result: `ok` and `error` for forwarded calls, `busy` and `over_budget` for calls the budget refused. A refused call is not forwarded |
+| `mayfly_llm_requests_total` | counter | `model`, `result` | Model calls by result: `ok` and `error` for forwarded calls, `busy`, `over_budget`, and `persist_failed` for calls the budget refused. A refused call is not forwarded |
 | `mayfly_llm_request_duration_seconds` | histogram | `model` | Model call duration, from the request to the last response byte, including a refused call |
 | `mayfly_llm_tokens_total` | counter | `model`, `kind` | Tokens charged to sessions, as `prompt` or `completion`. The count includes estimated usage |
 | `mayfly_llm_usage_estimated_total` | counter | `model` | Model calls charged from a size estimate or a transport-failure reservation |
