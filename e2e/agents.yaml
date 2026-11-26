@@ -41,3 +41,30 @@ agents:
     systemPrompt: This session never starts.
     plugins: [missing]
     maxSteps: 8
+  - name: budget-requests
+    description: Request budget the budget tests spend through the internal proxy.
+    systemPrompt: Budget test agent.
+    maxSteps: 8
+    maxLLMRequests: 6
+  - name: budget-overlap
+    description: Request budget with room for two overlapping proxy calls.
+    systemPrompt: Budget test agent.
+    maxSteps: 8
+    maxLLMRequests: 20
+  - name: budget-tokens
+    description: Token budget the budget tests report and keep across a restart.
+    systemPrompt: Budget test agent.
+    maxSteps: 8
+    maxLLMTokens: 100000
+  - name: budget-large
+    description: Large per-agent budget, used to check the override.
+    systemPrompt: Budget test agent.
+    maxSteps: 8
+    maxLLMTokens: 200000
+    maxLLMRequests: 20
+  - name: budget-small
+    description: Small per-agent budget, used to check the override.
+    systemPrompt: Budget test agent.
+    maxSteps: 8
+    maxLLMTokens: 50000
+    maxLLMRequests: 4
