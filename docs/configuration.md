@@ -49,7 +49,7 @@ Set `version: 1` in every file. A file without the key is read as version 1, and
 | `inbox_buffer_bytes` | `event_buffer_bytes` | Retained inbox byte budget per session, in addition to `event_buffer`. The oldest human messages are dropped first. A runtime event never removes an unconsumed inbox message. Keep it above one message (32 KiB), or a larger message is dropped |
 | `max_event_bytes` | `65536` | Cap on one runtime event. Longer text and payload strings are truncated rune-safely and end with `…[truncated]` |
 | `max_steps` | `24` | Maximum model/tool iterations per user message |
-| `max_llm_tokens` | `0` | Prompt plus completion tokens one session may use. `0` disables the token limit. The count includes reported usage and the estimate for a call whose provider reports none |
+| `max_llm_tokens` | `0` | Prompt plus completion tokens one session may use. `0` disables the token limit. The count includes reported usage and the estimate for a call whose provider reports none, and the completion part of that estimate stops at the call's `max_tokens` |
 | `max_llm_requests` | `0` | Forwarded model calls one session may make. `0` disables the request limit. A refused call is not forwarded and does not count |
 | `max_history_messages` | `120` | Messages sent to the model; oldest are trimmed at a user boundary |
 | `max_concurrent` | `50` | Maximum sessions that have not finalized. Webhook work waits in the queue; direct API calls get `429` and `Retry-After`. `0` removes the cap |

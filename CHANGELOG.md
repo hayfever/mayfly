@@ -31,6 +31,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ### Fixed
 
+- A model call that reports no usage is billed its request bytes over four plus its response bytes over four, and the completion part stops at the call's `max_tokens`. One estimated call therefore never charges more than the reservation the admit hook recorded (#49).
 - A model call that panics after it was admitted is counted in `mayfly_llm_requests_total` and `mayfly_llm_request_duration_seconds`, and a reservation the record store cannot keep is labeled `persist_failed` in `mayfly_llm_requests_total` instead of `error` (#49).
 - A Streamable HTTP MCP server that answers with `text/event-stream` can deliver a legal image tool result: the SSE decoder, the HTTP JSON body, and the stdio line share an 8 MiB response bound instead of a 4 MiB SSE line bound (#71).
 - An image tool result whose encoded base64 length cannot fit the configured limits is rejected before the base64 decode, so an oversized payload never allocates its decoded buffer and the caller still gets the existing rejected-image text part (#71).

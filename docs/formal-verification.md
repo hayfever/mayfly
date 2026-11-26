@@ -539,7 +539,7 @@ reservation behind it.
 | TLA+ action | Go code it models |
 |---|---|
 | `Admit` | the budget hook: the per-session ledger admit under `llmMu` in `internal/session/budget.go`, called from `ServeLLM`'s `admit` hook (`internal/broker/broker.go`). The in-flight check, the `max_llm_tokens` and `max_llm_requests` checks, the request increment, the reservation, and the synchronous record write |
-| `Upstream` | `broker.ServeLLM` after `client.Do` and the usage scan in `internal/broker/usage.go`. The charge is the reported usage or the byte estimate `req_bytes/4 + resp_bytes/4` |
+| `Upstream` | `broker.ServeLLM` after `client.Do` and the usage scan in `internal/broker/usage.go`. The charge is the reported usage or the byte estimate `req_bytes/4 + resp_bytes/4`, whose completion part stops at the call's `max_tokens` |
 | `Charge` | the charge-after path of the ledger (`internal/session/budget.go`): usage into the counter and the record, reservation released, token metric updated |
 | `Refuse` | `broker.Refusal` written by `writeRefusal`: `llm_busy` is 429 with `Retry-After`, `llm_budget_exhausted` is 429 without it, and `llm_persist_failed` is 503. A refusal is not forwarded and changes no counter. The model represents `llm_busy` as a disabled `Admit` and `llm_persist_failed` as an `Admit` that does not happen |
 | `Crash` | a control-plane process restart; no single Go function, because the process is gone. Memory is lost; the record keeps the charge and the reservation |
@@ -557,12 +557,14 @@ reservation behind it.
 | `ClosedAfterExhaust` | A charge that reaches a limit appends one error event, closes with reason `llm_budget_exhausted`, and ends `completed` | `TestLLMExhaustionClosesSession`, `TestLLMExhaustionSurvivesEmptyFinalize`, `TestInternalLLMExhaustedBudget`, `TestAdoptClosesExhaustedSession`, `TestAdoptClosesExhaustedPodlessSession`, e2e `TestSessionBudgetExhaustion` |
 
 The e2e cases in `e2e/budget_test.go` run against the deployed release. They
-cover exhaustion and the 429 refusal, two overlapping calls with `llm_busy`,
-the session fields and the CLI tokens line, the token and estimate counters,
-usage across a control-plane restart with bbolt, a per-agent override, and the
-defaults-off case. The exhaustion case suspends the session's agent process with
-`kill -STOP 1` so the test, not the agent, spends the budget; the cleanup
-resumes it.
+cover exhaustion, two overlapping calls with `llm_busy`, the session fields and
+the CLI tokens line, the token and estimate counters, usage across a
+control-plane restart with bbolt, a per-agent override, and the defaults-off
+case. The exhaustion case spends the request cap through the proxy and then
+accepts either outcome for the next call: the `429 llm_budget_exhausted`
+refusal while the session is still open, or a `401` once the charge has closed
+the session and removed its scoped token. The usage must not change in either
+case.
 
 `TokenBudget.cfg` sets `Budget = 3`, `MaxCall = 2`, two callers, no crash, an
 in-flight cap of one, and the check, charge, and reservation writes on. It
@@ -598,7 +600,9 @@ The model abstracts these details:
 - One call's charge is a nondeterministic value from 1 to `MaxCall`, and the
   reservation is `MaxCall`. The model assumes that the estimate is an upper
   bound. The Go reservation is `req_bytes/4` plus `max_tokens` (4096 by
-  default), which is a heuristic.
+  default), which is a heuristic; the estimated completion stops at
+  `max_tokens`, so an estimated charge stays inside the reservation, while a
+  reported usage is charged as reported.
 - Tokens only. `max_llm_requests` is a second counter with no reservation and
   no overshoot; it is outside the model.
 - Provider latency, streaming, retries, and SSE chunk boundaries are outside
@@ -613,17 +617,20 @@ The model abstracts these details:
 ## Fuzz targets for the bounds
 
 - `FuzzTokenLedger` (`internal/session`) drives the real ledger with random
-  admit, charge, crash and recover, refusal, and save-failure sequences. It
-  asserts `BudgetBound`, `NoChargeLost`, and `NoAdmitWhenExhausted` against a
-  ghost total of every charge the provider billed. A 60-second run made 819
-  executions.
+  admit, charge, crash and recover, refusal, save-failure, and concurrent-admit
+  sequences. It asserts `BudgetBound`, `NoChargeLost`, and
+  `NoAdmitWhenExhausted` against a ghost total of every charge the provider
+  billed, so it is the Action-to-Go bridge for the
+  [token budget model](#token-budget-model). Each charge must also equal the
+  amount the harness expects, which fails a size estimate that bills past the
+  call's `max_tokens` cap. A 90-second run made 499,297 executions.
 - `FuzzServeLLMBudget` (`internal/httpapi`) drives the internal LLM route with
-  random budgets and responses: reported usage, a 2xx without usage, an
-  upstream 5xx, a forwarded 4xx, a transport failure, two overlapping calls,
-  a panic after admit, a persist failure, a probe at the limit, and an
-  unbudgeted session. It asserts that a refusal changes no usage and settles no
-  running call, that no in-flight slot leaks, and `BudgetBound`. A 60-second
-  run made 5,050 executions.
+  random budgets and responses: reported usage, a 2xx without usage, a 2xx
+  whose body is far past the completion cap, an upstream 5xx, a forwarded 4xx,
+  a transport failure, two overlapping calls, a panic after admit, a persist
+  failure, a probe at the limit, and an unbudgeted session. It asserts that a
+  refusal changes no usage and settles no running call, that no in-flight slot
+  leaks, and `BudgetBound`. A 90-second run made 49,600 executions.
 - `FuzzHubAppendBudget` (`internal/hub`) drives appends, restores, and replays,
   and asserts the byte budget, the count cap, the contiguous suffix, and that
   the inbox keeps its human message.
@@ -722,17 +729,14 @@ The model abstracts these details:
   bodies. The output is valid JSON, `model` and every other key survive,
   `include_usage` is true, existing `stream_options` keys are kept, and a
   non-streamed body is unchanged.
-- `FuzzTokenLedger` (`internal/session`) drives random admit, charge, crash
-  (reload from a memory record store), and concurrent admit sequences against
-  the real ledger. It asserts `BudgetBound` and `NoChargeLost`, so it is the
-  Action-to-Go bridge for the [token budget model](#token-budget-model).
 
 ## What is abstracted away
 
 - The token budget model abstracts one call's charge as a value from 1 to
-  `MaxCall` and assumes the reservation bounds it. Byte counting, streaming,
-  retries, the separate request counter, and the finalize after the close are
-  not modeled.
+  `MaxCall` and assumes the reservation bounds it. The Go code keeps an
+  estimated charge inside that bound: the estimate's completion part stops at
+  the call's `max_tokens`. Byte counting, streaming, retries, the separate
+  request counter, and the finalize after the close are not modeled.
 - The release gating model abstracts each workflow job as an action. Job
   retries, runner availability, and the GitHub API's pagination and rate
   limits are not modeled. The model has one tag at a time.
@@ -804,8 +808,13 @@ in `hack/e2e.sh` and `hack/k3d-up.sh`. The 20-run stability gate is the only
 check of the live import path.
 
 The token budget model assumes the estimate bounds the charge. The Go estimate
-is a heuristic: `bytes/4` under-counts images and CJK text, so one call can cost
-more than its reservation and the overshoot can pass one response. A provider
+is a heuristic: `bytes/4` under-counts images and CJK text, so a provider can
+charge more for a call than the estimate. The ledger never bills an estimated
+call past its reservation, because the completion part stops at the call's
+`max_tokens`; the real cost can still exceed what the counter shows. A provider
+that reports usage is charged what it reports, and a reported prompt count can
+exceed `req_bytes/4`, so a reported charge can pass the reservation and the
+one-response overshoot remains possible. A provider
 that omits usage is charged the estimate, and whether each provider honors
 `stream_options.include_usage` is unverified: the broker injects it and accepts
 a missing object, but no live provider call is part of these checks. A
