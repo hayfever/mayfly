@@ -200,6 +200,24 @@ func TestLLMChargeEstimate(t *testing.T) {
 			prompt: 200, completion: 20, estimated: 1,
 		},
 		{
+			// The response bytes estimate 2000 tokens, but the call allowed
+			// five, so the charge stops at the cap and inside the
+			// reservation ReqBytes/4 + MaxOut.
+			name:   "2xx without usage caps the completion at max_tokens",
+			res:    broker.CallResult{Status: 200, Forwarded: true, ReqBytes: 400, RespBytes: 8000, MaxOut: 5},
+			prompt: 100, completion: 5, estimated: 1,
+		},
+		{
+			name:   "2xx without usage below the cap keeps the estimate",
+			res:    broker.CallResult{Status: 200, Forwarded: true, ReqBytes: 400, RespBytes: 80, MaxOut: 100},
+			prompt: 100, completion: 20, estimated: 1,
+		},
+		{
+			name:   "upstream 500 without usage caps the completion at max_tokens",
+			res:    broker.CallResult{Status: 500, Forwarded: true, ReqBytes: 800, RespBytes: 80_000, MaxOut: 12},
+			prompt: 200, completion: 12, estimated: 1,
+		},
+		{
 			// A 502 the upstream itself sent is a 5xx: estimate from bytes.
 			name:   "upstream 502 without usage",
 			res:    broker.CallResult{Status: 502, Forwarded: true, ReqBytes: 400, RespBytes: 0},
@@ -215,7 +233,7 @@ func TestLLMChargeEstimate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := testManager(t)
 			budgetInstance(m, "s1", 1_000_000, 10)
-			if err := m.AdmitLLM("s1", tc.res.ReqBytes, 100); err != nil {
+			if err := m.AdmitLLM("s1", tc.res.ReqBytes, tc.res.MaxOut); err != nil {
 				t.Fatal(err)
 			}
 			delta, estimated, err := m.ChargeLLM("s1", tc.res)
@@ -224,6 +242,12 @@ func TestLLMChargeEstimate(t *testing.T) {
 			}
 			if delta != (broker.Usage{Prompt: tc.prompt, Completion: tc.completion}) {
 				t.Fatalf("delta = %+v, want prompt=%d completion=%d", delta, tc.prompt, tc.completion)
+			}
+			// A capped call never bills more than the reservation the admit
+			// hook recorded.
+			reservation := byteEstimate(tc.res.ReqBytes) + nonNegative(tc.res.MaxOut)
+			if tc.res.MaxOut > 0 && delta.Prompt+delta.Completion > reservation {
+				t.Fatalf("charge %d > reservation %d", delta.Prompt+delta.Completion, reservation)
 			}
 			if estimated != (tc.estimated == 1) {
 				t.Fatalf("estimated = %v, want %v", estimated, tc.estimated == 1)

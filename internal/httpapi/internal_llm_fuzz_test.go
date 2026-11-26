@@ -32,12 +32,14 @@ import (
 //   - An unbudgeted session counts usage but refuses nothing.
 //
 // MaxCall is the largest charge one call can make: the request estimate plus
-// the completion cap. Reported usage and estimated response bytes stay within
-// that bound, so the budget can overshoot by at most one response.
+// the completion cap. Reported usage stays inside that bound, and the
+// estimated completion stops at max_tokens, so the budget can overshoot by at
+// most one response.
 func FuzzServeLLMBudget(f *testing.F) {
 	// Op bytes: 0 reported usage, 1 upstream 5xx, 2 forwarded 4xx, 3 transport
 	// failure, 4 two overlapping calls, 5 panic after admit, 6 probe, 7 a 2xx
-	// with no usage (the size estimate), 8 a persist failure. An unbudgeted
+	// with no usage (the size estimate; an op with the high bit set sends a
+	// body far past the completion cap), 8 a persist failure. An unbudgeted
 	// seed runs 0-3 only.
 	f.Add(int64(10), int64(0), int64(5), int64(0), []byte{0, 1, 2, 3})
 	f.Add(int64(1), int64(1), int64(1), int64(0), []byte{0, 0})
@@ -49,6 +51,9 @@ func FuzzServeLLMBudget(f *testing.F) {
 	f.Add(int64(40), int64(2), int64(30), int64(0), []byte{7, 7, 8, 0})
 	f.Add(int64(499), int64(3), int64(10), int64(0), []byte{8, 0})
 	f.Add(int64(9), int64(3), int64(4), int64(1), []byte{0, 7, 3, 2})
+	// Op 133 folds to 7 with the high bit set: a no-usage 2xx whose body is far
+	// past the completion cap.
+	f.Add(int64(30), int64(0), int64(4), int64(0), []byte{133, 7})
 
 	f.Fuzz(func(t *testing.T, budgetSeed, requestSeed, maxOutSeed, unbudgetedSeed int64, ops []byte) {
 		budget := int64(uint64(budgetSeed)%500) + 1
@@ -125,7 +130,13 @@ func (h *llmFuzzHarness) run(op byte) {
 	case 6:
 		h.probe()
 	case 7:
-		h.estimated2xx()
+		payload := []byte(`{"choices":[]}`)
+		if op&0x80 != 0 {
+			// A body far past the completion cap: the estimate must stop at
+			// max_tokens, or the charge passes the reservation.
+			payload = []byte(strings.Repeat("x", int(h.maxOut)*4+8))
+		}
+		h.estimated2xx(payload)
 	case 8:
 		h.persistFailure()
 	}
@@ -318,23 +329,27 @@ func (h *llmFuzzHarness) busy() {
 }
 
 // estimated2xx charges the size estimate of a 2xx whose provider sent no
-// usage. That is how this branch's llmstub answers.
-func (h *llmFuzzHarness) estimated2xx() {
+// usage. The completion part of the estimate stops at the call's max_tokens,
+// which is the cap the request set and the reservation AdmitLLM recorded.
+func (h *llmFuzzHarness) estimated2xx(payload []byte) {
 	if h.atCapacity() {
 		h.expectRefusal()
 		return
 	}
-	const payload = `{"choices":[]}`
 	h.f.setUpstream(func(w http.ResponseWriter, _ *http.Request, _ []byte) {
-		writeStubUsage(w, payload)
+		writeStubUsage(w, string(payload))
 	})
 	rec := h.f.chat(h.body)
 	if rec.Code != http.StatusOK {
 		h.t.Fatalf("estimated call = %d body=%s", rec.Code, rec.Body.String())
 	}
+	completion := int64(len(payload)) / 4
+	if completion > h.maxOut {
+		completion = h.maxOut
+	}
 	h.expectDelta(model.LLMUsage{
 		PromptTokens:     int64(len(h.body)) / 4,
-		CompletionTokens: int64(len(payload)) / 4,
+		CompletionTokens: completion,
 		EstimatedCalls:   1,
 	})
 }

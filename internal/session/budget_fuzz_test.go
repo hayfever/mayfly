@@ -48,6 +48,9 @@ func FuzzTokenLedger(f *testing.F) {
 	f.Add(int64(40), int64(8), int64(0), []byte{0, 5, 0, 4})
 	f.Add(int64(60), int64(12), int64(3), []byte{0, 7, 0, 10, 0, 7, 0, 1})
 	f.Add(int64(30), int64(6), int64(4), []byte{0, 8, 0, 1})
+	// Op 255 folds to 2 and op 253 to 3 with a completion reserve of 100, so
+	// both estimates reach twice the cap and the charge must stop at it.
+	f.Add(int64(400), int64(100), int64(8), []byte{0, 255, 0, 253})
 
 	f.Fuzz(func(t *testing.T, budgetSeed, maxOutSeed, requestSeed int64, ops []byte) {
 		budget := int64(uint64(budgetSeed)%500) + 1
@@ -120,15 +123,9 @@ func (h *ledgerHarness) run(t *testing.T, op byte) {
 			Usage: broker.Usage{Prompt: h.amount(op)},
 		}, h.amount(op))
 	case 2:
-		respBytes := h.responseAmount(op) * 4
-		h.settle(t, broker.CallResult{
-			Status: 200, Forwarded: true, ReqBytes: h.req, RespBytes: respBytes,
-		}, satAdd(byteEstimate(h.req), byteEstimate(respBytes)))
+		h.estimate(t, 200, op)
 	case 3:
-		respBytes := h.responseAmount(op) * 4
-		h.settle(t, broker.CallResult{
-			Status: 500 + int(op%2), Forwarded: true, ReqBytes: h.req, RespBytes: respBytes,
-		}, satAdd(byteEstimate(h.req), byteEstimate(respBytes)))
+		h.estimate(t, 500+int(op%2), op)
 	case 4:
 		h.settle(t, broker.CallResult{
 			Status: 502, Forwarded: true, TransportErr: true, ReqBytes: h.req, MaxOut: h.maxOut,
@@ -156,6 +153,21 @@ func (h *ledgerHarness) run(t *testing.T, op byte) {
 		h.failSave = true
 		h.admit(t)
 	}
+}
+
+// estimate charges the size estimate of one forwarded 2xx or 5xx that carried
+// no reported usage. The completion part stops at MaxOut, the cap the request
+// set, so the charge stays inside the reservation.
+func (h *ledgerHarness) estimate(t *testing.T, status int, op byte) {
+	t.Helper()
+	respBytes := h.responseAmount(op) * 4
+	completion := byteEstimate(respBytes)
+	if h.maxOut > 0 {
+		completion = min(completion, h.maxOut)
+	}
+	h.settle(t, broker.CallResult{
+		Status: status, Forwarded: true, ReqBytes: h.req, RespBytes: respBytes, MaxOut: h.maxOut,
+	}, satAdd(byteEstimate(h.req), completion))
 }
 
 // admit makes one call. A refusal must be retryable busy or an exhausted
@@ -249,7 +261,7 @@ func (h *ledgerHarness) concurrentAdmit(t *testing.T) {
 func (h *ledgerHarness) settle(t *testing.T, res broker.CallResult, charged int64) {
 	t.Helper()
 	before := h.usage()
-	_, _, err := h.m.ChargeLLM("fz", res)
+	delta, _, err := h.m.ChargeLLM("fz", res)
 	if h.inflight == 0 {
 		if err != nil {
 			t.Fatalf("stray charge: %v", err)
@@ -268,6 +280,13 @@ func (h *ledgerHarness) settle(t *testing.T, res broker.CallResult, charged int6
 			t.Fatalf("charge: %v", err)
 		}
 		h.dirty = false
+	}
+	// The ledger must charge exactly the amount the harness expects. A larger
+	// charge means the call billed more than its reservation, which the
+	// estimate cap prevents.
+	if got, want := satAdd(before.Total(), satAdd(delta.Prompt, delta.Completion)),
+		satAdd(before.Total(), charged); got != want {
+		t.Fatalf("charge delta = %+v, want %d (res %+v, before %+v)", delta, charged, res, before)
 	}
 	h.billed = satAdd(h.billed, charged)
 	h.inflight = 0
@@ -364,18 +383,18 @@ func (h *ledgerHarness) amount(op byte) int64 {
 	return k
 }
 
-// responseAmount derives a response byte count that estimates to at most the
-// completion reserve.
+// responseAmount derives a response token estimate that can reach twice the
+// completion reserve, so the charge must cap it at MaxOut.
 func (h *ledgerHarness) responseAmount(op byte) int64 {
 	if h.maxOut <= 0 {
 		return 0
 	}
 	k := int64(op)
 	if h.maxOut < 1<<40 {
-		k = k * (h.maxOut + 1) / 256
-	}
-	if k > h.maxOut {
-		k = h.maxOut
+		k = k * (2*h.maxOut + 1) / 256
+		if k > 2*h.maxOut {
+			k = 2 * h.maxOut
+		}
 	}
 	return k
 }

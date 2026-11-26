@@ -75,8 +75,12 @@ func (l *llmLedger) exhaustedMessage() string {
 // may have billed a request whose response never arrived, and a 502 after the
 // response-header timeout is that case. Reported usage wins over any estimate.
 // Otherwise a 2xx or a 5xx is charged the size-based estimate, because the
-// provider may already have billed the call. Any other forwarded status is
-// charged no tokens: the request already counted at admit.
+// provider may already have billed the call. The completion part of that
+// estimate is capped at MaxOut, the cap the request set: a provider cannot
+// bill more completion tokens than max_tokens allowed, and the charge must stay
+// inside the reservation AdmitLLM recorded, ReqBytes/4 + MaxOut. A call with no
+// cap keeps the uncapped estimate. Any other forwarded status is charged no
+// tokens: the request already counted at admit.
 func (l *llmLedger) charge(res broker.CallResult) (delta broker.Usage, estimated bool) {
 	var added broker.Usage
 	switch {
@@ -87,7 +91,11 @@ func (l *llmLedger) charge(res broker.CallResult) (delta broker.Usage, estimated
 	case res.Reported:
 		added = broker.Usage{Prompt: nonNegative(res.Usage.Prompt), Completion: nonNegative(res.Usage.Completion)}
 	case res.Status >= 500 || (res.Status >= 200 && res.Status < 300):
-		added = broker.Usage{Prompt: byteEstimate(res.ReqBytes), Completion: byteEstimate(res.RespBytes)}
+		completion := byteEstimate(res.RespBytes)
+		if res.MaxOut > 0 {
+			completion = min(completion, res.MaxOut)
+		}
+		added = broker.Usage{Prompt: byteEstimate(res.ReqBytes), Completion: completion}
 		estimated = true
 	}
 	promptBefore, completionBefore := l.spent.PromptTokens, l.spent.CompletionTokens
