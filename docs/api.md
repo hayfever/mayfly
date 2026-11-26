@@ -113,7 +113,7 @@ Find the session created for a delivery with `GET /api/v1/queue/jobs/{job_id}`: 
 
 A request body with a field this build does not know returns `400 invalid_request`. A typo in an option is therefore visible, not silently ignored. The same rule applies to the message, close, and attach-ticket bodies.
 
-The session object holds the id, title, status, prompt, agent, harness, model, skills, MCP servers, plugins, trigger, TTL, timestamps, message count, artifact metadata, and error. The runtime backend, the pod name, and the artifact store URI are control-plane internals and never appear in a response. Download the bundle through `GET /api/v1/sessions/{id}/artifact`.
+The session object holds the id, title, status, prompt, agent, harness, model, skills, MCP servers, plugins, trigger, TTL, timestamps, message count, model usage, model budget, artifact metadata, and error. `llm_usage` reports prompt tokens, completion tokens, forwarded model calls, and how many calls were estimated. `llm_budget` reports the resolved token and request limits, and it is absent when the session has no limit. The durable reservation of an in-flight call is not exposed. The runtime backend, the pod name, and the artifact store URI are control-plane internals and never appear in a response. Download the bundle through `GET /api/v1/sessions/{id}/artifact`.
 
 Response `201`:
 

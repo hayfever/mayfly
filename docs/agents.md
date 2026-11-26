@@ -67,6 +67,8 @@ agents:
 | `plugins` | Plugin names from the bundle's `plugins/` directory. Plugins need the built-in harness. See [plugins.md](plugins.md) |
 | `allowShell` | Enables the `run_command` tool for this agent; overrides `sessions.allow_shell` |
 | `maxSteps` | Model/tool iterations per user message |
+| `maxLLMTokens` | Prompt and completion token budget for a session of this agent. `0` keeps `sessions.max_llm_tokens` |
+| `maxLLMRequests` | Forwarded model call budget for a session of this agent. `0` keeps `sessions.max_llm_requests` |
 | `maxHistoryMessages` | Messages sent to the model |
 | `runtime` | Optional harness image, command, environment, and harness-specific config |
 | `default` | At most one agent across all manifests may be default |
@@ -190,8 +192,14 @@ request skills     > agent skills     > skills.default
 request mcp_servers> agent mcpServers > default non-opt-in MCP servers
 agent allowShell   > sessions.allow_shell
 agent maxSteps     > sessions.max_steps
+agent maxLLMTokens > sessions.max_llm_tokens
+agent maxLLMRequests > sessions.max_llm_requests
 agent maxHistory   > sessions.max_history_messages
 ```
+
+A model budget override may be lower or higher than the global value. `0`
+inherits the global value. The manifest is rejected if any of these fields is
+negative.
 
 Request skills and MCP servers replace the agent lists when non-empty. They do not append. Unknown names are rejected. Plugins have no request or trigger override: only the agent manifest selects them.
 

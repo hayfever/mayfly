@@ -511,6 +511,17 @@ func printSession(out sessionResponse) {
 	fmt.Printf("created:   %s\n", s.CreatedAt.Local().Format("2006-01-02 15:04:05"))
 	fmt.Printf("expires:   %s\n", s.ExpiresAt.Local().Format("2006-01-02 15:04:05"))
 	fmt.Printf("messages:  %d\n", s.MessageCount)
+	if s.LLMUsage != nil || s.LLMBudget != nil {
+		usage := model.LLMUsage{}
+		if s.LLMUsage != nil {
+			usage = *s.LLMUsage
+		}
+		line := fmt.Sprintf("tokens:    %d prompt / %d completion", usage.PromptTokens, usage.CompletionTokens)
+		if s.LLMBudget != nil && s.LLMBudget.MaxTokens > 0 {
+			line += fmt.Sprintf(" (budget %d)", s.LLMBudget.MaxTokens)
+		}
+		fmt.Println(line)
+	}
 	if s.Error != "" {
 		fmt.Printf("error:     %s\n", s.Error)
 	}

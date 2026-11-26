@@ -1139,8 +1139,47 @@ components:
           type: integer
         artifact:
           $ref: "#/components/schemas/Artifact"
+        llm_usage:
+          $ref: "#/components/schemas/LLMUsage"
+        llm_budget:
+          $ref: "#/components/schemas/LLMBudget"
         error:
           type: string
+    LLMUsage:
+      type: object
+      description: >
+        Model consumption of one session. Token counts include estimated usage
+        for calls whose provider reported none. The object is absent before the
+        session makes a model call.
+      required: [prompt_tokens, completion_tokens, requests, estimated_calls]
+      properties:
+        prompt_tokens:
+          type: integer
+          format: int64
+        completion_tokens:
+          type: integer
+          format: int64
+        requests:
+          type: integer
+          format: int64
+          description: Forwarded model calls, including calls that failed upstream.
+        estimated_calls:
+          type: integer
+          format: int64
+          description: Calls whose tokens were estimated rather than reported.
+    LLMBudget:
+      type: object
+      description: >
+        The resolved model budget of one session. Zero in either field means no
+        limit. The object is absent when the session has no budget.
+      required: [max_tokens, max_requests]
+      properties:
+        max_tokens:
+          type: integer
+          format: int64
+        max_requests:
+          type: integer
+          format: int64
     Trigger:
       type: object
       required: [kind]
@@ -1556,6 +1595,16 @@ components:
           type: integer
         max_history_messages:
           type: integer
+        max_llm_tokens:
+          type: integer
+          description: >
+            Model token budget this agent resolves for a session. `0` keeps
+            `sessions.max_llm_tokens`.
+        max_llm_requests:
+          type: integer
+          description: >
+            Forwarded model call budget this agent resolves for a session. `0`
+            keeps `sessions.max_llm_requests`.
         protocol:
           type: integer
         command:
