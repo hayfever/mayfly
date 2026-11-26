@@ -8,9 +8,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -147,15 +149,15 @@ func (b *Broker) ServeLLM(w http.ResponseWriter, r *http.Request, sessionModel s
 		}
 	}
 	// The hook admitted the call, so from here the reservation stands even if
-	// the upstream never answers.
-	res.Forwarded = true
-
+	// the upstream never answers. The request is marked forwarded only once it
+	// is built: a request that never left the process costs no tokens.
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstream.String(), bytes.NewReader(body))
 	if err != nil {
 		res.Status = http.StatusInternalServerError
 		res.RespBytes = writeError(w, res.Status, "build upstream request")
 		return res
 	}
+	res.Forwarded = true
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", r.Header.Get("Accept"))
 	if b.cfg.APIKey != "" {
@@ -326,6 +328,12 @@ func writeRefusal(w http.ResponseWriter, err error) (int, int64) {
 			status = refusal.Status
 		}
 		code = refusal.Code
+		if refusal.RetryAfter > 0 {
+			// The runtime reads Retry-After as whole seconds, rounded up, so
+			// a retry never lands before the refusal's own wait.
+			seconds := int64(math.Ceil(refusal.RetryAfter.Seconds()))
+			w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+		}
 	}
 	body := map[string]string{"error": err.Error()}
 	if code != "" {

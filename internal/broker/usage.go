@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"time"
 )
 
 // Usage is the token count of one model response, as the provider reported it.
@@ -36,11 +37,13 @@ type CallResult struct {
 // Refusal is an admit-hook refusal. The broker writes Status and the JSON body
 // {"error": Message, "code": Code}, then returns Forwarded=false with no
 // upstream call. A hook error that is not a *Refusal becomes a 500 with no
-// code.
+// code. A positive RetryAfter also sets the Retry-After header in whole
+// seconds, rounded up.
 type Refusal struct {
-	Status  int
-	Code    string
-	Message string
+	Status     int
+	Code       string
+	Message    string
+	RetryAfter time.Duration
 }
 
 // Error implements error.

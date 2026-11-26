@@ -424,6 +424,31 @@ func TestLLMAdmitRefusal(t *testing.T) {
 		t.Fatalf("resp bytes = %d, want %d", res.RespBytes, rec.Body.Len())
 	}
 
+	t.Run("busy refusal sets Retry-After", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		res := b.ServeLLM(rec, httptest.NewRequest(http.MethodPost, "/internal/v1/llm/chat/completions", strings.NewReader(body)), "stub",
+			func(int64, int64) error {
+				return &Refusal{Status: http.StatusTooManyRequests, Code: "llm_busy", Message: "busy", RetryAfter: 1500 * time.Millisecond}
+			})
+		if res.Forwarded {
+			t.Fatal("forwarded = true, want false")
+		}
+		if got := rec.Header().Get("Retry-After"); got != "2" {
+			t.Fatalf("Retry-After = %q, want 2", got)
+		}
+	})
+
+	t.Run("exhausted refusal sets no Retry-After", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		b.ServeLLM(rec, httptest.NewRequest(http.MethodPost, "/internal/v1/llm/chat/completions", strings.NewReader(body)), "stub",
+			func(int64, int64) error {
+				return &Refusal{Status: http.StatusTooManyRequests, Code: "llm_budget_exhausted", Message: "spent"}
+			})
+		if got := rec.Header().Get("Retry-After"); got != "" {
+			t.Fatalf("Retry-After = %q, want none", got)
+		}
+	})
+
 	t.Run("plain error becomes 500", func(t *testing.T) {
 		rec := httptest.NewRecorder()
 		res := b.ServeLLM(rec, httptest.NewRequest(http.MethodPost, "/internal/v1/llm/chat/completions", strings.NewReader(body)), "stub",
