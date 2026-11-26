@@ -11,7 +11,8 @@ import (
 )
 
 // TestPublicSessionHidesInternals checks the projection that keeps runtime
-// backend, pod name, and artifact store URI out of the API.
+// backend, pod name, artifact store URI, and the in-flight reservation out of
+// the API. Usage and the resolved budget are public.
 func TestPublicSessionHidesInternals(t *testing.T) {
 	view := newAPISession(model.Session{
 		ID:      "s1",
@@ -23,18 +24,23 @@ func TestPublicSessionHidesInternals(t *testing.T) {
 			Size:   10,
 			SHA256: strings.Repeat("a", 64),
 		},
+		LLMUsage:         &model.LLMUsage{PromptTokens: 5, CompletionTokens: 6, Requests: 1, EstimatedCalls: 1},
+		LLMBudget:        &model.LLMBudget{MaxTokens: 100, MaxRequests: 2},
+		LLMPendingTokens: 42,
 	})
 	raw, err := json.Marshal(view)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, banned := range []string{`"backend"`, `"pod_name"`, `"uri"`} {
+	for _, banned := range []string{`"backend"`, `"pod_name"`, `"uri"`, `"llm_pending_tokens"`} {
 		if strings.Contains(string(raw), banned) {
 			t.Fatalf("session view exposes %s: %s", banned, raw)
 		}
 	}
-	if !strings.Contains(string(raw), `"artifact"`) {
-		t.Fatalf("artifact metadata is missing: %s", raw)
+	for _, want := range []string{`"artifact"`, `"llm_usage"`, `"llm_budget"`, `"prompt_tokens"`, `"max_tokens"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("session view is missing %s: %s", want, raw)
+		}
 	}
 
 	server, mgr := sessionServer(t, 1)
@@ -48,7 +54,7 @@ func TestPublicSessionHidesInternals(t *testing.T) {
 		if rec.Code >= 300 {
 			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 		}
-		for _, banned := range []string{`"backend"`, `"pod_name"`, `"uri"`} {
+		for _, banned := range []string{`"backend"`, `"pod_name"`, `"uri"`, `"llm_pending_tokens"`} {
 			if strings.Contains(rec.Body.String(), banned) {
 				t.Fatalf("response exposes %s: %s", banned, rec.Body.String())
 			}

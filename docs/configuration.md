@@ -49,6 +49,8 @@ Set `version: 1` in every file. A file without the key is read as version 1, and
 | `inbox_buffer_bytes` | `event_buffer_bytes` | Retained inbox byte budget per session, in addition to `event_buffer`. The oldest human messages are dropped first. A runtime event never removes an unconsumed inbox message. Keep it above one message (32 KiB), or a larger message is dropped |
 | `max_event_bytes` | `65536` | Cap on one runtime event. Longer text and payload strings are truncated rune-safely and end with `…[truncated]` |
 | `max_steps` | `24` | Maximum model/tool iterations per user message |
+| `max_llm_tokens` | `0` | Prompt plus completion tokens one session may use. `0` disables the token limit. The count includes reported usage and the estimate for a call whose provider reports none |
+| `max_llm_requests` | `0` | Forwarded model calls one session may make. `0` disables the request limit. A refused call is not forwarded and does not count |
 | `max_history_messages` | `120` | Messages sent to the model; oldest are trimmed at a user boundary |
 | `max_concurrent` | `50` | Maximum sessions that have not finalized. Webhook work waits in the queue; direct API calls get `429` and `Retry-After`. `0` removes the cap |
 | `retention` | `30m` | How long a finalized session stays in the list for status and events, and how long its record stays in the record store. Artifact metadata is kept separately. `0` keeps sessions forever |
@@ -61,6 +63,20 @@ Set `version: 1` in every file. A file without the key is read as version 1, and
 | `artifacts_dir` | `/var/lib/mayfly/artifacts` | Container bundle staging path. The Kubernetes backend uses `/artifacts` on the workspace claim; the local backend uses its state directory |
 | `records.backend` | `journal.backend` | `memory` or `bbolt`. Where session records and the artifact index are kept. `bbolt` keeps finished sessions in `GET /api/v1/sessions` and artifact downloads working across a restart. `memory` keeps them in the process |
 | `records.path` | `sessions.db` beside `journal.bbolt.path` | Record database file, for the `bbolt` backend only. Put it on the control-plane PersistentVolume |
+
+### Model budget
+
+The control plane charges each session for forwarded model calls. A budgeted
+session admits one call at a time. The ledger records the reservation of the
+call before it reaches the provider, so a restart cannot lose a charge. The
+next control plane charges an interrupted call at its reservation, which can
+push a session that was under its limit over it. An agent manifest can
+override either limit for its sessions with `maxLLMTokens` and
+`maxLLMRequests`; see [agents.md](agents.md).
+
+Usage and budget are stored on the session record. With
+`records.backend: bbolt` they survive a restart. With `memory` they reset to
+zero on restart, which is acceptable only for development.
 
 ### Session memory
 

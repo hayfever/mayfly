@@ -7,6 +7,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 ### Added
 
 - `hack/e2e.sh` and `hack/k3d-up.sh` import images through `hack/lib/k3d-images.sh`, which checks every image on every k3d server and agent node after the import, retries the missing images three times with backoff, and fails with `image X missing on node Y` plus a per-node image list. `hack/test-k3d-images.sh` checks the name matcher with fixture JSON (#52).
+- A per-session model budget. `sessions.max_llm_tokens` and `sessions.max_llm_requests` (both default `0`, which is off) cap forwarded model calls, and an agent manifest can override either value. The session object reports `llm_usage` and `llm_budget`, and the control plane exports `mayfly_llm_tokens_total` and `mayfly_llm_usage_estimated_total`. A call at the limit gets `429` with code `llm_budget_exhausted`, an overlapping call gets `429` with code `llm_busy` and `Retry-After`, and an exhausted budget appends an `error` event and closes the session with reason `llm_budget_exhausted` (#49).
 - A TLA+ model of the session lifecycle and resume protocol in `spec/tla`, checked by `hack/tlc.sh` and the `tlc` job in `.github/workflows/verify.yml`. See [docs/formal-verification.md](docs/formal-verification.md).
 - Native Go fuzz targets for webhook verification and parsing, persisted queue jobs, journal steps, session records, runtime events, HTTP request bodies, the hub, and bundles. `hack/fuzz.sh` runs every target, and the `fuzz-nightly` job runs them on a schedule.
 - `sessions.max_event_bytes` (default 64 KiB) caps one runtime event (#44).
@@ -30,6 +31,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ### Fixed
 
+- A model call that panics after it was admitted is counted in `mayfly_llm_requests_total` and `mayfly_llm_request_duration_seconds`, and a reservation the record store cannot keep is labeled `persist_failed` in `mayfly_llm_requests_total` instead of `error` (#49).
 - A Streamable HTTP MCP server that answers with `text/event-stream` can deliver a legal image tool result: the SSE decoder, the HTTP JSON body, and the stdio line share an 8 MiB response bound instead of a 4 MiB SSE line bound (#71).
 - An image tool result whose encoded base64 length cannot fit the configured limits is rejected before the base64 decode, so an oversized payload never allocates its decoded buffer and the caller still gets the existing rejected-image text part (#71).
 - A client that sends headers and then stalls the request body no longer pins a handler goroutine and connection. The handler sets a read deadline, answers `408 request_timeout`, and closes the connection. This covers `/api/v1` JSON bodies, `/hooks/{name}`, and the internal JSON endpoints; WebSocket attach, streams, the LLM proxy, and artifact uploads keep their own behavior (#48).

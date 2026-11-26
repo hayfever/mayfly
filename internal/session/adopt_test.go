@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -115,6 +116,136 @@ func TestAdoptResumesPodlessSession(t *testing.T) {
 	}
 	if _, err := cs.CoreV1().PersistentVolumeClaims("mayfly").Get(ctx, "mayfly-p1-workspace", metav1.GetOptions{}); err != nil {
 		t.Fatalf("workspace claim was deleted: %v", err)
+	}
+}
+
+// TestAdoptClosesExhaustedPodlessSession is the regression for a session that
+// lost its pod and came back already over its model budget. There is no
+// runtime to finalize the close, so the session used to sit in closing until
+// the close grace period expired and then failed.
+func TestAdoptClosesExhaustedPodlessSession(t *testing.T) {
+	cases := []struct {
+		name    string
+		usage   model.LLMUsage
+		pending int64
+	}{
+		{name: "usage at the limit", usage: model.LLMUsage{PromptTokens: 1000, Requests: 2}},
+		{name: "recovered reservation over the limit", usage: model.LLMUsage{PromptTokens: 900, Requests: 2}, pending: 200},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cs := fake.NewSimpleClientset()
+			m := testManager(t)
+			if err := m.loadAgents(); err != nil {
+				t.Fatal(err)
+			}
+			m.cfg.Runtime.Backend = "kubernetes"
+			m.cfg.Sessions.MaxRestarts = 2
+			m.journal = journal.NewMemory()
+			m.kube = k8s.NewForClient(cs, "mayfly")
+			m.stateDir = t.TempDir()
+			starts := &fakeRunner{}
+			m.runner = starts
+
+			usage := tc.usage
+			records := NewMemoryRecords()
+			record := Record{Version: RecordFormatVersion, Session: model.Session{
+				ID:               "p2",
+				Status:           model.StatusRunning,
+				Prompt:           "hello",
+				LLMUsage:         &usage,
+				LLMPendingTokens: tc.pending,
+			}}
+			if err := records.Save(ctx, record); err != nil {
+				t.Fatal(err)
+			}
+			m.SetRecords(records)
+
+			cfg := sessioncfg.Config{
+				Version:        sessioncfg.Version,
+				SessionID:      "p2",
+				Agent:          "default",
+				Model:          "stub",
+				Title:          "orphan",
+				TTLSeconds:     600,
+				CreatedAt:      time.Now().UTC(),
+				MaxLLMTokens:   1000,
+				MaxLLMRequests: 5,
+			}
+			raw, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec := &k8s.SessionSpec{
+				Namespace:           "mayfly",
+				SessionID:           "p2",
+				PodName:             "mayfly-p2",
+				SecretName:          "mayfly-p2",
+				ConfigMapName:       "mayfly-p2",
+				Image:               "example/agent:1",
+				PlatformNs:          "mayfly",
+				PersistentWorkspace: true,
+				SessionJSON:         raw,
+				Token:               "token",
+				TTL:                 time.Hour,
+			}
+			if err := spec.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			client := k8s.NewForClient(cs, "mayfly")
+			if err := client.CreateSession(ctx, spec); err != nil {
+				t.Fatal(err)
+			}
+			if err := client.DeletePod(ctx, spec.PodName, 0); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := m.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+			defer m.Shutdown(context.Background())
+
+			inst, ok := m.instance("p2")
+			if !ok {
+				t.Fatal("session was not adopted")
+			}
+			inst.mu.Lock()
+			status, reason, errText, finalized := inst.sess.Status, inst.closeReason, inst.sess.Error, inst.finalized
+			inst.mu.Unlock()
+			if !finalized || status != model.StatusCompleted {
+				t.Fatalf("status = %s finalized = %v, want completed", status, finalized)
+			}
+			if reason != llmCloseReason {
+				t.Fatalf("close reason = %q, want %q", reason, llmCloseReason)
+			}
+			if errText == "" || strings.Contains(errText, "close grace period exceeded") {
+				t.Fatalf("session error = %q", errText)
+			}
+
+			// A reap far past the grace period must not turn the finished
+			// close into a failure.
+			inst.mu.Lock()
+			inst.closeRequestedAt = time.Now().UTC().Add(-time.Hour)
+			inst.mu.Unlock()
+			m.reap()
+			sess, ok := m.Get("p2")
+			if !ok || sess.Status != model.StatusCompleted {
+				t.Fatalf("after reap status = %s ok = %v", sess.Status, ok)
+			}
+			inst.mu.Lock()
+			reason = inst.closeReason
+			inst.mu.Unlock()
+			if reason != llmCloseReason {
+				t.Fatalf("after reap close reason = %q", reason)
+			}
+
+			time.Sleep(50 * time.Millisecond)
+			if specs := starts.specs(); len(specs) != 0 {
+				t.Fatalf("started %d replacements for an exhausted session", len(specs))
+			}
+		})
 	}
 }
 

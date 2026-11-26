@@ -835,6 +835,40 @@ func TestSessionByteLimits(t *testing.T) {
 	}
 }
 
+func TestSessionLLMBudget(t *testing.T) {
+	cfg := Default()
+	if cfg.Sessions.MaxLLMTokens != 0 || cfg.Sessions.MaxLLMRequests != 0 {
+		t.Fatalf("defaults = %d / %d, want no budget", cfg.Sessions.MaxLLMTokens, cfg.Sessions.MaxLLMRequests)
+	}
+	decoder := yaml.NewDecoder(strings.NewReader("sessions:\n  max_llm_tokens: 100000\n  max_llm_requests: 25\n"))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sessions.MaxLLMTokens != 100000 || cfg.Sessions.MaxLLMRequests != 25 {
+		t.Fatalf("loaded budget = %d / %d", cfg.Sessions.MaxLLMTokens, cfg.Sessions.MaxLLMRequests)
+	}
+	cfg.applyDefaults()
+	if cfg.Sessions.MaxLLMTokens != 100000 || cfg.Sessions.MaxLLMRequests != 25 {
+		t.Fatal("defaults replaced a configured budget")
+	}
+	valid := validBase()
+	valid.Sessions.MaxLLMTokens = 100000
+	valid.Sessions.MaxLLMRequests = 25
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("positive budget: %v", err)
+	}
+	valid.Sessions.MaxLLMTokens = -1
+	if err := valid.Validate(); err == nil {
+		t.Fatal("a negative token budget was accepted")
+	}
+	valid.Sessions.MaxLLMTokens = 0
+	valid.Sessions.MaxLLMRequests = -1
+	if err := valid.Validate(); err == nil {
+		t.Fatal("a negative request budget was accepted")
+	}
+}
+
 func TestBodyReadTimeoutDefaults(t *testing.T) {
 	cfg := Default()
 	if got := cfg.Server.BodyReadTimeout.Std(); got != DefaultBodyReadTimeout {
