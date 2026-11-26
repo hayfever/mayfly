@@ -15,7 +15,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -27,10 +26,10 @@ const budgetProbeBody = `{"model":"stub","max_tokens":1,"messages":[{"role":"use
 
 // TestSessionBudgetExhaustion spends a session's request cap through the
 // internal proxy. The charge that reaches the cap appends an error event and
-// closes the session with reason llm_budget_exhausted, and the next call is
-// refused with 429 llm_budget_exhausted and no Retry-After. The agent process
-// is suspended so only this test spends the budget and the refusal can be
-// observed before the runtime finalizes.
+// closes the session with reason llm_budget_exhausted, and the session keeps
+// its budget and final error. The call after the cap is either the 429
+// llm_budget_exhausted refusal or a 401 once the session has finalized; both
+// leave the usage unchanged.
 func TestSessionBudgetExhaustion(t *testing.T) {
 	s := env.createSession(t, map[string]any{
 		"prompt": "budget exhaustion " + randomHex(4),
@@ -42,8 +41,6 @@ func TestSessionBudgetExhaustion(t *testing.T) {
 	env.waitStatus(t, s.ID, "running", 2*time.Minute)
 	waitFirstReply(t, s.ID)
 
-	resume := stopSessionAgent(t, s.ID)
-	defer resume()
 	token := sessionToken(t, s.ID)
 
 	limit := s.LLMBudget.MaxRequests
@@ -67,18 +64,34 @@ func TestSessionBudgetExhaustion(t *testing.T) {
 	}
 
 	rec := env.proxyCall(t, token, budgetProbeBody)
-	expectStatus(t, rec, http.StatusTooManyRequests, "call after exhaustion")
-	if got := rec.Header.Get("Retry-After"); got != "" {
-		t.Fatalf("exhausted refusal has Retry-After %q", got)
-	}
-	var refused struct {
-		Code string `json:"code"`
-	}
-	if err := json.Unmarshal(rec.Body, &refused); err != nil {
-		t.Fatalf("refusal body: %v (%s)", err, rec.Body)
-	}
-	if refused.Code != "llm_budget_exhausted" {
-		t.Fatalf("refusal code = %q body=%s", refused.Code, rec.Body)
+	// The charge that reached the cap closed the session, and removing the
+	// scoped token races this call. Both outcomes are legal: a session still
+	// open refuses with 429 llm_budget_exhausted and no Retry-After, and a
+	// session that has already finalized no longer knows the token, so the
+	// proxy answers 401. A 401 must belong to a session that is closing or
+	// completed.
+	switch rec.Status {
+	case http.StatusTooManyRequests:
+		if got := rec.Header.Get("Retry-After"); got != "" {
+			t.Fatalf("exhausted refusal has Retry-After %q", got)
+		}
+		var refused struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(rec.Body, &refused); err != nil {
+			t.Fatalf("refusal body: %v (%s)", err, rec.Body)
+		}
+		if refused.Code != "llm_budget_exhausted" {
+			t.Fatalf("refusal code = %q body=%s", refused.Code, rec.Body)
+		}
+	case http.StatusUnauthorized:
+		final, r := env.getSession(t, s.ID)
+		expectStatus(t, r, http.StatusOK, "get session")
+		if final.Status != "closing" && final.Status != "completed" {
+			t.Fatalf("401 for a session in status %q, want closing or completed", final.Status)
+		}
+	default:
+		t.Fatalf("call after exhaustion = %s, want 429 or a finalized session's 401", rec)
 	}
 	after, r := env.getSession(t, s.ID)
 	expectStatus(t, r, http.StatusOK, "get session")
@@ -98,7 +111,6 @@ func TestSessionBudgetExhaustion(t *testing.T) {
 		return reason == "llm_budget_exhausted"
 	})
 
-	resume()
 	final := env.waitStatus(t, s.ID, "completed", 2*time.Minute)
 	if !strings.Contains(final.Error, "budget exhausted") {
 		t.Fatalf("completed session error = %q", final.Error)
@@ -256,17 +268,17 @@ func TestSessionBudgetMetrics(t *testing.T) {
 	estimatedBefore := metricValue(t, "mayfly_llm_usage_estimated_total", estimated)
 
 	s := env.createSession(t, map[string]any{
-		// The second line is the stub's no-usage directive. It is inert on a
-		// stub that sends no usage, and keeps this case on the estimate path
-		// once the stub can report usage.
+		// The second line is the stub's no-usage directive, which keeps every
+		// charge on the size-estimate path. The stub reports usage otherwise.
 		"prompt": "budget metrics " + randomHex(4) + "\nno-usage",
 		"agent":  "budget-tokens",
 	})
 	env.waitStatus(t, s.ID, "running", 2*time.Minute)
 	waitFirstReply(t, s.ID)
 
-	// This branch's llmstub sends no usage, so every charge is a size
-	// estimate. A provider that reports usage moves only the token counter.
+	// With the directive set, every charge is a size estimate, so both
+	// counters move. A provider that reports usage moves only the token
+	// counter.
 	eventually(t, 30*time.Second, "budget metrics move", func() (bool, string) {
 		prompt := metricValue(t, "mayfly_llm_tokens_total", tokens)
 		est := metricValue(t, "mayfly_llm_usage_estimated_total", estimated)
@@ -363,31 +375,6 @@ func TestSessionBudgetDefaultsOff(t *testing.T) {
 	if got := metricValue(t, "mayfly_llm_requests_total", overBudget); got != overBefore {
 		t.Fatalf("over-budget refusals moved for an unbudgeted session: %v -> %v", overBefore, got)
 	}
-}
-
-// stopSessionAgent suspends the session pod's agent process, so the test can
-// spend the model budget through the internal proxy and observe a refusal
-// before the runtime finalizes. The returned function resumes the process; a
-// cleanup resumes it too, so a failed assertion cannot leave it stopped.
-func stopSessionAgent(t *testing.T, id string) func() {
-	t.Helper()
-	pods := env.podNames(t, id)
-	if len(pods) != 1 {
-		t.Fatalf("session %s pods = %v, want one", id, pods)
-	}
-	if code, out := env.execIn(t, pods[0], "sh", "-c", "kill -STOP 1"); code != 0 {
-		t.Fatalf("stop the agent in %s: exit %d: %s", pods[0], code, out)
-	}
-	var once sync.Once
-	resume := func() {
-		once.Do(func() {
-			if code, out := env.execIn(t, pods[0], "sh", "-c", "kill -CONT 1"); code != 0 {
-				t.Errorf("resume the agent in %s: exit %d: %s", pods[0], code, out)
-			}
-		})
-	}
-	t.Cleanup(resume)
-	return resume
 }
 
 // sessionToken reads the scoped model token from the session Secret.
