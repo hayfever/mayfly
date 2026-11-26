@@ -1090,11 +1090,16 @@ func (m *Manager) adoptPodless(ctx context.Context, id string, objs k8s.OrphanOb
 	m.hub.Create(id)
 	m.persistInstance(inst)
 	m.hub.Append(id, model.Event{Type: model.EventSystem, Actor: "mayfly", Text: "Session recovered by control plane restart."})
-	// A seeded ledger at its limit has nothing left to pay for, and no queued
-	// turn can run. Close before any redelivery; the replacement start that
-	// follows is a no-op once the session is closing.
-	m.closeExhaustedAdopted(inst)
 	m.restoreJournalThread(id)
+	// A seeded ledger at its limit has nothing left to pay for, and no queued
+	// turn can run. Close before any redelivery. There is no pod, so no
+	// runtime will finalize the close: complete it here instead of waiting
+	// out the close grace period, which would mark the session failed.
+	if closed, message := m.closeExhaustedAdopted(inst); closed {
+		m.finalize(inst, model.StatusCompleted, llmCloseReason, message)
+		m.logger.Info("adopted session without a pod; closed on its model budget", "session", id)
+		return nil, false
+	}
 	m.redeliverPending(inst)
 	m.logger.Info("adopted session without a pod; starting a replacement", "session", id)
 	return inst, true
