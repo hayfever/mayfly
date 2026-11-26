@@ -15,6 +15,8 @@ func postLLM(t *testing.T, server *httptest.Server, body string) *http.Response 
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The cleanup closes the body on every path, including the failure below;
+	// the JSON and stream helpers also close it once they have read it.
 	t.Cleanup(func() { _ = resp.Body.Close() })
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -22,13 +24,26 @@ func postLLM(t *testing.T, server *httptest.Server, body string) *http.Response 
 	return resp
 }
 
-func decodeLLMJSON(t *testing.T, resp *http.Response) map[string]any {
+// postLLMJSON posts one completion and decodes its JSON response. The body is
+// closed here once it has been read.
+func postLLMJSON(t *testing.T, server *httptest.Server, body string) map[string]any {
 	t.Helper()
-	var body map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	resp := postLLM(t, server, body)
+	defer func() { _ = resp.Body.Close() }()
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
-	return body
+	return payload
+}
+
+// postLLMStream posts one completion and returns its SSE chunks. The body is
+// closed here once it has been read.
+func postLLMStream(t *testing.T, server *httptest.Server, body string) []map[string]any {
+	t.Helper()
+	resp := postLLM(t, server, body)
+	defer func() { _ = resp.Body.Close() }()
+	return sseChunks(t, resp)
 }
 
 func sseChunks(t *testing.T, resp *http.Response) []map[string]any {
@@ -78,14 +93,14 @@ func TestLLMJSONUsageIsStable(t *testing.T) {
 	defer server.Close()
 
 	body := `{"model":"stub","messages":[{"role":"user","content":"hello world"}]}`
-	first, firstCompletion, _ := usageOf(t, decodeLLMJSON(t, postLLM(t, server, body)))
-	second, secondCompletion, _ := usageOf(t, decodeLLMJSON(t, postLLM(t, server, body)))
+	first, firstCompletion, _ := usageOf(t, postLLMJSON(t, server, body))
+	second, secondCompletion, _ := usageOf(t, postLLMJSON(t, server, body))
 	if first != second || firstCompletion != secondCompletion {
 		t.Fatalf("usage changed between identical requests: %v/%v then %v/%v", first, firstCompletion, second, secondCompletion)
 	}
 
 	longer := `{"model":"stub","messages":[{"role":"user","content":"` + strings.Repeat("hello world ", 20) + `"}]}`
-	bigger, _, _ := usageOf(t, decodeLLMJSON(t, postLLM(t, server, longer)))
+	bigger, _, _ := usageOf(t, postLLMJSON(t, server, longer))
 	if bigger <= first {
 		t.Fatalf("prompt tokens = %v for a longer prompt, want more than %v", bigger, first)
 	}
@@ -96,7 +111,7 @@ func TestLLMStreamUsageOnlyWhenRequested(t *testing.T) {
 	defer server.Close()
 
 	withUsage := `{"model":"stub","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}`
-	chunks := sseChunks(t, postLLM(t, server, withUsage))
+	chunks := postLLMStream(t, server, withUsage)
 	if len(chunks) < 2 {
 		t.Fatalf("chunks = %d, want at least 2", len(chunks))
 	}
@@ -116,7 +131,7 @@ func TestLLMStreamUsageOnlyWhenRequested(t *testing.T) {
 	}
 
 	without := `{"model":"stub","stream":true,"messages":[{"role":"user","content":"hi"}]}`
-	for i, chunk := range sseChunks(t, postLLM(t, server, without)) {
+	for i, chunk := range postLLMStream(t, server, without) {
 		if chunk["usage"] != nil {
 			t.Fatalf("chunk %d carries usage although include_usage was not set: %+v", i, chunk)
 		}
@@ -131,13 +146,13 @@ func TestLLMNoUsageDirective(t *testing.T) {
 	defer server.Close()
 
 	jsonBody := `{"model":"stub","messages":[{"role":"user","content":"do it\nno-usage"}]}`
-	body := decodeLLMJSON(t, postLLM(t, server, jsonBody))
+	body := postLLMJSON(t, server, jsonBody)
 	if usage, ok := body["usage"]; ok {
 		t.Fatalf("usage = %+v, want it omitted", usage)
 	}
 
 	streamBody := `{"model":"stub","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"do it\nno-usage"}]}`
-	for i, chunk := range sseChunks(t, postLLM(t, server, streamBody)) {
+	for i, chunk := range postLLMStream(t, server, streamBody) {
 		if chunk["usage"] != nil {
 			t.Fatalf("chunk %d carries usage although the prompt asked for none: %+v", i, chunk)
 		}
