@@ -39,7 +39,7 @@ The gate selects the two workflows differently:
 
 The workflow peels the target ref to its commit before the API query. An annotated tag (`git tag -a`, as this document uses) is a tag object, and a tag push can set `GITHUB_SHA` to that object. The gate runs `git rev-parse "${GITHUB_SHA}^{commit}"` so the lookup uses the commit the tag names, not the tag object.
 
-A tag push on a commit without the gate fails in the `gate` job. Nothing is built, signed, tagged, or published.
+A tag push on a commit without the gate fails in the `gate` job. Nothing is built, signed, tagged, or published. The gate runs on the commit the tag names, so the final release commit needs its own `ci` and 20-run `e2e-stability` history; a green candidate commit does not cover it.
 
 The decision is `hack/release-gate`, with the logic in `internal/releasegate`. It reads the `gh api` payloads and makes no network call. Unit tests and `FuzzDecide` cover a missing run, a failed run, a run with fewer than 20 e2e jobs, a failed `ci`, the rerun case, and run-name matching for a dispatch on `main`, including short, prefix, and embedded SHAs. Run it locally against saved `gh api` payloads with `go run ./hack/release-gate -sha <sha> -runs runs.json -jobs jobs.json`.
 
@@ -113,7 +113,9 @@ Each `cosign` command must print the workflow identity and the tag. The OIDC iss
 
 ## Pre-release checklist
 
-1. Update `CHANGELOG.md` and the chart `version` and `appVersion` if they differ from the tag. Replace `Unreleased` in the release heading with the tag date, for example `## [1.0.0-rc.1] - 2026-11-20`, in the commit you tag. Do this for an RC too.
+1. An RC and the final release use different commits.
+   - For an RC, update `CHANGELOG.md`, the chart `version` and `appVersion`, and `api/openapi.yaml` `info.version` in the commit you tag. Replace `Unreleased` in the release heading with the tag date, for example `## [1.0.0-rc.1] - 2026-11-20`.
+   - For the final release, make one release commit on top of the candidate commit that passed. The commit changes only release metadata: the dated `## [1.0.0] - <date>` heading, the chart `version` and `appVersion`, `api/openapi.yaml` `info.version`, and the current-release strings in `README.md` and `docs`. Run `ci` and the 20-run `e2e-stability` gate on that release commit before you tag `v1.0.0` on it.
 2. Run the full test path:
 
 ```bash
@@ -175,7 +177,9 @@ git tag -a vX.Y.Z-rc.1 -m "Mayfly vX.Y.Z-rc.1"
 git push origin vX.Y.Z-rc.1
 ```
 
-The same gated workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`). Its `make_latest` setting is the template `{{ if .Prerelease }}false{{ else }}true{{ end }}`, so GoReleaser creates an RC without the `latest` marker and a final release with it. The `publish` job repeats the decision: it passes `--latest=false` for a tag that contains `-` and `--latest=true` otherwise, then checks `isLatest`. An RC never becomes latest. The release stays a draft until `publish` runs. The image tags come from the semver patterns in `release.yml`: an RC tag like `v1.0.0-rc.1` publishes only `1.0.0-rc.1`. `docker/metadata-action` skips the `{{major}}.{{minor}}` pattern for a pre-release, and `latest` is enabled only for a tag with no `-`. The chart is pushed as `1.0.0-rc.1`. Install it with `--version 1.0.0-rc.1`. When the candidate passes, tag `v1.0.0` on the same commit; that tag publishes `1.0.0`, `1.0`, and `latest`.
+The same gated workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`). Its `make_latest` setting is the template `{{ if .Prerelease }}false{{ else }}true{{ end }}`, so GoReleaser creates an RC without the `latest` marker and a final release with it. The `publish` job repeats the decision: it passes `--latest=false` for a tag that contains `-` and `--latest=true` otherwise, then checks `isLatest`. An RC never becomes latest. The release stays a draft until `publish` runs. The image tags come from the semver patterns in `release.yml`: an RC tag like `v1.0.0-rc.1` publishes only `1.0.0-rc.1`. `docker/metadata-action` skips the `{{major}}.{{minor}}` pattern for a pre-release, and `latest` is enabled only for a tag with no `-`. The chart is pushed as `1.0.0-rc.1`. Install it with `--version 1.0.0-rc.1`.
+
+When a candidate passes, do not tag `v1.0.0` on the candidate commit. Make the release commit described in step 1 of the [Pre-release checklist](#pre-release-checklist) on top of the candidate commit. That commit changes only release metadata, so it needs its own `ci` run and its own 20-run `e2e-stability` gate. Tag `v1.0.0` on that release commit. Only the final tag publishes `1.0.0`, `1.0`, and `latest`.
 
 ## Post-release verification
 

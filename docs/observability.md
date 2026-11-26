@@ -46,7 +46,7 @@ The registry also includes the standard Prometheus Go and process collectors. Th
 
 ## Request logs
 
-Every request writes one line at info level with these fields:
+Every request writes one line. A successful health probe or metrics scrape (`GET /healthz`, `GET /readyz`, `GET /metrics`) logs at debug level. Every other request, and a probe or scrape that returns 400 or above, logs at info level. The line has these fields:
 
 - `request_id`
 - `method`

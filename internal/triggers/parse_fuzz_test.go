@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hayfever/mayfly/internal/config"
 )
@@ -93,10 +94,15 @@ func FuzzParseUntrusted(f *testing.F) {
 			t.Fatalf("trigger kind = %q, want %q", res.Options.Trigger.Kind, kind)
 		}
 
-		// Delivery key precedence: the sender's delivery, then the header.
+		// Delivery key precedence: the sender's delivery, then the header. A
+		// delivery key must be valid UTF-8, so an invalid GitHub delivery never
+		// reaches this point as an accepted request.
 		switch kind {
 		case "github":
 			if delivery != "" {
+				if !utf8.ValidString(delivery) {
+					t.Fatalf("accepted a delivery key that is not valid UTF-8: %q", delivery)
+				}
 				if res.DeliveryKey != delivery {
 					t.Fatalf("delivery key = %q, want %q", res.DeliveryKey, delivery)
 				}

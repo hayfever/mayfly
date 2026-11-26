@@ -4,6 +4,8 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] - 2026-11-26
+
 ### Added
 
 - `hack/e2e.sh` and `hack/k3d-up.sh` import images through `hack/lib/k3d-images.sh`, which checks every image on every k3d server and agent node after the import, retries the missing images three times with backoff, and fails with `image X missing on node Y` plus a per-node image list. `hack/test-k3d-images.sh` checks the name matcher with fixture JSON (#52).
@@ -26,11 +28,14 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ### Changed
 
+- Every third-party GitHub Action in `.github/workflows` is pinned to a full commit SHA with the release tag in a trailing comment, and the root `Dockerfile` base images are pinned to their multi-arch index digests. Dependabot keeps the pins current (#51).
+- A successful health probe or metrics scrape (`GET /healthz`, `GET /readyz`, `GET /metrics`) logs at debug level instead of info. A failed probe or scrape, and every other request, stays at info (#51).
 - The release workflow gates every `v*` tag, including release candidates, on a green `ci` run and a successful 20-run `e2e-stability` run for the tagged commit. A failed gate fails before anything is built or published, and a successful rerun attempt counts for both workflows. A stability dispatch counts by `head_sha` or by an exact `sha=<40-hex>` run-name, so a run dispatched on `main` covers the commit it names. An annotated tag is peeled to its commit before the lookup (#50).
 - The GitHub release is created as a draft and stays a draft until the images, chart, and signatures exist; a final `publish` job makes it public with an explicit `latest` value. A final release is latest and an RC is not, decided by a goreleaser `make_latest` template and by the same check in `publish`. Image digests are signed before their tags are created, and `checksums.txt` carries a keyless cosign bundle that `cosign verify-blob` checks (#50).
 
 ### Fixed
 
+- A webhook delivery key (`X-GitHub-Delivery`, Slack `trigger_id`, or `Idempotency-Key`) that is not valid UTF-8 is rejected with `400` instead of sanitized to U+FFFD. Sanitizing mapped two different deliveries to one dedupe key, so the second was dropped as a duplicate. Accepted keys stay valid UTF-8 and are used verbatim, and `FuzzParseUntrusted` keeps the failing input as a seed (#61 follow-up, scheduled verify run 45635308722).
 - A model call that reports no usage is billed its request bytes over four plus its response bytes over four, and the completion part stops at the call's `max_tokens`. One estimated call therefore never charges more than the reservation the admit hook recorded (#49).
 - A model call that panics after it was admitted is counted in `mayfly_llm_requests_total` and `mayfly_llm_request_duration_seconds`, and a reservation the record store cannot keep is labeled `persist_failed` in `mayfly_llm_requests_total` instead of `error` (#49).
 - A Streamable HTTP MCP server that answers with `text/event-stream` can deliver a legal image tool result: the SSE decoder, the HTTP JSON body, and the stdio line share an 8 MiB response bound instead of a 4 MiB SSE line bound (#71).
@@ -271,6 +276,7 @@ Historical: these describe 0.1.0, and many no longer apply. See the README for c
 - Sidecar calls carry a short-lived token signed with the session's `gateway-key`, which is mounted only into sidecars. Service calls carry a token signed with the per-plugin key in `mayfly-gateway-<name>`.
 - The default NetworkPolicy requires a CNI that enforces it. The e2e suite verifies enforcement.
 
+[1.0.0-rc.3]: https://github.com/hayfever/mayfly/releases/tag/v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/hayfever/mayfly/releases/tag/v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/hayfever/mayfly/releases/tag/v1.0.0-rc.1
 [0.3.0]: https://github.com/hayfever/mayfly/releases/tag/v0.3.0

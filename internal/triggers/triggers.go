@@ -16,6 +16,7 @@ import (
 	"strings"
 	"text/template"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hayfever/mayfly/internal/config"
 	"github.com/hayfever/mayfly/internal/model"
@@ -57,13 +58,32 @@ func Parse(cfg config.TriggerConfig, header http.Header, body []byte) (*Result, 
 	if err != nil {
 		return nil, err
 	}
-	if result.DeliveryKey == "" {
-		result.DeliveryKey = strings.TrimSpace(header.Get("Idempotency-Key"))
+	key, err := deliveryKey(header, result.DeliveryKey)
+	if err != nil {
+		return nil, err
 	}
-	if result.DeliveryKey != "" {
-		result.Options.Trigger.Delivery = result.DeliveryKey
+	result.DeliveryKey = key
+	if key != "" {
+		result.Options.Trigger.Delivery = key
 	}
 	return result, nil
+}
+
+// deliveryKey returns the sender's delivery key, or the trimmed
+// Idempotency-Key header when the sender sends none. A key that is not valid
+// UTF-8 is rejected. The key is the dedupe identity, and replacing invalid
+// bytes with U+FFFD would map two different deliveries to one key and drop the
+// second as a duplicate. GitHub delivery ids are ASCII UUIDs, so a delivery
+// with invalid UTF-8 did not come from GitHub.
+func deliveryKey(header http.Header, sender string) (string, error) {
+	key := sender
+	if key == "" {
+		key = strings.TrimSpace(header.Get("Idempotency-Key"))
+	}
+	if key != "" && !utf8.ValidString(key) {
+		return "", fmt.Errorf("%w: delivery key is not valid UTF-8", ErrBadRequest)
+	}
+	return key, nil
 }
 
 func parse(cfg config.TriggerConfig, header http.Header, body []byte) (*Result, error) {
@@ -202,7 +222,9 @@ func parseGitHub(cfg config.TriggerConfig, header http.Header, body []byte) (*Re
 		return nil, ErrUnauthorized
 	}
 	event := textutil.Valid(header.Get("X-GitHub-Event"))
-	delivery := textutil.Valid(header.Get("X-GitHub-Delivery"))
+	// The delivery is the dedupe key, so Parse rejects an invalid key instead
+	// of replacing invalid bytes. The display copy is the same string.
+	delivery := header.Get("X-GitHub-Delivery")
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrBadRequest, err)
