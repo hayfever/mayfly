@@ -17,7 +17,7 @@ Routine operations for one Mayfly control plane. The examples use release `mayfl
 3. Run the upgrade:
 
 ```bash
-helm upgrade mayfly oci://ghcr.io/<owner>/charts/mayfly --version 1.0.0-rc.2 \
+helm upgrade mayfly oci://ghcr.io/<owner>/charts/mayfly --version 1.0.0-rc.3 \
   -n mayfly -f values.yaml
 kubectl -n mayfly rollout status deployment/mayfly --timeout=3m
 ```

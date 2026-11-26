@@ -4,6 +4,8 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] - 2026-11-26
+
 ### Added
 
 - `hack/e2e.sh` and `hack/k3d-up.sh` import images through `hack/lib/k3d-images.sh`, which checks every image on every k3d server and agent node after the import, retries the missing images three times with backoff, and fails with `image X missing on node Y` plus a per-node image list. `hack/test-k3d-images.sh` checks the name matcher with fixture JSON (#52).
@@ -274,6 +276,7 @@ Historical: these describe 0.1.0, and many no longer apply. See the README for c
 - Sidecar calls carry a short-lived token signed with the session's `gateway-key`, which is mounted only into sidecars. Service calls carry a token signed with the per-plugin key in `mayfly-gateway-<name>`.
 - The default NetworkPolicy requires a CNI that enforces it. The e2e suite verifies enforcement.
 
+[1.0.0-rc.3]: https://github.com/hayfever/mayfly/releases/tag/v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/hayfever/mayfly/releases/tag/v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/hayfever/mayfly/releases/tag/v1.0.0-rc.1
 [0.3.0]: https://github.com/hayfever/mayfly/releases/tag/v0.3.0
