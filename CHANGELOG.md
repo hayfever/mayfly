@@ -4,6 +4,10 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ## [Unreleased]
 
+### Fixed
+
+- The e2e `TestSessionLLMBusyDoesNotCharge` no longer assumes a model call is settled when the agent's reply is visible. It probes the proxy until the earlier call releases the session's in-flight slot, retries the slow call while it is refused `llm_busy`, and asserts the ledger from that settled baseline. `spec/tla/TokenBudget.tla` separates `Observe` (the client has `data: [DONE]`) from `Charge` (the slot is released), checks `ObserveKeepsSlot` and `NoBusyAfterSettled`, proves `BusyRetryAdmitted`, and `TokenBudget_observe_implies_settled_buggy.cfg` must fail on `NoBusyAfterSettled`; `TestInternalLLMBusyUntilUpstreamEOF` and `FuzzServeLLMBudget` cover the same window. `hack/e2e.sh` streams each control-plane pod's log into `$E2E_ARTIFACTS/pods`, so a pod that a restart or upgrade test deletes still leaves its log (#49 follow-up).
+
 ## [1.0.0-rc.3] - 2026-11-26
 
 ### Added

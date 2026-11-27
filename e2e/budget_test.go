@@ -123,6 +123,12 @@ func TestSessionBudgetExhaustion(t *testing.T) {
 // TestSessionLLMBusyDoesNotCharge overlaps two proxy calls of one budgeted
 // session. The second gets 429 llm_busy with Retry-After and leaves the running
 // call's ledger alone, and a retry after the first finishes is admitted.
+//
+// The assistant reply is visible when the agent's client reads "data: [DONE]",
+// but the control plane settles the call only when the broker reaches upstream
+// EOF, which a throttled node can delay. The test therefore probes the route
+// until it is admitted before it reads the baseline, and it retries the slow
+// call while the answer is llm_busy, the retry the runtime itself applies.
 func TestSessionLLMBusyDoesNotCharge(t *testing.T) {
 	s := env.createSession(t, map[string]any{
 		"prompt": "budget overlap " + randomHex(4),
@@ -132,87 +138,164 @@ func TestSessionLLMBusyDoesNotCharge(t *testing.T) {
 	waitFirstReply(t, s.ID)
 	token := sessionToken(t, s.ID)
 
+	// An admitted probe proves that the agent's first call released the
+	// session's single in-flight slot, so the usage read below is the settled
+	// baseline. A probe refused as llm_busy changes nothing.
+	eventually(t, time.Minute, "the agent's first call settled", func() (bool, string) {
+		rec := env.proxyCall(t, token, budgetProbeBody)
+		switch {
+		case rec.Status == http.StatusOK:
+			return true, ""
+		case rec.Status == http.StatusTooManyRequests && refusalCode(rec) == "llm_busy":
+			return false, "a call is still in flight"
+		}
+		t.Fatalf("settle probe = %s", rec)
+		return false, ""
+	})
+
 	before, r := env.getSession(t, s.ID)
 	expectStatus(t, r, http.StatusOK, "get session")
 	if before.LLMUsage == nil {
 		t.Fatal("budgeted session has no usage")
 	}
 
-	// The stub sleeps five seconds before this reply, so the call holds the
-	// session's only in-flight slot while the second call arrives.
+	// The stub sleeps five seconds before this reply, so an admitted call
+	// holds the session's only in-flight slot while the second call arrives.
 	const slowBody = `{"model":"stub","max_tokens":1,"messages":[{"role":"user","content":"resume-slow-final overlap"}]}`
 	type outcome struct {
-		rec response
-		err error
+		rec     response
+		err     error
+		refused []string
 	}
 	first := make(chan outcome, 1)
 	go func() {
-		rec, err := env.proxy(token, slowBody)
-		first <- outcome{rec, err}
+		rec, refused, err := env.proxyBusyRetry(token, slowBody, 10*time.Second)
+		first <- outcome{rec: rec, err: err, refused: refused}
 	}()
-	eventually(t, 30*time.Second, "first call admitted", func() (bool, string) {
-		cur, r := env.getSession(t, s.ID)
-		if r.Status != http.StatusOK || cur.LLMUsage == nil {
-			return false, r.String()
+
+	// A call refused as busy never increments the request count, so the count
+	// moves only when the slow call is admitted. Another agent call can move it
+	// too: the runtime retries its own refused call, and the queue may deliver
+	// the prompt twice. The overlap check below then retries the probe.
+	var finished *outcome
+	drain := func() *outcome {
+		if finished != nil {
+			return finished
 		}
-		return cur.LLMUsage.Requests == before.LLMUsage.Requests+1, fmt.Sprintf("requests=%d", cur.LLMUsage.Requests)
-	})
-	select {
-	case got := <-first:
-		t.Fatalf("the slow call finished before the overlap: %s err=%v", got.rec, got.err)
-	default:
+		select {
+		case got := <-first:
+			finished = &got
+		default:
+		}
+		return finished
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		cur, r := env.getSession(t, s.ID)
+		expectStatus(t, r, http.StatusOK, "get session")
+		if cur.LLMUsage == nil {
+			t.Fatal("budgeted session has no usage")
+		}
+		state := fmt.Sprintf("requests=%d (before %d)", cur.LLMUsage.Requests, before.LLMUsage.Requests)
+		if cur.LLMUsage.Requests >= before.LLMUsage.Requests+1 {
+			break
+		}
+		if got := drain(); got != nil {
+			t.Fatalf("the slow call finished before the overlap: %s err=%v refused=%v; %s", got.rec, got.err, got.refused, state)
+		}
+		if time.Now().After(deadline) {
+			if got := drain(); got != nil {
+				t.Fatalf("first call not admitted within 30s: %s; slow call %s err=%v refused=%v", state, got.rec, got.err, got.refused)
+			}
+			t.Fatalf("first call not admitted within 30s: %s; the slow call is still running", state)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if got := drain(); got != nil {
+		t.Fatalf("the slow call finished before the overlap: %s err=%v refused=%v", got.rec, got.err, got.refused)
 	}
 
-	during, r := env.getSession(t, s.ID)
-	expectStatus(t, r, http.StatusOK, "get session")
-	rec := env.proxyCall(t, token, budgetProbeBody)
-	expectStatus(t, rec, http.StatusTooManyRequests, "overlapping call")
-	if got := rec.Header.Get("Retry-After"); got == "" || got == "0" {
-		t.Fatalf("busy refusal Retry-After = %q", got)
-	}
-	var refused struct {
-		Code string `json:"code"`
-	}
-	if err := json.Unmarshal(rec.Body, &refused); err != nil {
-		t.Fatalf("refusal body: %v (%s)", err, rec.Body)
-	}
-	if refused.Code != "llm_busy" {
-		t.Fatalf("refusal code = %q body=%s", refused.Code, rec.Body)
+	// The overlap only proves anything while the slow call holds the slot. A
+	// probe the control plane admits means the slot was free again, so retry
+	// while the slow call still runs.
+	var during session
+	for attempt := 0; ; attempt++ {
+		during, r = env.getSession(t, s.ID)
+		expectStatus(t, r, http.StatusOK, "get session")
+		rec := env.proxyCall(t, token, budgetProbeBody)
+		if rec.Status == http.StatusOK {
+			if got := drain(); got != nil {
+				t.Fatalf("the slow call finished before the overlap: %s err=%v refused=%v", got.rec, got.err, got.refused)
+			}
+			if attempt >= 20 {
+				t.Fatalf("no overlapping call was refused as busy: last = %s", rec)
+			}
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		expectBusyRefusal(t, rec, "overlapping call")
+		// Confirm that the slot is still held: an agent call settles in
+		// milliseconds, while the stub sleeps five seconds before the slow
+		// call's reply, so a second refusal after a pause belongs to the slow
+		// call.
+		time.Sleep(200 * time.Millisecond)
+		second := env.proxyCall(t, token, budgetProbeBody)
+		if second.Status != http.StatusTooManyRequests {
+			if got := drain(); got != nil {
+				t.Fatalf("the slow call finished before the overlap: %s err=%v refused=%v", got.rec, got.err, got.refused)
+			}
+			if attempt >= 20 {
+				t.Fatalf("the overlapping call was admitted on the confirm probe: %s", second)
+			}
+			continue
+		}
+		expectBusyRefusal(t, second, "confirming call")
+		break
 	}
 	afterBusy, r := env.getSession(t, s.ID)
 	expectStatus(t, r, http.StatusOK, "get session")
 	if afterBusy.LLMUsage == nil || *afterBusy.LLMUsage != *during.LLMUsage {
-		t.Fatalf("busy refusal settled the running call: %+v -> %+v", during.LLMUsage, afterBusy.LLMUsage)
+		t.Fatalf("busy refusals settled the running call: %+v -> %+v", during.LLMUsage, afterBusy.LLMUsage)
 	}
 
-	var got outcome
-	select {
-	case got = <-first:
-	case <-time.After(20 * time.Second):
-		t.Fatal("the slow call did not finish")
+	slow := outcome{}
+	if got := drain(); got != nil {
+		slow = *got
+	} else {
+		select {
+		case slow = <-first:
+			finished = &slow
+		case <-time.After(20 * time.Second):
+			t.Fatal("the slow call did not finish")
+		}
 	}
-	if got.err != nil {
-		t.Fatalf("slow call: %v", got.err)
+	if slow.err != nil {
+		t.Fatalf("slow call: %v", slow.err)
 	}
-	expectStatus(t, got.rec, http.StatusOK, "slow call")
+	expectStatus(t, slow.rec, http.StatusOK, "slow call")
 
-	// The running call's charge landed once it finished.
+	// The running call's charge landed once it finished. A concurrent agent
+	// call may settle on top of it, so the baseline is a lower bound.
 	settled, r := env.getSession(t, s.ID)
 	expectStatus(t, r, http.StatusOK, "get session")
-	if settled.LLMUsage == nil || settled.LLMUsage.Requests != before.LLMUsage.Requests+1 ||
-		settled.LLMUsage.PromptTokens+settled.LLMUsage.CompletionTokens <=
-			before.LLMUsage.PromptTokens+before.LLMUsage.CompletionTokens {
+	if settled.LLMUsage == nil || settled.LLMUsage.Requests < before.LLMUsage.Requests+1 ||
+		settled.LLMUsage.Total() <= before.LLMUsage.Total() {
 		t.Fatalf("first call was not charged: before %+v after %+v", before.LLMUsage, settled.LLMUsage)
 	}
 
-	// The slot was released: a retry is admitted, not refused as busy.
-	if rec := env.proxyCall(t, token, budgetProbeBody); rec.Status != http.StatusOK {
-		t.Fatalf("retry after the first call = %s", rec)
+	// The slot was released: a retry is admitted, not refused as busy. A
+	// leaked slot never frees, so the bounded retry still fails the test.
+	retry, refused, err := env.proxyBusyRetry(token, budgetProbeBody, 10*time.Second)
+	if err != nil {
+		t.Fatalf("retry after the first call: %v", err)
+	}
+	if retry.Status != http.StatusOK {
+		t.Fatalf("retry after the first call = %s refused=%v", retry, refused)
 	}
 	retried, r := env.getSession(t, s.ID)
 	expectStatus(t, r, http.StatusOK, "get session")
-	if retried.LLMUsage == nil || retried.LLMUsage.Requests != before.LLMUsage.Requests+2 {
-		t.Fatalf("requests after the retry = %+v, want %d", retried.LLMUsage, before.LLMUsage.Requests+2)
+	if retried.LLMUsage == nil || retried.LLMUsage.Requests < before.LLMUsage.Requests+2 {
+		t.Fatalf("requests after the retry = %+v, want at least %d", retried.LLMUsage, before.LLMUsage.Requests+2)
 	}
 }
 
@@ -420,6 +503,53 @@ func (c *cluster) proxyCall(t *testing.T, token, body string) response {
 		t.Fatalf("internal LLM call: %v", err)
 	}
 	return rec
+}
+
+// proxyBusyRetry calls one completion and retries while the control plane
+// refuses it as llm_busy, which is the retry the runtime applies to the same
+// error. It takes no testing.T, so a goroutine can use it. It returns the last
+// response and the refusals it saw before it.
+func (c *cluster) proxyBusyRetry(token, body string, window time.Duration) (response, []string, error) {
+	deadline := time.Now().Add(window)
+	var refused []string
+	for {
+		rec, err := c.proxy(token, body)
+		if err != nil {
+			return rec, refused, err
+		}
+		if rec.Status == http.StatusTooManyRequests && refusalCode(rec) == "llm_busy" && time.Now().Before(deadline) {
+			refused = append(refused, "429 llm_busy")
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		return rec, refused, nil
+	}
+}
+
+// refusalCode reads the machine-readable code of an error body, which the
+// control plane writes as {"error":"...","code":"..."}. It returns an empty
+// string for a body that carries none.
+func refusalCode(rec response) string {
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(rec.Body, &body); err != nil {
+		return ""
+	}
+	return body.Code
+}
+
+// expectBusyRefusal asserts the contract of a call the control plane refused
+// because another call holds the session's in-flight slot.
+func expectBusyRefusal(t *testing.T, rec response, what string) {
+	t.Helper()
+	expectStatus(t, rec, http.StatusTooManyRequests, what)
+	if got := rec.Header.Get("Retry-After"); got == "" || got == "0" {
+		t.Fatalf("%s Retry-After = %q", what, got)
+	}
+	if code := refusalCode(rec); code != "llm_busy" {
+		t.Fatalf("%s code = %q body=%s", what, code, rec.Body)
+	}
 }
 
 // waitFirstReply waits for the agent to finish its first turn.

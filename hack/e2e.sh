@@ -51,6 +51,67 @@ die() { echo "e2e: $*" >&2; exit 1; }
 k() { kubectl --context "$CONTEXT" "$@"; }
 kn() { kubectl --context "$CONTEXT" -n "$NAMESPACE" "$@"; }
 
+CONTROL_PLANE_SELECTOR="app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component=control-plane"
+LOG_STREAM_PID=""
+LOG_STREAM_PIDFILE=""
+
+# stop_log_stream_children ends the kubectl log processes the watcher started.
+stop_log_stream_children() {
+  if [[ -n "$LOG_STREAM_PIDFILE" && -f "$LOG_STREAM_PIDFILE" ]]; then
+    while read -r pid; do
+      if [[ -n "$pid" ]]; then
+        kill "$pid" 2>/dev/null || true
+      fi
+    done <"$LOG_STREAM_PIDFILE"
+  fi
+}
+
+# start_log_streams follows every control-plane pod into $ARTIFACTS/pods. The
+# restart and upgrade tests delete the control-plane pod, and a deleted pod's
+# log is gone with it, so each pod is streamed from its first line for as long
+# as it exists. The streams only write under $ARTIFACTS and cannot change the
+# suite's outcome; stop_log_streams ends them on every exit path.
+start_log_streams() {
+  local dir="$ARTIFACTS/pods"
+  local seen="$dir/.seen"
+  mkdir -p "$dir"
+  : >"$seen"
+  LOG_STREAM_PIDFILE="$dir/.pids"
+  : >"$LOG_STREAM_PIDFILE"
+  (
+    trap 'stop_log_stream_children; exit 0' TERM INT
+    while :; do
+      pods="$(kn get pods -l "$CONTROL_PLANE_SELECTOR" \
+        -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+      # shellcheck disable=SC2086 # the jsonpath output is one name per line.
+      for pod in $pods; do
+        if ! grep -qxF "$pod" "$seen"; then
+          printf '%s\n' "$pod" >>"$seen"
+          # Call kubectl directly, not through kn: $! must name the streaming
+          # process so stop_log_stream_children can end it.
+          kubectl --context "$CONTEXT" -n "$NAMESPACE" logs -f "$pod" --all-containers --tail=-1 \
+            >"$dir/$pod.log" 2>&1 &
+          printf '%s\n' "$!" >>"$LOG_STREAM_PIDFILE"
+        fi
+      done
+      sleep 2
+    done
+  ) &
+  LOG_STREAM_PID=$!
+}
+
+stop_log_streams() {
+  if [[ -n "$LOG_STREAM_PID" ]]; then
+    kill "$LOG_STREAM_PID" 2>/dev/null || true
+    wait "$LOG_STREAM_PID" 2>/dev/null || true
+    LOG_STREAM_PID=""
+  fi
+  stop_log_stream_children
+  if [[ -n "$LOG_STREAM_PIDFILE" ]]; then
+    rm -f "$LOG_STREAM_PIDFILE"
+  fi
+}
+
 need() {
   for tool in "$@"; do
     command -v "$tool" >/dev/null || die "$tool is required"
@@ -183,15 +244,18 @@ diagnostics() {
 run_tests() {
   need go kubectl
   mkdir -p "$ARTIFACTS"
+  start_log_streams
   log "running the e2e suite against $CONTEXT/$NAMESPACE"
   # shellcheck disable=SC2086
   if MAYFLY_E2E_KUBECONTEXT="$CONTEXT" MAYFLY_E2E_NAMESPACE="$NAMESPACE" MAYFLY_E2E_RELEASE="$RELEASE" \
     MAYFLY_E2E_PLUGIN_IMAGE="$IMG_PLUGIN" MAYFLY_E2E_PLUGIN_MISSING_IMAGE="$IMG_PLUGIN_MISSING" \
     go test -tags e2e -count=1 -timeout 30m -v $GO_TEST_FLAGS ./e2e 2>&1 | tee "$ARTIFACTS/go-test.log"; then
     kn logs "deployment/$RELEASE" --tail=-1 >"$ARTIFACTS/mayflyd.log" 2>&1 || true
+    stop_log_streams
     return 0
   fi
   diagnostics
+  stop_log_streams
   return 1
 }
 
@@ -209,12 +273,19 @@ down() {
 
 case "${1:-all}" in
   up) up ;;
-  test) run_tests ;;
+  test)
+    trap stop_log_streams EXIT
+    trap 'exit 130' INT TERM
+    run_tests
+    ;;
   down) down ;;
   all)
     if [[ "$KEEP" != 1 ]]; then
-      trap down EXIT
+      trap 'stop_log_streams; down' EXIT
+    else
+      trap stop_log_streams EXIT
     fi
+    trap 'exit 130' INT TERM
     up
     run_tests
     ;;
