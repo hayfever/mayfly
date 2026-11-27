@@ -142,6 +142,50 @@ jobs:
           path: ${{ runner.temp }}/result
           if-no-files-found: ignore
 
+  # The scan runs before the long matrix: a fixable CVE fails the gate in
+  # minutes instead of after 20 e2e runs. It builds the gated commit's images
+  # without pushing them, exactly as ci does. The job name avoids the
+  # `e2e (<run>/<queue>)` pattern that internal/releasegate counts.
+  preflight-scan:
+    name: preflight-scan (${{ matrix.image }})
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [mayflyd, mayfly-agent]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: read the Trivy version
+        id: trivy-version
+        run: echo "value=$(cat .github/trivy-version)" >> "$GITHUB_OUTPUT"
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ steps.trivy-version.outputs.value }}
+      - name: build without pushing
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/images/${{ matrix.image }}"
+          mkdir -p "$dir"
+          for platform in linux/amd64 linux/arm64; do
+            docker buildx build \
+              --file ./Dockerfile \
+              --target "${{ matrix.image }}" \
+              --platform "$platform" \
+              --build-arg VERSION=0.0.0-stability \
+              --build-arg COMMIT="${{ needs.plan.outputs.sha }}" \
+              --build-arg DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --output "type=docker,dest=${dir}/${platform//\//-}.tar" \
+              .
+          done
+      - name: scan both platforms
+        run: hack/image-scan.sh --dir "$RUNNER_TEMP/images/${{ matrix.image }}"
+
   unit-stress:
     name: unit stress
     needs: plan
@@ -159,7 +203,7 @@ jobs:
 
   gate:
     name: gate
-    needs: [plan, e2e, unit-stress]
+    needs: [plan, preflight-scan, e2e, unit-stress]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -171,6 +215,7 @@ jobs:
           merge-multiple: true
       - name: decide
         env:
+          PREFLIGHT_RESULT: ${{ needs.preflight-scan.result }}
           E2E_RESULT: ${{ needs.e2e.result }}
           STRESS_RESULT: ${{ needs.unit-stress.result }}
           RUNS: ${{ needs.plan.outputs.runs }}
@@ -185,11 +230,11 @@ jobs:
                 (if $r.result == "success" then "pass" else "fail" end) + " |"' "$file"
             done
             echo
-            echo "E2E runs: \`${E2E_RESULT}\`. Unit stress: \`${STRESS_RESULT}\`."
+            echo "E2E runs: \`${E2E_RESULT}\`. Unit stress: \`${STRESS_RESULT}\`. Image scan: \`${PREFLIGHT_RESULT}\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if [[ "$E2E_RESULT" != "success" || "$STRESS_RESULT" != "success" ]]; then
-            echo "the stability gate is red: e2e=${E2E_RESULT} unit-stress=${STRESS_RESULT}" >&2
+          if [[ "$PREFLIGHT_RESULT" != "success" || "$E2E_RESULT" != "success" || "$STRESS_RESULT" != "success" ]]; then
+            echo "the stability gate is red: image-scan=${PREFLIGHT_RESULT} e2e=${E2E_RESULT} unit-stress=${STRESS_RESULT}" >&2
             exit 1
           fi
 
