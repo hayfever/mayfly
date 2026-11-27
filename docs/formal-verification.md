@@ -593,6 +593,14 @@ so the refusal belongs to the slow call and not to an agent call that settled
 in between. The request count is asserted as a lower bound, because the
 runtime's own retry and a redelivered prompt can add calls of their own.
 
+The suite reaches the control plane through a `kubectl port-forward`, which can
+drop a call that never left the tunnel; Go does not replay a POST with a body.
+`tunnelRetryAfter` (`e2e/forward.go`) repeats a call only after a transport
+error `forwardBroken` accepts while the session's admitted request count did not
+move. A dropped call that moved the count was admitted, so its missing response
+fails the test instead of repeating a billed call. `TestTunnelRetryAfter` and
+`FuzzTunnelRetryDecision` cover the decision without a cluster.
+
 `TokenBudget.cfg` sets `Budget = 3`, `MaxCall = 2`, two callers, no crash, an
 in-flight cap of one, the check, charge, and reservation writes on, and
 `WaitForSettle = TRUE` for the fixed caller. It checks every invariant and
@@ -786,6 +794,12 @@ The model abstracts these details:
 
 ## What is abstracted away
 
+- The e2e tunnel retry treats a dropped call as one error from the set
+  `forwardBroken` accepts: `io.EOF`, `ECONNRESET`, `ECONNREFUSED`, and
+  `net.ErrClosed`. A real port-forward can drop a call at any byte, and the
+  session's admitted request count is the only signal that the control plane
+  saw the call. Capture of `kubectl port-forward` stderr under
+  `E2E_ARTIFACTS` is not modeled.
 - The token budget model abstracts one call's charge as a value from 1 to
   `MaxCall` and assumes the reservation bounds it. The Go code keeps an
   estimated charge inside that bound: the estimate's completion part stops at
@@ -848,6 +862,11 @@ provider, not a real one. The stub reports usage unless the prompt carries its
 `no-usage` directive, which the metrics case uses to stay on the size estimate.
 The e2e suite is not run on the development machine for this change (Docker is
 unavailable); CI runs it against the release.
+
+The e2e tunnel retry is checked against synthetic transport errors and request
+counts. A live `kubectl port-forward` drop is not part of these checks, and the
+`E2E_ARTIFACTS` stderr capture is checked only by `TestForwardLogFile`, which
+writes to a temporary directory.
 
 The release gate reads synthetic GitHub API payloads. Its Go tests and
 `FuzzDecide` cover run and job selection, but the live API's field names and
