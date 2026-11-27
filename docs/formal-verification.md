@@ -5,8 +5,9 @@ session lifecycle, hub retention, request-body deadlines, queue poison
 recovery, schedule time zones, release gating, and LLM token budgets, plus
 native Go fuzz targets. A third check covers
 the chart RBAC over its whole namespace configuration space. A fourth check
-covers the k3d image-name matcher with fixture JSON. Each has a script
-or command and a CI job.
+covers the k3d image-name matcher with fixture JSON. A fifth check covers the
+image scan policy across every workflow. Each has a script or command and a CI
+job.
 
 | Check | Script | CI job |
 |---|---|---|
@@ -15,6 +16,8 @@ or command and a CI job.
 | Every fuzz target | `hack/fuzz.sh` | `fuzz-nightly` in verify.yml |
 | Chart RBAC property check | `MAYFLY_REQUIRE_HELM=1 go test ./test/chart/...` | `chart` step of the `test` job in [ci.yml](../.github/workflows/ci.yml) |
 | k3d image-name matcher fixtures | `hack/test-k3d-images.sh` | `shell` job in [ci.yml](../.github/workflows/ci.yml) |
+| Workflow and image scan policy conformance | `go test ./test/imagepolicy` | `test` job in ci.yml (`make test`) |
+| Image scan exit codes with a fake trivy | `hack/test-image-scan.sh` | `shell` job in ci.yml |
 
 `hack/tlc.sh` needs a JDK 17 or newer (`java` on `PATH`, or `JAVA`). It
 downloads the pinned, checksummed `tla2tools.jar` once into
@@ -901,6 +904,14 @@ pagination are not verified. A change on the GitHub side fails the gate closed:
 an unreadable history is a failed gate. A real `v*` tag and a real release run
 are outside every check in this repository.
 
+The workflow policy check reads files; it does not run GitHub Actions. It
+cannot prove that a job is triggered, that a QEMU build succeeds, that a
+scanner's database download works, or that GHCR serves a tag. The ci
+`image-scan`, the nightly, the stability preflight, and the release scan are
+the proof. The check also cannot see a CVE published, or a fix released, after
+the last preflight run; the release scan catches that finding and leaves the
+release a draft.
+
 The k3d image fixtures check the matcher, not the cluster. They do not run
 `k3d image import`, do not read a live `crictl` inventory, and do not check node
 discovery from Docker labels. The retry backoff and the per-node report run only
@@ -1035,3 +1046,53 @@ make test-k3d-images
 
 The `shell` job in [ci.yml](../.github/workflows/ci.yml) runs the fixtures and
 `shellcheck` on the helper and both callers on every push and pull request.
+
+## Workflow and image scan policy
+
+`hack/image-scan.sh` is the one image scan. The `image-scan` job in ci, the
+nightly `image-scan` workflow, the stability gate's `preflight-scan` job, and
+the release `images` job all call it, and no workflow invokes trivy directly.
+The script declares the whole policy once:
+`--scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`, for
+`linux/amd64` and `linux/arm64`. Trivy's version is in
+`.github/trivy-version`.
+
+`test/imagepolicy` is a test-only package. It parses every file under
+`.github/workflows` into jobs and steps, reads `hack/image-scan.sh`, and checks:
+
+- no workflow run step invokes trivy, and a workflow that calls the script
+  installs trivy;
+- every `aquasecurity/setup-trivy` step passes
+  `${{ steps.trivy-version.outputs.value }}`, and its job reads
+  `.github/trivy-version` into that step;
+- the script declares each policy flag once with the required value, declares
+  both platforms, and sets `set -euo pipefail`;
+- the release `images` job builds, scans, signs, and tags in that order, and
+  the scan step does not set `continue-on-error`;
+- `ci.yml` has a `changes` job that uses `dorny/paths-filter` and an
+  `image-scan` job that needs it and builds both images;
+- `e2e-stability.yml` has `preflight-scan`, checks out the gated SHA, and the
+  `gate` job needs it;
+- `image-scan.yml` runs on `schedule` and `workflow_dispatch`, builds both
+  images, and scans both images of the latest published release;
+- every third-party `uses:` in every workflow is pinned to a 40-hex commit.
+
+`TestWorkflowPolicyRejectsBrokenCopies` is the negative check. It loads the
+repository, applies one mutation in memory, and requires the check to report
+it. The mutations lower the severity to `CRITICAL` only, remove
+`--ignore-unfixed`, drop a platform, add an inline `trivy image` step, drift
+setup-trivy's version, pin an action by tag, sign before the scan, make the
+release scan non-blocking, remove `preflight-scan` from the gate's `needs`,
+scan `main` instead of the gated SHA, delete the nightly workflow, and remove
+its schedule. Every mutation is rejected.
+
+`hack/test-image-scan.sh` runs the script with a fake trivy on `PATH`, without
+a network. It proves both platforms always run with the policy flags, a
+finding on one platform fails the whole scan after both run, a trivy error
+fails the scan, `--dir` scans both archives, a missing archive fails, the
+step summary lists both platforms, and a missing trivy fails.
+
+There is no fuzz target. The script does no text parsing: it builds an
+argument vector, reads an exit status, and writes a summary. The version file
+is read by a `cat` step in the workflow, and the policy check compares the
+value. There is no parser to fuzz.
