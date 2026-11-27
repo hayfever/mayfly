@@ -196,8 +196,9 @@ jobs:
   # Builds, scans, signs, then tags each image. Keyless signing uses the
   # workflow's GitHub OIDC identity, so a signature proves which workflow and
   # tag built the image. The build pushes the manifest by digest without a
-  # tag. Trivy scans both architectures. Only a clean scan signs the digest,
-  # and only a signed digest gets the version tags, so a failed scan or
+  # tag. hack/image-scan.sh scans both architectures with the same policy that
+  # ci, the nightly, and the stability gate use. Only a clean scan signs the
+  # digest, and only a signed digest gets the version tags, so a failed scan or
   # signature leaves no tag. The untagged manifest is not a release artifact.
   images:
     name: images (${{ matrix.image }})
@@ -258,31 +259,17 @@ jobs:
             DATE=${{ steps.build-date.outputs.date }}
           sbom: true
           provenance: mode=max
+      - name: read the Trivy version
+        id: trivy-version
+        run: echo "value=$(cat .github/trivy-version)" >> "$GITHUB_OUTPUT"
       - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
-          version: v0.76.2
+          version: ${{ steps.trivy-version.outputs.value }}
       - name: scan
-        id: scan
-        continue-on-error: true
         env:
           IMAGE: ${{ steps.image-name.outputs.value }}
           DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          for platform in linux/amd64 linux/arm64; do
-            echo "scanning ${IMAGE}@${DIGEST} for ${platform}"
-            trivy image --quiet --scanners vuln --severity HIGH,CRITICAL \
-              --ignore-unfixed --exit-code 1 --platform "${platform}" \
-              "${IMAGE}@${DIGEST}"
-          done
-      - name: report scan findings
-        if: steps.scan.outcome == 'failure'
-        env:
-          IMAGE: ${{ steps.image-name.outputs.value }}
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          echo "::error::Trivy found a HIGH or CRITICAL vulnerability with a fix in ${IMAGE}@${DIGEST}."
-          echo "::error::No version tag was created and nothing was signed. The untagged manifest is not a release artifact."
-          exit 1
+        run: hack/image-scan.sh "${IMAGE}@${DIGEST}"
       - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
           cosign-release: v3.1.4

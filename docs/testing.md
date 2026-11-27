@@ -151,14 +151,15 @@ The `upgrade` job resolves the last `v*` tag, logs in to `ghcr.io` with the work
 
 ## Stability gate
 
-[.github/workflows/e2e-stability.yml](../.github/workflows/e2e-stability.yml) proves one commit is stable, not only correct. It runs the e2e suite 20 times and the unit stress once, all against the same commit.
+[.github/workflows/e2e-stability.yml](../.github/workflows/e2e-stability.yml) proves one commit is stable, not only correct. It scans the images built from that commit, runs the e2e suite 20 times, and runs the unit stress once, all against the same commit.
 
 | Job | What it runs |
 |---|---|
 | `plan` | Resolves and validates the 40-hex commit SHA, then builds the run matrix: entry `1` to `runs`, alternating `bbolt` and `redis` |
+| `preflight-scan` | Builds the `mayflyd` and `mayfly-agent` images for `linux/amd64` and `linux/arm64` from the gated commit without pushing, then runs `hack/image-scan.sh --dir` on both |
 | `e2e` | One `make e2e` per matrix entry, 10 runs at a time, 45 minute limit per run |
 | `unit-stress` | `./hack/stress.sh 20` |
-| `gate` | Fails unless every e2e run and the unit stress pass, and writes a pass or fail row per run to the run summary |
+| `gate` | Needs `preflight-scan`, `e2e`, and `unit-stress`. It fails unless the image scan, every e2e run, and the unit stress pass, and writes a pass or fail row per run to the run summary |
 
 An odd `runs` value gives the bbolt queue one more run. A Redis-only and a bbolt-only failure both appear in the gate table.
 

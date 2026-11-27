@@ -39,9 +39,17 @@ ENTRYPOINT ["/mcpstub"]
 # The agent image includes Node, npm/npx, git, curl, jq, and ripgrep so stdio
 # MCP servers can be installed or run in the session. The runtime filesystem is
 # read-only; HOME and caches point at the writable /tmp mount.
+#
+# The base digest is the current index for node:26-bookworm-slim and still
+# ships libpam 1.5.2-6+deb12u2 (CVE-2025-6020). The fixed 1.5.2-6+deb12u3 is in
+# bookworm-security, released after the base image, so upgrade every installed
+# package after the install. Without the upgrade the release scan fails on the
+# four libpam packages. Keep --no-install-recommends and drop the apt lists in
+# the same layer.
 FROM node:26-bookworm-slim@sha256:0042e17d232a87a2cd485be1da7900fca4d10a4ad11b29e9285da1d2e54798c9 AS mayfly-agent
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates git curl jq ripgrep \
+ && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -o Dpkg::Options::=--force-confold \
  && rm -rf /var/lib/apt/lists/*
 # The npm bundled with the base image can lag behind fixes in its own
 # dependencies (undici, brace-expansion); the release scan fails on those.

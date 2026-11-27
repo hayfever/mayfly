@@ -60,12 +60,37 @@ CI runs `govulncheck ./...` in the `vulncheck` job. The job fails when the modul
 The release workflow builds each image, scans it, signs it, and tags it in that order:
 
 1. Docker Buildx builds the multi-arch image and pushes the manifest and layers by digest, without a tag.
-2. `trivy image` scans that digest for `linux/amd64` and `linux/arm64` with `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`. A HIGH or CRITICAL vulnerability that has a fixed version fails the job. A finding without a fix is reported and does not block.
+2. `hack/image-scan.sh` scans that digest for `linux/amd64` and `linux/arm64` with `--scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`. A HIGH or CRITICAL vulnerability that has a fixed version fails the job. A finding without a fix is reported and does not block.
 3. `cosign sign` signs the digest with the workflow's GitHub OIDC identity. No key and no stored secret is involved.
 4. Only a signed digest gets the image tags with `docker buildx imagetools create`: the version tag, and for a final release `major.minor` and `latest`.
 5. The chart job waits for both images, then pushes the chart to GHCR, uploads it to the draft release, and signs it with the same identity.
 
 A failed scan fails the job before any tag exists. A failed signature fails the job before the tag step runs. Either failure leaves no tag for the digest, so no tag names an unsigned image. The untagged manifest is not a release artifact, and the registry garbage collector removes it. A tag that does not verify is not a release artifact.
+
+### Preflight image scan
+
+`hack/image-scan.sh` is the only place the scan policy lives. Every workflow calls it; no workflow runs `trivy` directly. It scans a registry reference, or the per-platform docker archives that a workflow builds without pushing:
+
+```bash
+hack/image-scan.sh ghcr.io/hayfever/mayflyd:1.0.0-rc.4
+hack/image-scan.sh --dir "$RUNNER_TEMP/images/mayflyd"
+```
+
+The script always scans both platforms. It fails when any platform has a fixed HIGH or CRITICAL finding, when an archive is missing, or when trivy itself fails, so a database download cannot pass. Trivy is pinned in `.github/trivy-version`, and each workflow reads that file when it installs trivy.
+
+The same blocking scan runs before a tag:
+
+| Where | When | What it scans |
+|---|---|---|
+| `image-scan` job in [ci.yml](../.github/workflows/ci.yml) | pull requests and pushes that change `Dockerfile`, `go.mod`, `go.sum`, `hack/image-scan.sh`, `.github/trivy-version`, or `ci.yml` | both images built from the change |
+| `main` job in [image-scan.yml](../.github/workflows/image-scan.yml) | nightly at 05:43 UTC and on demand | both images built from the default branch |
+| `published` job in image-scan.yml | nightly | both images of the latest published release from GHCR |
+| `preflight-scan` job in [e2e-stability.yml](../.github/workflows/e2e-stability.yml) | every stability run | both images built from the gated `ref`; `gate` needs it, so a failed or skipped scan fails the gate |
+| `scan` step in [release.yml](../.github/workflows/release.yml) | every `v*` tag | the digest pushed without a tag, before signing and tagging |
+
+The ci job is gated by `dorny/paths-filter` inside the workflow, not by a `paths:` trigger. A job that `if:` skips reports `skipped`, which satisfies a required status check. A workflow that a path filter never starts leaves its required check pending and blocks the merge.
+
+One window remains. A CVE published, or a fix released, after the last preflight run is invisible to that run. The release scan still fails on it, the images job stops before signing, and the GitHub release stays a draft. Cut the next release candidate (`v1.0.0-rc.4`) from a commit with the fix; never retag the release whose scan failed.
 
 GoReleaser signs the CLI release too. It builds the archives and `checksums.txt`, runs `cosign sign-blob --bundle checksums.txt.sigstore.json checksums.txt` with the same keyless identity, and attaches the bundle to the release. The goreleaser job has `id-token: write` for that token.
 
@@ -142,7 +167,7 @@ go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
 
 3. Build both images locally. Check that `mayfly version`, `mayflyd --version`, and `mayfly-agent --version` show the release version, commit, and date.
 4. Verify the chart with a real install, including ingress/TLS or port-forward, secret mount, and a complete session.
-5. Run the e2e stability gate on the release commit, before you tag an RC or a final release. The gate needs 20 of 20 e2e runs green and the unit stress green:
+5. Run the e2e stability gate on the release commit, before you tag an RC or a final release. The gate needs both preflight image scans green, 20 of 20 e2e runs green, and the unit stress green:
 
 ```bash
 gh workflow run e2e-stability.yml -f runs=20 -f ref=<40-hex commit sha>
@@ -162,7 +187,7 @@ The release workflow runs on `v*` tags in this order:
 
 1. `gate` peels the pushed tag to its commit (an annotated tag is a tag object), then reads that commit's workflow history. It fails the workflow unless `ci` succeeded and a successful `e2e-stability` attempt with 20 runs exists for that commit.
 2. `goreleaser` builds the CLI archives and `checksums.txt`, signs `checksums.txt` with keyless cosign, and creates the GitHub release as a draft. The job fails when its Go toolchain is older than 1.27.4 (GO-2026-6859).
-3. `images` builds each control-plane and agent image with SBOM and provenance, pushes it by digest without a tag, scans both architectures, signs the digest, and only then creates the version tags.
+3. `images` builds each control-plane and agent image with SBOM and provenance, pushes it by digest without a tag, scans both architectures with `hack/image-scan.sh`, signs the digest, and only then creates the version tags.
 4. `chart` pushes and signs the chart, and uploads it to the draft release.
 5. `publish` turns the draft into a public release. It runs only when `goreleaser`, `images`, and `chart` all succeeded.
 

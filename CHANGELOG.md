@@ -4,6 +4,14 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ## [Unreleased]
 
+### Added
+
+- `hack/image-scan.sh` is the single image scan policy, with trivy pinned in `.github/trivy-version`. It scans `linux/amd64` and `linux/arm64` for fixed HIGH or CRITICAL vulnerabilities, fails when either platform fails or trivy itself errors, and prints the image and platform. It runs in ci on image-affecting changes, nightly from `main`, as the `preflight-scan` job of the stability gate, and as the release scan before signing. `test/imagepolicy` checks that every workflow routes through the script and keeps the policy, and `hack/test-image-scan.sh` checks the script's exit codes with a fake trivy.
+
+### Fixed
+
+- The `mayfly-agent` image upgrades its Debian packages when it builds, so security fixes released after the pinned `node:26-bookworm-slim` digest are installed. The rc.3 image failed the release scan on CVE-2025-6020 in `libpam0g`, `libpam-modules`, `libpam-modules-bin`, and `libpam-runtime` (1.5.2-6+deb12u2, fixed in 1.5.2-6+deb12u3).
+
 ## [1.0.0-rc.3] - 2026-11-27
 
 ### Added
