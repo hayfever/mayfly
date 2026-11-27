@@ -628,7 +628,8 @@ states (62 distinct) on `NoBusyAfterSettled`; the counterexample is `Admit`,
 check is not vacuous: the refusal is legitimate there, and `Retry` admits the
 caller once `Charge` frees the slot.
 `deep/TokenBudget_three_callers.cfg` runs nightly with three callers, budget
-16, and two crashes: 15,153 states generated, 4,894 distinct.
+16, and two crashes: 105,108 states generated, 30,961 distinct, about eight
+seconds.
 
 The check-after cfg omits `NoAdmitWhenExhausted`, because admitting past the
 limit is that cfg's modeled bug; `BudgetBound` is the invariant that must bite.
