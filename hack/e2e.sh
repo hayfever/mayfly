@@ -247,7 +247,10 @@ run_tests() {
   start_log_streams
   log "running the e2e suite against $CONTEXT/$NAMESPACE"
   # shellcheck disable=SC2086
+  # E2E_ARTIFACTS reaches the suite, which copies each kubectl port-forward's
+  # stderr into it, so a dropped call is provable after the run.
   if MAYFLY_E2E_KUBECONTEXT="$CONTEXT" MAYFLY_E2E_NAMESPACE="$NAMESPACE" MAYFLY_E2E_RELEASE="$RELEASE" \
+    E2E_ARTIFACTS="$ARTIFACTS" \
     MAYFLY_E2E_PLUGIN_IMAGE="$IMG_PLUGIN" MAYFLY_E2E_PLUGIN_MISSING_IMAGE="$IMG_PLUGIN_MISSING" \
     go test -tags e2e -count=1 -timeout 30m -v $GO_TEST_FLAGS ./e2e 2>&1 | tee "$ARTIFACTS/go-test.log"; then
     kn logs "deployment/$RELEASE" --tail=-1 >"$ARTIFACTS/mayflyd.log" 2>&1 || true

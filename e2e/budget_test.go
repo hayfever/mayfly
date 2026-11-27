@@ -142,7 +142,7 @@ func TestSessionLLMBusyDoesNotCharge(t *testing.T) {
 	// session's single in-flight slot, so the usage read below is the settled
 	// baseline. A probe refused as llm_busy changes nothing.
 	eventually(t, time.Minute, "the agent's first call settled", func() (bool, string) {
-		rec := env.proxyCall(t, token, budgetProbeBody)
+		rec := env.proxyProbe(t, token, budgetProbeBody, s.ID)
 		switch {
 		case rec.Status == http.StatusOK:
 			return true, ""
@@ -169,7 +169,9 @@ func TestSessionLLMBusyDoesNotCharge(t *testing.T) {
 	}
 	first := make(chan outcome, 1)
 	go func() {
-		rec, refused, err := env.proxyBusyRetry(token, slowBody, 10*time.Second)
+		rec, refused, err := env.proxyBusyRetry(token, slowBody, 10*time.Second, func() (int64, error) {
+			return env.admittedRequests(s.ID)
+		})
 		first <- outcome{rec: rec, err: err, refused: refused}
 	}()
 
@@ -222,7 +224,7 @@ func TestSessionLLMBusyDoesNotCharge(t *testing.T) {
 	for attempt := 0; ; attempt++ {
 		during, r = env.getSession(t, s.ID)
 		expectStatus(t, r, http.StatusOK, "get session")
-		rec := env.proxyCall(t, token, budgetProbeBody)
+		rec := env.proxyProbe(t, token, budgetProbeBody, s.ID)
 		if rec.Status == http.StatusOK {
 			if got := drain(); got != nil {
 				t.Fatalf("the slow call finished before the overlap: %s err=%v refused=%v", got.rec, got.err, got.refused)
@@ -239,7 +241,7 @@ func TestSessionLLMBusyDoesNotCharge(t *testing.T) {
 		// call's reply, so a second refusal after a pause belongs to the slow
 		// call.
 		time.Sleep(200 * time.Millisecond)
-		second := env.proxyCall(t, token, budgetProbeBody)
+		second := env.proxyProbe(t, token, budgetProbeBody, s.ID)
 		if second.Status != http.StatusTooManyRequests {
 			if got := drain(); got != nil {
 				t.Fatalf("the slow call finished before the overlap: %s err=%v refused=%v", got.rec, got.err, got.refused)
@@ -285,9 +287,11 @@ func TestSessionLLMBusyDoesNotCharge(t *testing.T) {
 
 	// The slot was released: a retry is admitted, not refused as busy. A
 	// leaked slot never frees, so the bounded retry still fails the test.
-	retry, refused, err := env.proxyBusyRetry(token, budgetProbeBody, 10*time.Second)
+	retry, refused, err := env.proxyBusyRetry(token, budgetProbeBody, 10*time.Second, func() (int64, error) {
+		return env.admittedRequests(s.ID)
+	})
 	if err != nil {
-		t.Fatalf("retry after the first call: %v", err)
+		t.Fatalf("retry after the first call: %v refused=%v", err, refused)
 	}
 	if retry.Status != http.StatusOK {
 		t.Fatalf("retry after the first call = %s refused=%v", retry, refused)
@@ -505,17 +509,111 @@ func (c *cluster) proxyCall(t *testing.T, token, body string) response {
 	return rec
 }
 
-// proxyBusyRetry calls one completion and retries while the control plane
-// refuses it as llm_busy, which is the retry the runtime applies to the same
-// error. It takes no testing.T, so a goroutine can use it. It returns the last
-// response and the refusals it saw before it.
-func (c *cluster) proxyBusyRetry(token, body string, window time.Duration) (response, []string, error) {
+// admittedRequests reads the session's admitted model request count. It takes
+// no testing.T, so a goroutine can use it, and the count is the observable
+// that separates a call the tunnel lost before admission from one whose
+// response it lost after admission.
+func (c *cluster) admittedRequests(id string) (int64, error) {
+	req, err := http.NewRequest(http.MethodGet, c.url("/api/v1/sessions/"+id), nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("get session %s: %d %s", id, resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	var body struct {
+		Session struct {
+			LLMUsage *llmUsage `json:"llm_usage"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		return 0, err
+	}
+	if body.Session.LLMUsage == nil {
+		return 0, fmt.Errorf("session %s has no usage", id)
+	}
+	return body.Session.LLMUsage.Requests, nil
+}
+
+// proxyProbe calls one completion and repeats it only when the tunnel dropped
+// it before the control plane admitted it, which Go does not replay for a POST
+// with a body. A dropped call that moved the request count was admitted, so
+// its missing response fails the test instead of repeating a billed call.
+func (c *cluster) proxyProbe(t *testing.T, token, body, id string) response {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	var lost []string
+	for {
+		before, err := c.admittedRequests(id)
+		if err != nil {
+			t.Fatalf("read requests before the probe: %v", err)
+		}
+		rec, err := c.proxy(token, body)
+		if err == nil {
+			return rec
+		}
+		now, countErr := c.admittedRequests(id)
+		if countErr != nil {
+			t.Fatalf("probe error %v; then read requests: %v", err, countErr)
+		}
+		switch tunnelRetryAfter(err, before, now) {
+		case tunnelRetry:
+			lost = append(lost, err.Error())
+			if !time.Now().Before(deadline) {
+				t.Fatalf("the probe never reached the control plane in 30s: %v", lost)
+			}
+			time.Sleep(200 * time.Millisecond)
+		case tunnelAdmittedLost:
+			t.Fatalf("the probe was admitted but its response was lost in the tunnel: %v (requests %d -> %d)", err, before, now)
+		default:
+			t.Fatalf("probe: %v", err)
+		}
+	}
+}
+
+// proxyBusyRetry calls one completion and retries what it can safely repeat:
+// a refusal as llm_busy, which is the retry the runtime applies to the same
+// error, and a call the tunnel dropped before the control plane admitted it.
+// requests reads the session's admitted request count. It takes no testing.T,
+// so a goroutine can use it. It returns the last response, the refusals and
+// losses it saw before it, and the error that ended it.
+func (c *cluster) proxyBusyRetry(token, body string, window time.Duration, requests func() (int64, error)) (response, []string, error) {
 	deadline := time.Now().Add(window)
 	var refused []string
 	for {
+		before, err := requests()
+		if err != nil {
+			return response{}, refused, fmt.Errorf("read requests before the call: %w", err)
+		}
 		rec, err := c.proxy(token, body)
 		if err != nil {
-			return rec, refused, err
+			now, countErr := requests()
+			if countErr != nil {
+				return rec, refused, fmt.Errorf("%w; then read requests: %w", err, countErr)
+			}
+			switch tunnelRetryAfter(err, before, now) {
+			case tunnelRetry:
+				refused = append(refused, "transport: "+err.Error())
+				if !time.Now().Before(deadline) {
+					return rec, refused, err
+				}
+				time.Sleep(200 * time.Millisecond)
+				continue
+			case tunnelAdmittedLost:
+				return rec, refused, fmt.Errorf("the call was admitted but its response was lost in the tunnel: %w (requests %d -> %d)", err, before, now)
+			default:
+				return rec, refused, err
+			}
 		}
 		if rec.Status == http.StatusTooManyRequests && refusalCode(rec) == "llm_busy" && time.Now().Before(deadline) {
 			refused = append(refused, "429 llm_busy")
