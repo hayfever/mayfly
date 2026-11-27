@@ -1,6 +1,6 @@
 # Migrating to 1.0.0
 
-This guide moves an install from 0.3.0 to 1.0.0-rc.3. The release is additive
+This guide moves an install from 0.3.0 to 1.0.0-rc.4. The release is additive
 for the documented surfaces. No persisted format changed, so the control plane
 reads the 0.3.0 state files without a migration step.
 
@@ -12,7 +12,7 @@ Persisted stores carry their own format versions; see
 
 ## Before you upgrade
 
-1. Read the 1.0.0-rc.1, 1.0.0-rc.2, and 1.0.0-rc.3 entries in [CHANGELOG.md](../CHANGELOG.md).
+1. Read the 1.0.0-rc.1, 1.0.0-rc.2, 1.0.0-rc.3, and 1.0.0-rc.4 entries in [CHANGELOG.md](../CHANGELOG.md).
 2. Back up the state volume. See [Backup the state volume](runbook.md#backup-the-state-volume).
 3. Update your values file for any chart value that the release notes name. This
    release changes no existing value.
@@ -25,14 +25,14 @@ Persisted stores carry their own format versions; see
 1. Run a template check with your values:
 
 ```bash
-helm upgrade mayfly oci://ghcr.io/<owner>/charts/mayfly --version 1.0.0-rc.3 \
+helm upgrade mayfly oci://ghcr.io/<owner>/charts/mayfly --version 1.0.0-rc.4 \
   -n mayfly -f values.yaml --dry-run
 ```
 
 2. Run the upgrade and wait for the rollout:
 
 ```bash
-helm upgrade mayfly oci://ghcr.io/<owner>/charts/mayfly --version 1.0.0-rc.3 \
+helm upgrade mayfly oci://ghcr.io/<owner>/charts/mayfly --version 1.0.0-rc.4 \
   -n mayfly -f values.yaml
 kubectl -n mayfly rollout status deployment/mayfly --timeout=3m
 ```
