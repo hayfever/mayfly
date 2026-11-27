@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -393,16 +394,30 @@ func (c *cluster) forwardOnce(target string, remotePort int) (*portForward, erro
 	}
 	cmd.Stdout = write
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	// The stderr copy under E2E_ARTIFACTS makes a dropped call provable after
+	// the run; the in-memory buffer still reports a forward that never
+	// started. Capture cannot change the suite's outcome.
+	logs := forwardLogFile(forwardLogSeq.Add(1))
+	if logs != nil {
+		cmd.Stderr = io.MultiWriter(&stderr, logs)
+	} else {
+		cmd.Stderr = &stderr
+	}
 	if err := cmd.Start(); err != nil {
 		_ = read.Close()
 		_ = write.Close()
+		if logs != nil {
+			_ = logs.Close()
+		}
 		return nil, fmt.Errorf("start port-forward to %s: %w", target, err)
 	}
 	_ = write.Close()
 	p := &portForward{cmd: cmd, exited: make(chan struct{})}
 	go func() {
 		_ = cmd.Wait()
+		if logs != nil {
+			_ = logs.Close()
+		}
 		close(p.exited)
 		_ = read.Close()
 	}()
