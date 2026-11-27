@@ -39,8 +39,9 @@ func FuzzServeLLMBudget(f *testing.F) {
 	// Op bytes: 0 reported usage, 1 upstream 5xx, 2 forwarded 4xx, 3 transport
 	// failure, 4 two overlapping calls, 5 panic after admit, 6 probe, 7 a 2xx
 	// with no usage (the size estimate; an op with the high bit set sends a
-	// body far past the completion cap), 8 a persist failure. An unbudgeted
-	// seed runs 0-3 only.
+	// body far past the completion cap), 8 a persist failure, 9 an overlap
+	// while the provider holds the stream open after [DONE]. An unbudgeted seed
+	// runs 0-3 only.
 	f.Add(int64(10), int64(0), int64(5), int64(0), []byte{0, 1, 2, 3})
 	f.Add(int64(1), int64(1), int64(1), int64(0), []byte{0, 0})
 	f.Add(int64(100), int64(2), int64(20), int64(0), []byte{0, 6, 0, 6})
@@ -54,6 +55,9 @@ func FuzzServeLLMBudget(f *testing.F) {
 	// Op 133 folds to 7 with the high bit set: a no-usage 2xx whose body is far
 	// past the completion cap.
 	f.Add(int64(30), int64(0), int64(4), int64(0), []byte{133, 7})
+	// The delayed-EOF overlap, alone and followed by a probe at the new limit.
+	f.Add(int64(60), int64(0), int64(12), int64(0), []byte{9, 0})
+	f.Add(int64(20), int64(1), int64(5), int64(0), []byte{9, 6, 9})
 
 	f.Fuzz(func(t *testing.T, budgetSeed, requestSeed, maxOutSeed, unbudgetedSeed int64, ops []byte) {
 		budget := int64(uint64(budgetSeed)%500) + 1
@@ -114,7 +118,7 @@ func (h *llmFuzzHarness) run(op byte) {
 		}
 		return
 	}
-	switch op % 9 {
+	switch op % 10 {
 	case 0:
 		h.reported(op)
 	case 1:
@@ -139,6 +143,8 @@ func (h *llmFuzzHarness) run(op byte) {
 		h.estimated2xx(payload)
 	case 8:
 		h.persistFailure()
+	case 9:
+		h.delayedEOF()
 	}
 }
 
@@ -326,6 +332,98 @@ func (h *llmFuzzHarness) busy() {
 	// The first call's usage must be the delta: a refusal that charged would
 	// have released its slot and lost this charge.
 	h.expectDelta(model.LLMUsage{PromptTokens: 1})
+}
+
+// delayedEOF overlaps two calls while the provider holds the stream open after
+// "data: [DONE]". The agent's client stops reading at that chunk
+// (internal/llm/client.go), but the broker settles the call only at upstream
+// EOF, so the call keeps the only slot after its reply is complete. The second
+// call must be refused busy and change no usage, and the retry after the
+// charge must be admitted.
+func (h *llmFuzzHarness) delayedEOF() {
+	if h.atCapacity() {
+		h.expectRefusal()
+		return
+	}
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseUpstream := func() { releaseOnce.Do(func() { close(release) }) }
+	h.t.Cleanup(releaseUpstream)
+	wrote := make(chan struct{})
+	var wroteOnce sync.Once
+	h.f.setUpstream(func(w http.ResponseWriter, _ *http.Request, _ []byte) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":0}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		wroteOnce.Do(func() { close(wrote) })
+		<-release
+	})
+	streamBody := strings.Replace(h.body, `,"messages"`, `,"stream":true,"messages"`, 1)
+	first := make(chan int, 1)
+	go func() { first <- h.f.chat(streamBody).Code }()
+
+	select {
+	case <-wrote:
+	case <-time.After(10 * time.Second):
+		releaseUpstream()
+		h.t.Fatal("the delayed call never wrote [DONE]")
+	}
+
+	// The reply is complete on the wire and the slot is still held: the ledger
+	// has the request but no token yet.
+	open := h.usage()
+	if open.Requests != h.last.Requests+1 || open.Total() != h.last.Total() {
+		h.t.Fatalf("usage while the stream is open = %+v (before %+v)", open, h.last)
+	}
+	rec := h.f.chat(h.body)
+	if rec.Code != http.StatusTooManyRequests {
+		h.t.Fatalf("overlapping call = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if code := refusalCodeOf(h.t, rec.Body.String()); code != session.CodeLLMBusy {
+		h.t.Fatalf("overlapping code = %q, want %q", code, session.CodeLLMBusy)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		h.t.Fatal("busy refusal has no Retry-After")
+	}
+	if after := h.usage(); after != open {
+		h.t.Fatalf("busy refusal settled the open call: %+v -> %+v", open, after)
+	}
+
+	releaseUpstream()
+	if code := <-first; code != http.StatusOK {
+		h.t.Fatalf("delayed call = %d", code)
+	}
+	// The client's read can return before the deferred charge runs.
+	deadline := time.Now().Add(10 * time.Second)
+	for h.usage().Total() == open.Total() {
+		if time.Now().After(deadline) {
+			h.t.Fatalf("the delayed call was not charged after EOF: %+v", h.usage())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	h.expectDelta(model.LLMUsage{PromptTokens: 1})
+
+	// The slot was released: the retry is admitted, or the budget refuses it.
+	// The retry reports a charge inside the reservation, or BudgetBound would
+	// fail on a reported usage the reservation never covered.
+	charge := h.maxOut
+	if charge > 3 {
+		charge = 3
+	}
+	h.f.setUpstream(func(w http.ResponseWriter, _ *http.Request, _ []byte) {
+		writeStubUsage(w, fmt.Sprintf(`{"usage":{"prompt_tokens":%d,"completion_tokens":0}}`, charge))
+	})
+	if h.atCapacity() {
+		h.expectRefusal()
+		return
+	}
+	if rec := h.f.chat(h.body); rec.Code != http.StatusOK {
+		h.t.Fatalf("retry after the charge = %d body=%s", rec.Code, rec.Body.String())
+	}
+	h.expectDelta(model.LLMUsage{PromptTokens: charge})
 }
 
 // estimated2xx charges the size estimate of a 2xx whose provider sent no

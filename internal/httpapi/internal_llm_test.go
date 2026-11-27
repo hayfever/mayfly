@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -443,6 +445,143 @@ func TestInternalLLMBusyDoesNotCharge(t *testing.T) {
 	body := f.scrape()
 	if !strings.Contains(body, `mayfly_llm_requests_total{model="stub",result="busy"} 1`) {
 		t.Fatalf("busy refusal is not labeled busy:\n%s", body)
+	}
+}
+
+// TestInternalLLMBusyUntilUpstreamEOF covers a streamed call whose reply the
+// client has already read to "data: [DONE]" while the broker still waits for
+// upstream EOF. The agent's client stops at [DONE] (internal/llm/client.go),
+// and the handler charges the call only after ServeLLM returns, which needs
+// EOF (internal/httpapi/internal.go). The call therefore holds the session's
+// only in-flight slot after the reply is complete on the wire: a second call
+// is refused busy and the ledger keeps no token until the charge, and the
+// retry after EOF is admitted.
+func TestInternalLLMBusyUntilUpstreamEOF(t *testing.T) {
+	f := newLLMFixture(t, 1_000_000, 0)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseUpstream := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseUpstream)
+	f.setUpstream(func(w http.ResponseWriter, _ *http.Request, _ []byte) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":21,\"completion_tokens\":7}}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		// Hold the connection open: the reply is complete, but the broker has
+		// not reached EOF and the charge has not run.
+		<-release
+	})
+
+	// A real server, not a recorder, so the test reads the streamed bytes while
+	// the handler is still running.
+	api := httptest.NewServer(f.server.Handler())
+	t.Cleanup(api.Close)
+	const streamBody = `{"model":"stub","max_tokens":100,"stream":true,"messages":[]}`
+	sawDone := make(chan error, 1)
+	finished := make(chan string, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, api.URL+"/internal/v1/llm/chat/completions", strings.NewReader(streamBody))
+		if err != nil {
+			sawDone <- err
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+f.token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := api.Client().Do(req)
+		if err != nil {
+			sawDone <- err
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			sawDone <- fmt.Errorf("status %d", resp.StatusCode)
+			return
+		}
+		seen := false
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			if scanner.Text() == "data: [DONE]" && !seen {
+				seen = true
+				sawDone <- nil
+			}
+		}
+		switch {
+		case scanner.Err() != nil:
+			finished <- scanner.Err().Error()
+		case !seen:
+			finished <- "the reply ended without data: [DONE]"
+		default:
+			finished <- ""
+		}
+	}()
+
+	select {
+	case err := <-sawDone:
+		if err != nil {
+			t.Fatalf("streamed call: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the client never read data: [DONE]")
+	}
+
+	inFlight := f.usage()
+	if inFlight.Requests != 1 || inFlight.Total() != 0 {
+		t.Fatalf("usage while the stream is open = %+v, want one request and no token", inFlight)
+	}
+	rec := f.chat(llmTestBody)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("call after the client read [DONE] = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if retry := rec.Header().Get("Retry-After"); retry == "" || retry == "0" {
+		t.Fatalf("busy refusal Retry-After = %q", retry)
+	}
+	if code := refusalCodeOf(t, rec.Body.String()); code != session.CodeLLMBusy {
+		t.Fatalf("refusal code = %q", code)
+	}
+	if after := f.usage(); after != inFlight {
+		t.Fatalf("busy refusal changed the open call's ledger: %+v -> %+v", inFlight, after)
+	}
+	if hits := f.upstreamHits(); hits != 1 {
+		t.Fatalf("upstream hits = %d, want the single open call", hits)
+	}
+
+	releaseUpstream()
+	select {
+	case msg := <-finished:
+		if msg != "" {
+			t.Fatalf("streamed call: %s", msg)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the streamed call did not reach EOF")
+	}
+
+	// EOF runs the charge. The client's read may return before the deferred
+	// charge does, so wait for the ledger rather than reading it once.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		usage := f.usage()
+		if usage.PromptTokens == 21 && usage.CompletionTokens == 7 {
+			if usage.Requests != 1 || usage.EstimatedCalls != 0 {
+				t.Fatalf("settled usage = %+v", usage)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the call was not charged after EOF: %+v", usage)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// The slot is free: the retry is admitted and charged.
+	f.setUpstream(nil)
+	if rec := f.chat(llmTestBody); rec.Code != http.StatusOK {
+		t.Fatalf("retry after EOF = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if usage := f.usage(); usage.Requests != 2 || usage.PromptTokens != 51 || usage.CompletionTokens != 19 {
+		t.Fatalf("usage after the retry = %+v, want requests 2 prompt 51 completion 19", usage)
 	}
 }
 
