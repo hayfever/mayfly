@@ -536,12 +536,26 @@ decisions: a session at or over its budget refuses further calls and closes,
 and a session with a budget allows one call in flight with a durable
 reservation behind it.
 
+`Observe` and `Charge` are separate steps. `Observe` is the client's read of
+the reply finishing: for a stream that is `data: [DONE]`, which the agent's
+client stops at. `Charge` is the broker reaching upstream EOF, which settles
+the ledger and releases the slot. The reply is therefore complete on the wire
+while the call still holds the session's only slot, and a caller that treats
+`[DONE]` as a settled call is refused `llm_busy`. `AttemptBusy` is that
+refusal, and `WaitForSettle` is the caller's policy: on, the fixed caller waits
+for the settle; off, it waits only for the reply, which is the pre-fix
+assumption of the e2e overlap test. `Retry` is the fixed caller's retry of a
+refused call.
+
 | TLA+ action | Go code it models |
 |---|---|
 | `Admit` | the budget hook: the per-session ledger admit under `llmMu` in `internal/session/budget.go`, called from `ServeLLM`'s `admit` hook (`internal/broker/broker.go`). The in-flight check, the `max_llm_tokens` and `max_llm_requests` checks, the request increment, the reservation, and the synchronous record write |
 | `Upstream` | `broker.ServeLLM` after `client.Do` and the usage scan in `internal/broker/usage.go`. The charge is the reported usage or the byte estimate `req_bytes/4 + resp_bytes/4`, whose completion part stops at the call's `max_tokens` |
 | `Charge` | the charge-after path of the ledger (`internal/session/budget.go`): usage into the counter and the record, reservation released, token metric updated |
-| `Refuse` | `broker.Refusal` written by `writeRefusal`: `llm_busy` is 429 with `Retry-After`, `llm_budget_exhausted` is 429 without it, and `llm_persist_failed` is 503. A refusal is not forwarded and changes no counter. The model represents `llm_busy` as a disabled `Admit` and `llm_persist_failed` as an `Admit` that does not happen |
+| `Observe` | `readStream` in `internal/llm/client.go` returning at `data: [DONE]`, and the assistant message the runtime publishes from it. The slot, the reservation, and the ledger do not move |
+| `AttemptBusy` | `admitLLM` (`internal/session/budget.go`) refusing with `llm_busy`, 429 plus `Retry-After`, while `inflight >= 1`. It changes no usage and does not settle the running call |
+| `Retry` | the retry loop in `executeModel` (`internal/agent/runtime.go`) after `retryableModelError` accepts a 429 `llm_busy`, and the e2e test's `proxyBusyRetry`. One retry is one admission |
+| `Refuse` | `broker.Refusal` written by `writeRefusal`: `llm_busy` is 429 with `Retry-After`, `llm_budget_exhausted` is 429 without it, and `llm_persist_failed` is 503. A refusal is not forwarded and changes no counter. The model represents the exhausted refusal as `Refuse`, the busy refusal as `AttemptBusy`, and `llm_persist_failed` as an `Admit` that does not happen |
 | `Crash` | a control-plane process restart; no single Go function, because the process is gone. Memory is lost; the record keeps the charge and the reservation |
 | `Recover` | `session.Manager.Start` listing records before `adopt`, and the seeding in `adoptPods` and `adoptPodless` (`internal/session/manager.go`, `lifecycle.go`): `spent = record.spent + record.pending` |
 | `Exhaust` | the `EventError` and `Close(id, "llm_budget_exhausted")` in the charge path, with `sess.Error` set |
@@ -555,6 +569,9 @@ reservation behind it.
 | `NoChargeLost` | A charged call always settles: the in-memory ledger and the durable record never fall below the billed tokens, and a refusal never releases a running call's slot | `FuzzTokenLedger`, `FuzzServeLLMBudget`, `TestLLMAdmitCharge`, `TestLLMChargeKeepsMemoryWhenPersistFails`, `TestLLMAdmitRollsBackOnPersistPanic`, `TestLLMAdmitFailsClosedWhenReservationIsNotDurable`, `TestInternalLLMBusyDoesNotCharge`, `TestInternalLLMPanicChargesReservation`, e2e `TestSessionLLMBusyDoesNotCharge`, `TestSessionBudgetSurvivesRestart` |
 | `NoAdmitWhenExhausted` | An exhausted session refuses every call, and a refusal changes no ledger state | `FuzzTokenLedger`, `FuzzServeLLMBudget`, `TestInternalLLMExhaustedBudget`, `TestInternalLLMPersistFailureRefusesAndLabels`, `TestLLMRefusedAdmitThenChargeChangesNothing`, `TestAdoptClosesExhaustedSession`, e2e `TestSessionBudgetExhaustion` |
 | `ClosedAfterExhaust` | A charge that reaches a limit appends one error event, closes with reason `llm_budget_exhausted`, and ends `completed` | `TestLLMExhaustionClosesSession`, `TestLLMExhaustionSurvivesEmptyFinalize`, `TestInternalLLMExhaustedBudget`, `TestAdoptClosesExhaustedSession`, `TestAdoptClosesExhaustedPodlessSession`, e2e `TestSessionBudgetExhaustion` |
+| `ObserveKeepsSlot` | An observed call is still in flight: the reply is complete on the wire, and the call still holds the slot and has not settled | `TestInternalLLMBusyUntilUpstreamEOF`, `TestInternalLLMBusyDoesNotCharge`, `FuzzServeLLMBudget` (the delayed-EOF op), e2e `TestSessionLLMBusyDoesNotCharge` |
+| `NoBusyAfterSettled` | A caller that waits for the earlier call to settle after it reads the reply is never refused busy. The ghost counts a refusal taken while the held reply was already visible | `TestInternalLLMBusyUntilUpstreamEOF`, e2e `TestSessionLLMBusyDoesNotCharge` |
+| `BusyRetryAdmitted` | A call refused busy is eventually admitted, or the session closes first. It holds under weak fairness on `Upstream`, `Observe`, `Charge`, and `Retry` | `TestTurnRetriesBusyModelError`, `TestInternalLLMBusyUntilUpstreamEOF`, `FuzzServeLLMBudget` (the delayed-EOF op), e2e `TestSessionLLMBusyDoesNotCharge` |
 
 The e2e cases in `e2e/budget_test.go` run against the deployed release. They
 cover exhaustion, two overlapping calls with `llm_busy`, the session fields and
@@ -566,12 +583,24 @@ refusal while the session is still open, or a `401` once the charge has closed
 the session and removed its scoped token. The usage must not change in either
 case.
 
+The overlap case encodes the `Observe`/`Charge` split. The agent's reply is
+visible at `data: [DONE]`, so the test first probes the proxy until a call is
+admitted: an admitted probe proves the earlier call released the slot, and the
+usage read after it is the settled baseline. It then starts a slow call and
+retries it while the answer is `llm_busy`, the same retry the runtime applies,
+and it retries the overlapping probe until the control plane refuses it busy,
+so the refusal belongs to the slow call and not to an agent call that settled
+in between. The request count is asserted as a lower bound, because the
+runtime's own retry and a redelivered prompt can add calls of their own.
+
 `TokenBudget.cfg` sets `Budget = 3`, `MaxCall = 2`, two callers, no crash, an
-in-flight cap of one, and the check, charge, and reservation writes on. It
-checks every invariant and the `ClosedAfterExhaust` liveness property under
-weak fairness on `Exhaust` and `Recover`: 92 states generated, 31 distinct,
-under one second. `TokenBudget_crash.cfg` adds two control-plane crashes: 748
-generated, 249 distinct. The negative cfgs each flip one switch:
+in-flight cap of one, the check, charge, and reservation writes on, and
+`WaitForSettle = TRUE` for the fixed caller. It checks every invariant and
+proves `ClosedAfterExhaust` and `BusyRetryAdmitted` under weak fairness on
+`Exhaust`, `Recover`, `Upstream`, `Observe`, `Charge`, and `Retry`: 310 states
+generated, 101 distinct, under one second. `TokenBudget_crash.cfg` adds two
+control-plane crashes: 2,284 generated, 703 distinct. The negative cfgs each
+flip one switch:
 
 | Cfg | Constant | Expected violation |
 |---|---|---|
@@ -579,9 +608,10 @@ generated, 249 distinct. The negative cfgs each flip one switch:
 | `TokenBudget_check_after_buggy.cfg` | `CheckBefore = FALSE` | `BudgetBound` |
 | `TokenBudget_volatile_counter_buggy.cfg` | `PersistCharge = FALSE` | `NoChargeLost` |
 | `TokenBudget_no_pending_buggy.cfg` | `DurablePending = FALSE` | `NoChargeLost` |
+| `TokenBudget_observe_implies_settled_buggy.cfg` | `WaitForSettle = FALSE` | `NoBusyAfterSettled` |
 
-The runs stop quickly: no-in-flight-cap 222 states generated (73 distinct),
-check-after 123 (45), volatile-counter 76 (39), and no-pending 14 (11). With
+The runs stop quickly: no-in-flight-cap 431 states generated (133 distinct),
+check-after 314 (119), volatile-counter 108 (64), and no-pending 14 (11). With
 `InflightCap = 2` two callers are admitted at `Budget - 1` and both responses
 charge `MaxCall`, so the provider's total passes the one-response allowance.
 With `CheckBefore = FALSE` the counter is tested only after the charge, so a
@@ -589,6 +619,14 @@ call is admitted with the counter already at the budget. With
 `PersistCharge = FALSE` the record never holds a settled charge and a restart
 loses it. With `DurablePending = FALSE` the reservation never reaches the
 record, so a charge has no durable coverage while it is in flight.
+`TokenBudget_observe_implies_settled_buggy.cfg` turns `WaitForSettle` off: the
+caller treats `data: [DONE]` as a settled call, so its next call arrives while
+the observed call still holds the slot and is refused busy. TLC stops after 109
+states (62 distinct) on `NoBusyAfterSettled`; the counterexample is `Admit`,
+`Upstream`, `Observe`, then `AttemptBusy`. The positive cfgs reach the same
+`AttemptBusy` step when the holder's reply is not visible, so the liveness
+check is not vacuous: the refusal is legitimate there, and `Retry` admits the
+caller once `Charge` frees the slot.
 `deep/TokenBudget_three_callers.cfg` runs nightly with three callers, budget
 16, and two crashes: 15,153 states generated, 4,894 distinct.
 
@@ -605,9 +643,14 @@ The model abstracts these details:
   reported usage is charged as reported.
 - Tokens only. `max_llm_requests` is a second counter with no reservation and
   no overshoot; it is outside the model.
-- Provider latency, streaming, retries, and SSE chunk boundaries are outside
-  the model. `Upstream` is one step, and the runtime's retry of a refused call
-  is not modeled.
+- `Observe` and `Charge` are single steps. Provider latency, SSE chunk
+  boundaries, and the gap between the last reply byte and EOF are outside the
+  model, as are the retry backoff (1s doubling to 5s) and its 5-minute budget:
+  `Retry` is one admission. A JSON reply reaches the client and EOF together;
+  the model covers the streamed case where `[DONE]` arrives first.
+- The caller policy is one switch. A real session can have several callers,
+  and the runtime retries a busy refusal while the e2e test waits for the
+  settle; `WaitForSettle` selects one policy for every caller in a cfg.
 - One session. The resolved per-session limit is the constant `Budget`;
   per-agent overrides resolve before the ledger sees them.
 - `Exhaust` is the close decision. Session finalize, final status, and artifact
@@ -628,9 +671,12 @@ The model abstracts these details:
   random budgets and responses: reported usage, a 2xx without usage, a 2xx
   whose body is far past the completion cap, an upstream 5xx, a forwarded 4xx,
   a transport failure, two overlapping calls, a panic after admit, a persist
-  failure, a probe at the limit, and an unbudgeted session. It asserts that a
-  refusal changes no usage and settles no running call, that no in-flight slot
-  leaks, and `BudgetBound`. A 90-second run made 49,600 executions.
+  failure, a probe at the limit, an overlap while the provider holds the stream
+  open after `data: [DONE]`, and an unbudgeted session. It asserts that a
+  refusal changes no usage and settles no running call, that the open call
+  keeps its slot and charges nothing until EOF, that the retry after EOF is
+  admitted, that no in-flight slot leaks, and `BudgetBound`. A 90-second run
+  made 39,053 executions.
 - `FuzzHubAppendBudget` (`internal/hub`) drives appends, restores, and replays,
   and asserts the byte budget, the count cap, the contiguous suffix, and that
   the inbox keeps its human message.
