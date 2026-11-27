@@ -568,12 +568,26 @@ func (c *cluster) restartDeployment(t *testing.T, force bool) {
 	}
 }
 
+// sessionObjectSelector selects the objects Mayfly creates for a session.
+// Service plugin objects carry mayfly.io/managed=true too, so the session app
+// label keeps them out of the leak check: they outlive every session by
+// design.
+const sessionObjectSelector = "mayfly.io/managed=true,app.kubernetes.io/name=mayfly-agent"
+
+// sessionObjectKinds are the resources CreateSession creates, with the
+// singular kind that kubectl -o name prints.
+var sessionObjectKinds = []struct{ resource, kind string }{
+	{"pods", "pod"},
+	{"secrets", "secret"},
+	{"configmaps", "configmap"},
+	{"networkpolicies", "networkpolicy"},
+	{"persistentvolumeclaims", "persistentvolumeclaim"},
+}
+
 // sessionObjects lists the Kubernetes objects Mayfly created for a session,
-// or for every session when id is empty. Service plugin objects carry
-// mayfly.io/managed=true too, so the session app label keeps them out of the
-// leak check: they outlive every session by design.
+// or for every session when id is empty.
 func (c *cluster) sessionObjects(id string) ([]string, error) {
-	selector := "mayfly.io/managed=true,app.kubernetes.io/name=mayfly-agent"
+	selector := sessionObjectSelector
 	if id != "" {
 		selector = "mayfly.io/session=" + id
 	}
@@ -582,6 +596,28 @@ func (c *cluster) sessionObjects(id string) ([]string, error) {
 		return nil, err
 	}
 	return strings.Fields(out), nil
+}
+
+// sessionObjectList lists the session objects with their deletion state.
+// sessionObjects asks for -o name, which omits the deletionTimestamp, so a
+// claim the API server is still removing looks like a leak. This prints
+// kind/name and the timestamp instead, empty when the object is not
+// terminating.
+func (c *cluster) sessionObjectList() ([]leftover, error) {
+	var objs []leftover
+	for _, k := range sessionObjectKinds {
+		tmpl := fmt.Sprintf(`jsonpath={range .items[*]}%s/{.metadata.name}{"\t"}{.metadata.deletionTimestamp}{"\n"}{end}`, k.kind)
+		out, err := c.kubectl("get", k.resource, "-l", sessionObjectSelector, "-o", tmpl)
+		if err != nil {
+			return nil, err
+		}
+		parsed, err := parseLeftovers(out)
+		if err != nil {
+			return nil, fmt.Errorf("list %s: %w", k.resource, err)
+		}
+		objs = append(objs, parsed...)
+	}
+	return objs, nil
 }
 
 func (c *cluster) waitNoSessionObjects(timeout time.Duration) error {

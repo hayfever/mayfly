@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,6 +30,8 @@ const managedSelector = LabelManaged + "=true," + LabelApp + "=" + AppName
 type Client struct {
 	cs        kubernetes.Interface
 	namespace string
+	// log is nil in production, where the process default applies.
+	log *slog.Logger
 }
 
 // NewClient builds a client from in-cluster configuration or kubeconfig.
@@ -52,7 +55,15 @@ func NewForClient(cs kubernetes.Interface, namespace string) *Client {
 // WithNamespace returns a client for another namespace that shares the
 // clientset. The service reconciler uses it for plugins.namespace.
 func (c *Client) WithNamespace(namespace string) *Client {
-	return &Client{cs: c.cs, namespace: namespace}
+	return &Client{cs: c.cs, namespace: namespace, log: c.log}
+}
+
+// logger returns the client's logger, or the process default when unset.
+func (c *Client) logger() *slog.Logger {
+	if c.log != nil {
+		return c.log
+	}
+	return slog.Default()
 }
 
 func restConfig() (*rest.Config, error) {
@@ -82,38 +93,64 @@ func restConfig() (*rest.Config, error) {
 	return cfg, nil
 }
 
+// rollbackDelete is one object CreateSession created and the call that
+// removes it.
+type rollbackDelete struct {
+	object string
+	remove func(context.Context) error
+}
+
 // CreateSession creates the secret, config map, network policy, then the pod.
 // On failure it removes everything it created.
 func (c *Client) CreateSession(ctx context.Context, spec *SessionSpec) error {
 	if err := spec.Validate(); err != nil {
 		return err
 	}
-	created := []func(context.Context) error{}
+	created := []rollbackDelete{}
+	// rollback removes the created objects newest first. CreateSession
+	// reports only the create error that caused the rollback, so a failed
+	// delete is logged here instead; the remaining deletes still run. A
+	// NotFound delete succeeded: the object is already gone.
 	rollback := func() {
 		for i := len(created) - 1; i >= 0; i-- {
-			_ = created[i](context.Background())
+			err := created[i].remove(context.Background())
+			if err != nil && !apierrors.IsNotFound(err) {
+				c.logger().Error("session rollback delete failed",
+					"session", spec.SessionID,
+					"object", created[i].object,
+					"error", err)
+			}
 		}
 	}
 	if _, err := c.cs.CoreV1().Secrets(spec.Namespace).Create(ctx, spec.Secret(), metav1.CreateOptions{}); err != nil {
 		return fmt.Errorf("create session secret: %w", err)
 	}
-	created = append(created, func(ctx context.Context) error {
-		return c.cs.CoreV1().Secrets(spec.Namespace).Delete(ctx, spec.SecretName, metav1.DeleteOptions{})
+	created = append(created, rollbackDelete{
+		object: "secret/" + spec.SecretName,
+		remove: func(ctx context.Context) error {
+			return c.cs.CoreV1().Secrets(spec.Namespace).Delete(ctx, spec.SecretName, metav1.DeleteOptions{})
+		},
 	})
 	if _, err := c.cs.CoreV1().ConfigMaps(spec.Namespace).Create(ctx, spec.ConfigMap(), metav1.CreateOptions{}); err != nil {
 		rollback()
 		return fmt.Errorf("create session configmap: %w", err)
 	}
-	created = append(created, func(ctx context.Context) error {
-		return c.cs.CoreV1().ConfigMaps(spec.Namespace).Delete(ctx, spec.ConfigMapName, metav1.DeleteOptions{})
+	created = append(created, rollbackDelete{
+		object: "configmap/" + spec.ConfigMapName,
+		remove: func(ctx context.Context) error {
+			return c.cs.CoreV1().ConfigMaps(spec.Namespace).Delete(ctx, spec.ConfigMapName, metav1.DeleteOptions{})
+		},
 	})
 	if spec.EnableNetworkPolicy {
 		if _, err := c.cs.NetworkingV1().NetworkPolicies(spec.Namespace).Create(ctx, spec.NetworkPolicy(), metav1.CreateOptions{}); err != nil {
 			rollback()
 			return fmt.Errorf("create session network policy: %w", err)
 		}
-		created = append(created, func(ctx context.Context) error {
-			return c.cs.NetworkingV1().NetworkPolicies(spec.Namespace).Delete(ctx, spec.NetworkPolicyName, metav1.DeleteOptions{})
+		created = append(created, rollbackDelete{
+			object: "networkpolicy/" + spec.NetworkPolicyName,
+			remove: func(ctx context.Context) error {
+				return c.cs.NetworkingV1().NetworkPolicies(spec.Namespace).Delete(ctx, spec.NetworkPolicyName, metav1.DeleteOptions{})
+			},
 		})
 	}
 	if spec.PersistentWorkspace {
@@ -121,8 +158,11 @@ func (c *Client) CreateSession(ctx context.Context, spec *SessionSpec) error {
 			rollback()
 			return fmt.Errorf("create session workspace claim: %w", err)
 		}
-		created = append(created, func(ctx context.Context) error {
-			return c.cs.CoreV1().PersistentVolumeClaims(spec.Namespace).Delete(ctx, spec.PVCName, metav1.DeleteOptions{})
+		created = append(created, rollbackDelete{
+			object: "persistentvolumeclaim/" + spec.PVCName,
+			remove: func(ctx context.Context) error {
+				return c.cs.CoreV1().PersistentVolumeClaims(spec.Namespace).Delete(ctx, spec.PVCName, metav1.DeleteOptions{})
+			},
 		})
 	}
 	if _, err := c.cs.CoreV1().Pods(spec.Namespace).Create(ctx, spec.Pod(), metav1.CreateOptions{}); err != nil {
