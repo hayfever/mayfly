@@ -601,6 +601,23 @@ move. A dropped call that moved the count was admitted, so its missing response
 fails the test instead of repeating a billed call. `TestTunnelRetryAfter` and
 `FuzzTunnelRetryDecision` cover the decision without a cluster.
 
+The dead-letter case checks the objects a failed session start leaves behind. A
+delete only sets `metadata.deletionTimestamp`: the
+`kubernetes.io/pvc-protection` finalizer keeps a claim listed until its
+controller clears it, and `kubectl get -o name` prints a terminating object like
+any other. `TestDeadLetter` therefore lists the session objects with
+`kubectl get ... -o jsonpath` as `kind/name<TAB>deletionTimestamp`, fails at
+once when `unterminatedLeftovers` (`e2e/leftovers.go`) finds an object without a
+timestamp (no delete was accepted for it, so it is a real leak), and then waits
+up to 30 seconds for `waitNoSessionObjects` to see the terminating objects gone.
+`TestParseLeftovers`, `TestUnterminatedLeftovers`, and `FuzzLeftoverParse` cover
+the decision without a cluster; the fuzz target checks that a parsed listing
+keeps one object per non-blank line, in order, and marks an object terminating
+only when its timestamp is present. `CreateSession`'s rollback logs every delete
+error that is not `NotFound` with the session ID and `kind/name`, and still runs
+the remaining deletes; `TestCreateSessionRollbackLogsFailedDeletes` covers that
+with a fake clientset.
+
 `TokenBudget.cfg` sets `Budget = 3`, `MaxCall = 2`, two callers, no crash, an
 in-flight cap of one, the check, charge, and reservation writes on, and
 `WaitForSettle = TRUE` for the fixed caller. It checks every invariant and
@@ -800,6 +817,11 @@ The model abstracts these details:
   session's admitted request count is the only signal that the control plane
   saw the call. Capture of `kubectl port-forward` stderr under
   `E2E_ARTIFACTS` is not modeled.
+- The e2e dead-letter cleanup check treats a leftover object as removed once it
+  carries a `deletionTimestamp` and `waitNoSessionObjects` no longer lists it
+  within 30 seconds. The finalizer controller's own timing is not modeled, and
+  the listing spread over five `kubectl get` calls is not atomic; the wait that
+  follows covers an object created between the calls.
 - The token budget model abstracts one call's charge as a value from 1 to
   `MaxCall` and assumes the reservation bounds it. The Go code keeps an
   estimated charge inside that bound: the estimate's completion part stops at
@@ -867,6 +889,11 @@ The e2e tunnel retry is checked against synthetic transport errors and request
 counts. A live `kubectl port-forward` drop is not part of these checks, and the
 `E2E_ARTIFACTS` stderr capture is checked only by `TestForwardLogFile`, which
 writes to a temporary directory.
+
+The e2e dead-letter cleanup check is not run on the development machine (Docker
+and k3d are unavailable); CI runs it against the release. The terminating-object
+path needs a real claim held by the `pvc-protection` finalizer, so the local
+checks cover the parser, the decision, and the rollback logging only.
 
 The release gate reads synthetic GitHub API payloads. Its Go tests and
 `FuzzDecide` cover run and job selection, but the live API's field names and
