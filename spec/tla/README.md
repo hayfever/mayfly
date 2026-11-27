@@ -18,7 +18,9 @@ GitHub release, the image scan, signature, and tag order, the chart, the final
 publish, and the rule that an RC never takes the `latest` marker.
 `TokenBudget.tla` models a per-session LLM token budget: the admit check, the
 in-flight cap, the durable reservation, the charge, the exhaustion close, and
-the recovery that seeds the counter from the session record. A cfg runs
+the recovery that seeds the counter from the session record. `Observe` (the
+client's read of the reply, `data: [DONE]` for a stream) and `Charge` (the
+broker reaching EOF, which releases the slot) are separate steps. A cfg runs
 the module named by its basename up to the first underscore, so
 `HubRetention_evict_inbox_buggy.cfg` runs `HubRetention.tla`.
 [formal-verification.md](../../docs/formal-verification.md) maps each action to
@@ -117,8 +119,9 @@ which runs only in the nightly `tlc-deep` job.
 | `TokenBudget_no_inflight_cap_buggy.cfg` | `InflightCap = 2`: two calls admitted at `Budget - 1` exceed the budget by two responses |
 | `TokenBudget_check_after_buggy.cfg` | `CheckBefore = FALSE`: the counter is tested after the charge, so a call is admitted over budget |
 | `TokenBudget_volatile_counter_buggy.cfg` | `PersistCharge = FALSE`: a restart loses every settled charge |
+| `TokenBudget_observe_implies_settled_buggy.cfg` | `WaitForSettle = FALSE`: a caller treats `data: [DONE]` as a settled call and is refused busy |
 | `TokenBudget_no_pending_buggy.cfg` | `DurablePending = FALSE`: a charge in flight has no durable coverage |
-| `deep/TokenBudget_three_callers.cfg` | Nightly only: three callers, budget 16, two crashes; safety invariants (4,894 distinct states) |
+| `deep/TokenBudget_three_callers.cfg` | Nightly only: three callers, budget 16, two crashes; safety invariants (30,961 distinct states) |
 | `deep/SessionResume_two_sessions.cfg` | Nightly only: two sessions, one turn each, one shared control-plane restart; safety invariants (6,127,026 distinct states, about 10.5 minutes with `-workers auto`) |
 
 `HubRetention.cfg` runs eight appends over sizes `{1, 2, 3}` and human posts over
@@ -145,12 +148,13 @@ one-hour transition, and one scheduled civil minute. Each holds 8 generated
 states (4 distinct) and stops in under a second. Each negative cfg stops after
 4 states (3 distinct) on the invariant named in its `expect-violation` line.
 
-`TokenBudget.cfg` holds 31 distinct states (92 generated) in under a second
-and proves `ClosedAfterExhaust`; `TokenBudget_crash.cfg` holds 249 (748
-generated). The negative cfgs stop on the invariant named in their
-`expect-violation` line: no-in-flight-cap 73 (222 generated), check-after 45
-(123), volatile-counter 39 (76), and no-pending 11 (14). The nightly
-three-caller cfg holds 4,894 (15,153 generated).
+`TokenBudget.cfg` holds 101 distinct states (310 generated) in under a second
+and proves `ClosedAfterExhaust` and `BusyRetryAdmitted`; `TokenBudget_crash.cfg`
+holds 703 (2,284 generated). The negative cfgs stop on the invariant named in
+their `expect-violation` line: no-in-flight-cap 133 (431 generated),
+check-after 119 (314), observe-implies-settled 62 (109), volatile-counter 64
+(108), and no-pending 11 (14). The nightly three-caller cfg holds 30,961
+(105,108 generated).
 
 `ReleaseGating.cfg` is the smallest model: the positive run holds 134
 generated states (52 distinct) in under a second. Its `prerelease` variable
