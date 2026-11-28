@@ -1104,8 +1104,7 @@ value. There is no parser to fuzz.
 
 `test/release/publish_test.go` parses every workflow under `.github/workflows`.
 It checks that the release `publish` job runs `hack/publish-release.sh` and
-that the step env sets `GH_REPO` (`${{ github.repository }}`), so the job needs
-no checkout. It checks that no step asks `gh` for the `isLatest` JSON field,
+that the step env sets `GH_REPO` (`${{ github.repository }}`), so `gh` names the repository even without a working tree. The job also checks out the repository so the script is present. It checks that no step asks `gh` for the `isLatest` JSON field,
 which the CLI does not have. For every job that runs `gh`, the check requires
 an `actions/checkout` step, a non-empty `GH_REPO` in the step or job env, or a
 repo-qualified call (`-R`, `--repo`, or `gh api` with a `repos/<owner>/<repo>/`

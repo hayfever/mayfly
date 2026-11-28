@@ -344,8 +344,9 @@ jobs:
 
   # The release is a draft until every artifact exists. This job runs only
   # when goreleaser, both images, and the chart succeeded, so a failed scan,
-  # signature, or chart push leaves the GitHub release as a draft. GH_REPO
-  # names the repository, so the job needs no checkout.
+  # signature, or chart push leaves the GitHub release as a draft. The job
+  # checks out the repository so it can run hack/publish-release.sh. GH_REPO
+  # names the repository, so gh does not rely on the working tree.
   publish:
     name: publish
     runs-on: ubuntu-latest
@@ -354,6 +355,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: publish the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
