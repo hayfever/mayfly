@@ -910,7 +910,10 @@ scanner's database download works, or that GHCR serves a tag. The ci
 `image-scan`, the nightly, the stability preflight, and the release scan are
 the proof. The check also cannot see a CVE published, or a fix released, after
 the last preflight run; the release scan catches that finding and leaves the
-release a draft.
+release a draft. The release publish check reads the workflow and exercises
+`hack/publish-release.sh` against a fake `gh`; it does not prove that GitHub
+accepts the edit or that the API returns the expected latest tag after a real
+release.
 
 The k3d image fixtures check the matcher, not the cluster. They do not run
 `k3d image import`, do not read a live `crictl` inventory, and do not check node
@@ -1096,3 +1099,31 @@ There is no fuzz target. The script does no text parsing: it builds an
 argument vector, reads an exit status, and writes a summary. The version file
 is read by a `cat` step in the workflow, and the policy check compares the
 value. There is no parser to fuzz.
+
+### Release publish check
+
+`test/release/publish_test.go` parses every workflow under `.github/workflows`.
+It checks that the release `publish` job runs `hack/publish-release.sh` and
+that the step env sets `GH_REPO` (`${{ github.repository }}`), so `gh` names the repository even without a working tree. The job also checks out the repository so the script is present. It checks that no step asks `gh` for the `isLatest` JSON field,
+which the CLI does not have. For every job that runs `gh`, the check requires
+an `actions/checkout` step, a non-empty `GH_REPO` in the step or job env, or a
+repo-qualified call (`-R`, `--repo`, or `gh api` with a `repos/<owner>/<repo>/`
+path). A job that mixes a repo-qualified `gh api` with an unqualified
+`gh release view` fails unless it also checks out or sets `GH_REPO`.
+
+`TestReleasePublishPolicyRejectsBrokenCopies` applies one mutation in memory
+and requires the check to report it: remove `GH_REPO` from the publish step;
+add a step that asks for `--json isLatest`; add `isLatest` to a `--json` field
+list; add a job that runs `gh release view` with no checkout, no `GH_REPO`, and
+no `-R`; inline `gh` in the publish step; and remove the checkout from the
+image-scan `published` job. Every mutation is rejected.
+
+`hack/test-publish-release.sh` is the behavioral check of the RC-versus-final
+rule. With a fake `gh` on `PATH` and no network, it proves that an RC is edited
+with `--latest=false` and fails when it is the repository's latest release,
+that a final tag is edited with `--latest=true` and fails when another tag is
+latest, and that a failed view, edit, or API read, a release that stays a
+draft, an unreadable draft state, and a missing `GH_REPO` or `GH_TOKEN` all
+fail. The `shell` job in ci runs it and shellchecks both scripts. There is no
+fuzz target: the scripts build argument vectors and the test reads exit
+statuses, so there is no Go parser to fuzz.

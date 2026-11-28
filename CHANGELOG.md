@@ -4,6 +4,10 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ## [Unreleased]
 
+### Fixed
+
+- The release `publish` job checks out the repository so it can run `hack/publish-release.sh`, and sets `GH_REPO` so `gh` names the repository without relying on the working tree. It checks the latest marker with `GET /repos/{owner}/{repo}/releases/latest` instead of the invalid `gh release view --json isLatest`, which failed the 1.0.0-rc.4 release run.
+
 ## [1.0.0-rc.4] - 2026-11-27
 
 ### Added
