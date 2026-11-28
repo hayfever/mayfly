@@ -348,18 +348,31 @@ func (s *Server) commonHeaders(next http.Handler) http.Handler {
 
 func (s *Server) recoverPanics(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tracker := &writeTracker{ResponseWriter: w}
 		defer func() {
-			if rec := recover(); rec != nil {
-				s.logger.Error("panic serving request", "path", r.URL.Path, "panic", rec)
-				// The runtime protocol keeps its plain body and status.
-				if strings.HasPrefix(r.URL.Path, "/internal/") {
-					http.Error(w, "internal server error", http.StatusInternalServerError)
-					return
-				}
-				writeError(w, http.StatusInternalServerError, codeInternal, "internal server error")
+			rec := recover()
+			if rec == nil {
+				return
 			}
+			// A deliberate abort owns the connection. Re-panic before any log
+			// or write so net/http can handle it as usual.
+			if isAbortHandler(rec) {
+				panic(rec)
+			}
+			s.logger.Error("panic serving request", "path", r.URL.Path, "panic", rec, "headers_sent", tracker.wroteHeader)
+			if tracker.wroteHeader {
+				// The status line and part of the body are already on the
+				// wire. A second response would corrupt them.
+				return
+			}
+			// The runtime protocol keeps its plain body and status.
+			if strings.HasPrefix(r.URL.Path, "/internal/") {
+				http.Error(tracker, "internal server error", http.StatusInternalServerError)
+				return
+			}
+			writeError(tracker, http.StatusInternalServerError, codeInternal, "internal server error")
 		}()
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(tracker, r)
 	})
 }
 
