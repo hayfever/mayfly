@@ -791,6 +791,21 @@ The model abstracts these details:
   overlong IPv6 host; the fuzz run found the missing length cap before commit,
   and the seed stays as the regression. A 60-second run made 526,765
   executions.
+- `FuzzRecoverPanics` (`internal/httpapi`) drives `recoverPanics` with every
+  panic kind (string, error, `http.ErrAbortHandler`, a wrapped
+  `http.ErrAbortHandler`, int, typed nil, struct) and a fuzz-chosen sequence of
+  `WriteHeader`, `Write`, and `Flush` calls before it, on both an `/api/` and
+  an `/internal/` path. It asserts that an abort panic propagates unchanged and
+  writes nothing, that any other panic stays recovered, that the middleware
+  adds no status line or body when the handler already committed the response,
+  and that it writes exactly one 500 with the existing body when the handler
+  wrote nothing. A `WriteHeader(101)` (Switching Protocols) is treated as a
+  committed response, the same as a status of 200 or higher. Seeds cover every
+  panic kind with no write, a header only, a header and body, a body only, a
+  flush only, an interim 1xx, and a 101 with no hijack, on both paths.
+  What is not verified: a real `net/http` connection (including its silent
+  handling of `ErrAbortHandler`), HTTP/2, and a panic raised in another
+  goroutine. A 60-second run made 289,731 executions.
 - `FuzzDecide` (`internal/releasegate`) feeds arbitrary workflow-run and job
   payloads to `Decide`. A PASS must satisfy an independent, more permissive
   search: a green `ci` run and a successful `e2e-stability` run with at least

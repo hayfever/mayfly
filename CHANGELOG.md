@@ -6,6 +6,7 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ### Fixed
 
+- `recoverPanics` re-panics `http.ErrAbortHandler` and writes no error body once a handler has committed a response, including a 101 Switching Protocols status written without a hijack. A deliberate abort or a mid-stream panic no longer appends a 500 to a partial body, while a panic before any write still returns the existing JSON or plain `/internal/` 500. The panic log records `headers_sent` (#103).
 - The release `publish` job checks out the repository so it can run `hack/publish-release.sh`, and sets `GH_REPO` so `gh` names the repository without relying on the working tree. It checks the latest marker with `GET /repos/{owner}/{repo}/releases/latest` instead of the invalid `gh release view --json isLatest`, which failed the 1.0.0-rc.4 release run.
 
 ## [1.0.0-rc.4] - 2026-11-27
