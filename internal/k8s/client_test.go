@@ -1,8 +1,12 @@
 package k8s
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"slices"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -11,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
@@ -295,6 +300,62 @@ func TestGCIgnoresPluginObjects(t *testing.T) {
 	}
 	if _, ok := orphans[""]; ok {
 		t.Fatalf("orphans report a plugin object: %v", orphans)
+	}
+}
+
+func TestCreateSessionRollbackLogsFailedDeletes(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	client := NewForClient(cs, "mayfly")
+	spec := testSpec()
+	spec.PersistentWorkspace = true
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	podErr := errors.New("pod denied by the dead-letter fixture")
+	claimErr := errors.New("claim is protected")
+	cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, podErr
+	})
+	cs.PrependReactor("delete", "persistentvolumeclaims", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, claimErr
+	})
+	cs.PrependReactor("delete", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, spec.ConfigMapName)
+	})
+	var logs bytes.Buffer
+	client.log = slog.New(slog.NewTextHandler(&logs, nil))
+
+	err := client.CreateSession(context.Background(), spec)
+	if err == nil {
+		t.Fatal("CreateSession succeeded with a denied pod")
+	}
+	if !errors.Is(err, podErr) || !strings.Contains(err.Error(), "create session pod") {
+		t.Fatalf("CreateSession error = %v, want the pod create error", err)
+	}
+
+	var deleted []string
+	for _, action := range cs.Actions() {
+		if action.GetVerb() == "delete" {
+			deleted = append(deleted, action.GetResource().Resource)
+		}
+	}
+	want := []string{"persistentvolumeclaims", "networkpolicies", "configmaps", "secrets"}
+	if !slices.Equal(deleted, want) {
+		t.Fatalf("rollback deletes = %v, want %v", deleted, want)
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, "persistentvolumeclaim/"+spec.PVCName) {
+		t.Errorf("failed claim delete was not logged: %s", out)
+	}
+	if !strings.Contains(out, "session="+spec.SessionID) {
+		t.Errorf("rollback log does not name the session: %s", out)
+	}
+	if !strings.Contains(out, claimErr.Error()) {
+		t.Errorf("rollback log does not carry the delete error: %s", out)
+	}
+	if strings.Contains(out, "configmap/"+spec.ConfigMapName) {
+		t.Errorf("rollback logged an already-absent configmap: %s", out)
 	}
 }
 

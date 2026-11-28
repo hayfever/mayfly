@@ -119,7 +119,10 @@ session idempotency key, so a worker that stops between Create and Ack does not
 start a second session when the job runs again.
 
 Webhook producers use the sender's delivery key, such as
-`X-GitHub-Delivery` or `Idempotency-Key`. A schedule slot uses
+`X-GitHub-Delivery` or `Idempotency-Key`. A delivery key must be valid UTF-8;
+a request whose key is not valid UTF-8 gets `400` with
+`code: invalid_request` and is not queued. The control plane never rewrites a
+key, because the key is the dedupe identity. A schedule slot uses
 `schedule:<name>:<RFC 3339 slot>`. A manual run uses a random key, so it neither
 consumes nor blocks a cron slot.
 

@@ -15,8 +15,8 @@ jobs:
       matrix:
         go-version: ["1.26.x", "1.27.x"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: ${{ matrix.go-version }}
       - name: gofmt
@@ -33,7 +33,7 @@ jobs:
         run: go test -race ./internal/... ./cmd/...
       - name: build
         run: go build ./cmd/...
-      - uses: azure/setup-helm@v5
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: v3.22.1
       - name: chart
@@ -53,19 +53,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: "1.27.x"
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0
 
   vulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: "1.27.x"
       - name: govulncheck
@@ -73,11 +73,79 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
           "$(go env GOPATH)/bin/govulncheck" ./...
 
+  # The image scan is expensive (two QEMU builds), so it runs only when a
+  # change can affect an image. The job still reports on every pull request:
+  # a job that `if:` skips it reports "skipped", which satisfies a required
+  # status check, while a workflow-level `paths:` filter would leave the check
+  # "expected" and block the merge. See docs/release.md.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      images: ${{ steps.filter.outputs.images }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            images:
+              - 'Dockerfile'
+              - 'go.mod'
+              - 'go.sum'
+              - 'hack/image-scan.sh'
+              - '.github/trivy-version'
+              - '.github/workflows/ci.yml'
+
+  image-scan:
+    name: image scan (${{ matrix.image }})
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [mayflyd, mayfly-agent]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: read the Trivy version
+        id: trivy-version
+        run: echo "value=$(cat .github/trivy-version)" >> "$GITHUB_OUTPUT"
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ steps.trivy-version.outputs.value }}
+      - name: build without pushing
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/images/${{ matrix.image }}"
+          mkdir -p "$dir"
+          for platform in linux/amd64 linux/arm64; do
+            docker buildx build \
+              --file ./Dockerfile \
+              --target "${{ matrix.image }}" \
+              --platform "$platform" \
+              --build-arg VERSION=0.0.0-ci \
+              --build-arg COMMIT="$GITHUB_SHA" \
+              --build-arg DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --output "type=docker,dest=${dir}/${platform//\//-}.tar" \
+              .
+          done
+      - name: scan both platforms
+        run: hack/image-scan.sh --dir "$RUNNER_TEMP/images/${{ matrix.image }}"
+
   shell:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: k3d image matcher fixtures
         run: make test-k3d-images
       - name: shellcheck
@@ -90,17 +158,25 @@ jobs:
             hack/lib/k3d-images.sh \
             hack/e2e.sh \
             hack/k3d-up.sh \
+            hack/image-scan.sh \
+            hack/test-image-scan.sh \
+            hack/publish-release.sh \
+            hack/test-publish-release.sh \
             hack/test-k3d-images.sh
+      - name: image scan policy
+        run: bash hack/test-image-scan.sh
+      - name: release publish policy
+        run: bash hack/test-publish-release.sh
 
   api-diff:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           fetch-tags: true
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: "1.26.x"
       - name: api diff
@@ -110,11 +186,11 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           fetch-tags: true
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: "1.26.x"
       - name: surface diff

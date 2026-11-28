@@ -29,8 +29,10 @@ On the main port, `/metrics` is part of the public API listener, so it requires 
 | `mayfly_auth_failures_total` | counter | `via` | Refused API credentials: `bearer` for an `Authorization` header, `web` for a browser sign-in or session cookie |
 | `mayfly_http_requests_total` | counter | `route`, `method`, `code` | Requests served. `method` is a standard HTTP method or `OTHER` |
 | `mayfly_http_request_duration_seconds` | histogram | `route`, `method` | Request duration |
-| `mayfly_llm_requests_total` | counter | `model`, `result` | Model calls the broker proxied upstream: `ok`, `error` |
-| `mayfly_llm_request_duration_seconds` | histogram | `model` | Model call duration, from the request to the last response byte |
+| `mayfly_llm_requests_total` | counter | `model`, `result` | Model calls by result: `ok` and `error` for forwarded calls, `busy`, `over_budget`, and `persist_failed` for calls the budget refused. A refused call is not forwarded |
+| `mayfly_llm_request_duration_seconds` | histogram | `model` | Model call duration, from the request to the last response byte, including a refused call |
+| `mayfly_llm_tokens_total` | counter | `model`, `kind` | Tokens charged to sessions, as `prompt` or `completion`. The count includes estimated usage |
+| `mayfly_llm_usage_estimated_total` | counter | `model` | Model calls charged from a size estimate or a transport-failure reservation |
 | `mayfly_gateway_calls_total` | counter | `tool`, `result` | Tool calls the gateway finished or refused: `ok`, `error`, `interrupted`, `denied`, `rate_limited`, `busy`. A denied call to a tool the session does not have is labeled `tool="unknown"` |
 | `mayfly_build_info` | gauge | `version`, `commit`, `date`, `go_version` | Build identity; the value is always 1 |
 
@@ -44,7 +46,7 @@ The registry also includes the standard Prometheus Go and process collectors. Th
 
 ## Request logs
 
-Every request writes one line at info level with these fields:
+Every request writes one line. A successful health probe or metrics scrape (`GET /healthz`, `GET /readyz`, `GET /metrics`) logs at debug level. Every other request, and a probe or scrape that returns 400 or above, logs at info level. The line has these fields:
 
 - `request_id`
 - `method`

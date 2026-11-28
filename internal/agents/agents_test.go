@@ -1,8 +1,11 @@
 package agents
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestBuildRendersPrompt(t *testing.T) {
@@ -37,6 +40,39 @@ func TestBuildRejectsBadDefinitions(t *testing.T) {
 	for name, def := range cases {
 		if _, err := Build(def, "agent.yaml"); err == nil {
 			t.Fatalf("%s: expected an error", name)
+		}
+	}
+}
+
+func TestBuildKeepsLLMBudgetOverrides(t *testing.T) {
+	agent, err := Build(Definition{Name: "ok", MaxLLMTokens: 500, MaxLLMRequests: 3}, "agent.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.MaxLLMTokens != 500 || agent.MaxLLMRequests != 3 {
+		t.Fatalf("budget = %d / %d", agent.MaxLLMTokens, agent.MaxLLMRequests)
+	}
+	// The manifest uses camelCase keys in both formats, like maxSteps.
+	var loaded Definition
+	if err := yaml.Unmarshal([]byte("name: ok\nmaxLLMTokens: 700\nmaxLLMRequests: 7\n"), &loaded); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.MaxLLMTokens != 700 || loaded.MaxLLMRequests != 7 {
+		t.Fatalf("yaml budget = %d / %d", loaded.MaxLLMTokens, loaded.MaxLLMRequests)
+	}
+	loaded = Definition{}
+	if err := json.Unmarshal([]byte(`{"name":"ok","maxLLMTokens":800,"maxLLMRequests":8}`), &loaded); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.MaxLLMTokens != 800 || loaded.MaxLLMRequests != 8 {
+		t.Fatalf("json budget = %d / %d", loaded.MaxLLMTokens, loaded.MaxLLMRequests)
+	}
+	for name, def := range map[string]Definition{
+		"tokens":   {Name: "ok", MaxLLMTokens: -1},
+		"requests": {Name: "ok", MaxLLMRequests: -1},
+	} {
+		if _, err := Build(def, "agent.yaml"); err == nil {
+			t.Fatalf("%s: a negative budget was accepted", name)
 		}
 	}
 }

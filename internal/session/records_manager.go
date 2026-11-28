@@ -27,16 +27,27 @@ func (m *Manager) SetRecords(store RecordStore) {
 	m.records = store
 }
 
-// loadRecords restores the sessions and artifact metadata a previous
-// control-plane lifetime wrote. It does not judge a non-terminal record:
-// settleInterrupted does that once adoption has reported what it can see.
-func (m *Manager) loadRecords(ctx context.Context) error {
+// listRecords reads every stored session record. Start reads them once, so
+// adoption can seed a live session from its record before loadRecords restores
+// the rest.
+func (m *Manager) listRecords(ctx context.Context) ([]Record, error) {
 	if m.records == nil {
-		return nil
+		return nil, nil
 	}
 	records, err := m.records.List(ctx)
 	if err != nil {
-		return fmt.Errorf("load session records: %w", err)
+		return nil, fmt.Errorf("load session records: %w", err)
+	}
+	return records, nil
+}
+
+// loadRecords restores the sessions and artifact metadata a previous
+// control-plane lifetime wrote. records is the list Start already read.
+// It does not judge a non-terminal record: settleInterrupted does that once
+// adoption has reported what it can see.
+func (m *Manager) loadRecords(ctx context.Context, records []Record) error {
+	if m.records == nil {
+		return nil
 	}
 	artifacts, err := m.records.ListArtifacts(ctx)
 	if err != nil {
@@ -302,9 +313,29 @@ func (m *Manager) persistRecord(sess model.Session) {
 // lock orders snapshot and save together, so a transition that finishes later
 // cannot be overwritten by one that copied its state earlier.
 func (m *Manager) persistInstance(inst *instance) {
+	_ = m.persistInstanceErr(inst)
+}
+
+// persistInstanceErr writes the current snapshot and reports the error. The
+// model budget uses it: a reservation that is not durable must refuse the
+// call instead of running untracked.
+func (m *Manager) persistInstanceErr(inst *instance) error {
+	if m.records == nil {
+		return nil
+	}
 	inst.persistMu.Lock()
 	defer inst.persistMu.Unlock()
-	m.persistRecord(m.copySession(inst))
+	sess := m.copySession(inst)
+	if sess.ID == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), recordTimeout)
+	defer cancel()
+	if err := m.records.Save(ctx, Record{Version: RecordFormatVersion, Session: sess}); err != nil {
+		m.logger.Warn("persist session record", "session", sess.ID, "error", err)
+		return err
+	}
+	return nil
 }
 
 func (m *Manager) deleteRecord(id string) {

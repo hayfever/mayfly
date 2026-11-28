@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -113,7 +114,11 @@ func (s *Server) observeRequests(next http.Handler) http.Handler {
 			status = http.StatusOK
 		}
 		s.metrics.HTTPRequest(route, r.Method, status, duration)
-		s.logger.Info("http request",
+		level := slog.LevelInfo
+		if status < http.StatusBadRequest && probeRoute(r.Method, route) {
+			level = slog.LevelDebug
+		}
+		s.logger.Log(r.Context(), level, "http request",
 			"request_id", id,
 			"method", r.Method,
 			"route", route,
@@ -122,6 +127,20 @@ func (s *Server) observeRequests(next http.Handler) http.Handler {
 			"bytes", rec.bytes,
 		)
 	})
+}
+
+// probeRoute reports whether a request is a health probe or a metrics scrape.
+// A successful probe is frequent and carries no information, so it logs at
+// debug level; a failed probe (status 400 or above) stays at info.
+func probeRoute(method, route string) bool {
+	if method != http.MethodGet {
+		return false
+	}
+	switch route {
+	case "/healthz", "/readyz", "/metrics":
+		return true
+	}
+	return false
 }
 
 // routeLabel returns the pattern that matched. An unmatched request has no

@@ -33,6 +33,8 @@ type AgentInfo struct {
 	AllowShell         bool     `json:"allow_shell"`
 	MaxSteps           int      `json:"max_steps"`
 	MaxHistoryMessages int      `json:"max_history_messages"`
+	MaxLLMTokens       int      `json:"max_llm_tokens"`
+	MaxLLMRequests     int      `json:"max_llm_requests"`
 	Protocol           int      `json:"protocol"`
 	Command            []string `json:"command,omitempty"`
 	Args               []string `json:"args,omitempty"`
@@ -234,6 +236,7 @@ func (m *Manager) agentInfo(agent agents.Agent) AgentInfo {
 	if maxHistory <= 0 {
 		maxHistory = m.cfg.Sessions.MaxHistoryMessages
 	}
+	maxLLMTokens, maxLLMRequests := m.resolveLLMBudget(agent)
 	return AgentInfo{
 		Name:               agent.Name,
 		Description:        agent.Description,
@@ -247,6 +250,8 @@ func (m *Manager) agentInfo(agent agents.Agent) AgentInfo {
 		AllowShell:         agentAllowShell(agent, m.cfg),
 		MaxSteps:           maxSteps,
 		MaxHistoryMessages: maxHistory,
+		MaxLLMTokens:       maxLLMTokens,
+		MaxLLMRequests:     maxLLMRequests,
 		Protocol:           agent.Runtime.Protocol,
 		Command:            append([]string(nil), agent.Runtime.Command...),
 		Args:               append([]string(nil), agent.Runtime.Args...),
@@ -266,6 +271,18 @@ func (m *Manager) resolveAgent(name string) (agents.Agent, error) {
 		return agents.Agent{}, fmt.Errorf("unknown agent %q", name)
 	}
 	return agent, nil
+}
+
+func (m *Manager) resolveLLMBudget(agent agents.Agent) (tokens, requests int) {
+	tokens = agent.MaxLLMTokens
+	if tokens <= 0 {
+		tokens = m.cfg.Sessions.MaxLLMTokens
+	}
+	requests = agent.MaxLLMRequests
+	if requests <= 0 {
+		requests = m.cfg.Sessions.MaxLLMRequests
+	}
+	return tokens, requests
 }
 
 func agentAllowShell(agent agents.Agent, cfg *config.Config) bool {

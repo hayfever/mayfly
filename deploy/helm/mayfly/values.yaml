@@ -113,6 +113,10 @@ config:
     # follows event_buffer_bytes.
     inbox_buffer_bytes: 8388608
     max_steps: 24
+    # Model budget one session resolves. 0 leaves the limit off. An agent
+    # manifest can override either value.
+    max_llm_tokens: 0
+    max_llm_requests: 0
     max_history_messages: 120
     max_concurrent: 50
     retention: 30m

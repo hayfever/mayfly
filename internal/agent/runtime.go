@@ -1077,13 +1077,35 @@ var modelRetryBudget = 5 * time.Minute
 
 // retryableModelError keeps a turn alive across a control-plane replacement,
 // where the broker connection and 5xx responses are transient. A provider
-// rejecting the request is not retried.
+// rejecting the request is not retried. A 429 whose body reports
+// llm_budget_exhausted is terminal: retrying cannot make room in the session
+// budget, and the control plane closes the session in any case.
 func retryableModelError(err error) bool {
 	var status *llm.StatusError
 	if errors.As(err, &status) {
+		if status.Code == 429 && modelErrorCode(status.Body) == codeLLMBudgetExhausted {
+			return false
+		}
 		return status.Code >= 500 || status.Code == 408 || status.Code == 429
 	}
 	return !errors.Is(err, context.Canceled)
+}
+
+// codeLLMBudgetExhausted is the broker's error code for a refused model call.
+// The control plane owns the same value; the runtime only needs to recognise
+// it.
+const codeLLMBudgetExhausted = "llm_budget_exhausted"
+
+// modelErrorCode reads the machine-readable code of an OpenAI-shaped error
+// body, which the broker writes as {"error":"...","code":"..."}.
+func modelErrorCode(body string) string {
+	var payload struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return ""
+	}
+	return payload.Code
 }
 
 // Version returns the runtime version string.

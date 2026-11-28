@@ -104,6 +104,19 @@ func TestDecide(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// The image scan runs as `preflight-scan (<image>)` in the same
+			// stability run. Only `e2e (<run>/<queue>)` may count toward the
+			// 20 runs, and that job's result gates the run separately.
+			name: "preflight-scan jobs do not count as e2e runs",
+			sha:  testSHA,
+			runs: []Run{ciRun("success"), stabilityRun(20, 1, "success")},
+			jobs: append(stabilityJobs(20, 1, RequiredStabilityRuns),
+				Job{RunID: 20, Name: "preflight-scan (mayflyd)", RunAttempt: 1, Status: "completed", Conclusion: "success"},
+				Job{RunID: 20, Name: "preflight-scan (mayfly-agent)", RunAttempt: 1, Status: "completed", Conclusion: "success"},
+			),
+			wantOK: true,
+		},
+		{
 			name:       "no stability run",
 			sha:        testSHA,
 			runs:       []Run{ciRun("success")},

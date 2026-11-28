@@ -4,9 +4,28 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ## [Unreleased]
 
+### Fixed
+
+- The release `publish` job checks out the repository so it can run `hack/publish-release.sh`, and sets `GH_REPO` so `gh` names the repository without relying on the working tree. It checks the latest marker with `GET /repos/{owner}/{repo}/releases/latest` instead of the invalid `gh release view --json isLatest`, which failed the 1.0.0-rc.4 release run.
+
+## [1.0.0-rc.4] - 2026-11-27
+
+### Added
+
+- `hack/image-scan.sh` is the single image scan policy, with trivy pinned in `.github/trivy-version`. It scans `linux/amd64` and `linux/arm64` for fixed HIGH or CRITICAL vulnerabilities, fails when either platform fails or trivy itself errors, and prints the image and platform. It runs in ci on image-affecting changes, nightly from `main`, as the `preflight-scan` job of the stability gate, and as the release scan before signing. `test/imagepolicy` checks that every workflow routes through the script and keeps the policy, and `hack/test-image-scan.sh` checks the script's exit codes with a fake trivy.
+
+### Fixed
+
+- The `mayfly-agent` image upgrades its Debian packages when it builds, so security fixes released after the pinned `node:26-bookworm-slim` digest are installed. The rc.3 image failed the release scan on CVE-2025-6020 in `libpam0g`, `libpam-modules`, `libpam-modules-bin`, and `libpam-runtime` (1.5.2-6+deb12u2, fixed in 1.5.2-6+deb12u3).
+
+## [1.0.0-rc.3] - 2026-11-27
+
+This candidate was tagged but not published: the release scan failed on the agent image (CVE-2025-6020 in libpam), so only the mayflyd image exists. Use 1.0.0-rc.4.
+
 ### Added
 
 - `hack/e2e.sh` and `hack/k3d-up.sh` import images through `hack/lib/k3d-images.sh`, which checks every image on every k3d server and agent node after the import, retries the missing images three times with backoff, and fails with `image X missing on node Y` plus a per-node image list. `hack/test-k3d-images.sh` checks the name matcher with fixture JSON (#52).
+- A per-session model budget. `sessions.max_llm_tokens` and `sessions.max_llm_requests` (both default `0`, which is off) cap forwarded model calls, and an agent manifest can override either value. The session object reports `llm_usage` and `llm_budget`, and the control plane exports `mayfly_llm_tokens_total` and `mayfly_llm_usage_estimated_total`. A call at the limit gets `429` with code `llm_budget_exhausted`, an overlapping call gets `429` with code `llm_busy` and `Retry-After`, and an exhausted budget appends an `error` event and closes the session with reason `llm_budget_exhausted` (#49).
 - A TLA+ model of the session lifecycle and resume protocol in `spec/tla`, checked by `hack/tlc.sh` and the `tlc` job in `.github/workflows/verify.yml`. See [docs/formal-verification.md](docs/formal-verification.md).
 - Native Go fuzz targets for webhook verification and parsing, persisted queue jobs, journal steps, session records, runtime events, HTTP request bodies, the hub, and bundles. `hack/fuzz.sh` runs every target, and the `fuzz-nightly` job runs them on a schedule.
 - `sessions.max_event_bytes` (default 64 KiB) caps one runtime event (#44).
@@ -25,11 +44,16 @@ All notable changes are recorded here. The project follows semantic versioning o
 
 ### Changed
 
+- Every third-party GitHub Action in `.github/workflows` is pinned to a full commit SHA with the release tag in a trailing comment, and the root `Dockerfile` base images are pinned to their multi-arch index digests. Dependabot keeps the pins current (#51).
+- A successful health probe or metrics scrape (`GET /healthz`, `GET /readyz`, `GET /metrics`) logs at debug level instead of info. A failed probe or scrape, and every other request, stays at info (#51).
 - The release workflow gates every `v*` tag, including release candidates, on a green `ci` run and a successful 20-run `e2e-stability` run for the tagged commit. A failed gate fails before anything is built or published, and a successful rerun attempt counts for both workflows. A stability dispatch counts by `head_sha` or by an exact `sha=<40-hex>` run-name, so a run dispatched on `main` covers the commit it names. An annotated tag is peeled to its commit before the lookup (#50).
 - The GitHub release is created as a draft and stays a draft until the images, chart, and signatures exist; a final `publish` job makes it public with an explicit `latest` value. A final release is latest and an RC is not, decided by a goreleaser `make_latest` template and by the same check in `publish`. Image digests are signed before their tags are created, and `checksums.txt` carries a keyless cosign bundle that `cosign verify-blob` checks (#50).
 
 ### Fixed
 
+- A webhook delivery key (`X-GitHub-Delivery`, Slack `trigger_id`, or `Idempotency-Key`) that is not valid UTF-8 is rejected with `400` instead of sanitized to U+FFFD. Sanitizing mapped two different deliveries to one dedupe key, so the second was dropped as a duplicate. Accepted keys stay valid UTF-8 and are used verbatim, and `FuzzParseUntrusted` keeps the failing input as a seed (#61 follow-up, scheduled verify run 45635308722).
+- A model call that reports no usage is billed its request bytes over four plus its response bytes over four, and the completion part stops at the call's `max_tokens`. One estimated call therefore never charges more than the reservation the admit hook recorded (#49).
+- A model call that panics after it was admitted is counted in `mayfly_llm_requests_total` and `mayfly_llm_request_duration_seconds`, and a reservation the record store cannot keep is labeled `persist_failed` in `mayfly_llm_requests_total` instead of `error` (#49).
 - A Streamable HTTP MCP server that answers with `text/event-stream` can deliver a legal image tool result: the SSE decoder, the HTTP JSON body, and the stdio line share an 8 MiB response bound instead of a 4 MiB SSE line bound (#71).
 - An image tool result whose encoded base64 length cannot fit the configured limits is rejected before the base64 decode, so an oversized payload never allocates its decoded buffer and the caller still gets the existing rejected-image text part (#71).
 - A client that sends headers and then stalls the request body no longer pins a handler goroutine and connection. The handler sets a read deadline, answers `408 request_timeout`, and closes the connection. This covers `/api/v1` JSON bodies, `/hooks/{name}`, and the internal JSON endpoints; WebSocket attach, streams, the LLM proxy, and artifact uploads keep their own behavior (#48).
@@ -48,6 +72,9 @@ All notable changes are recorded here. The project follows semantic versioning o
 - The hub evicts the oldest thread events when a session exceeds `sessions.event_buffer_bytes`, and keeps an unconsumed human message in the inbox through a runtime event flood (#44).
 - A journaled event restored at adoption is truncated to `sessions.max_event_bytes`, so a journal entry larger than the cap cannot retain an oversized event (#44).
 - The control plane passes `sessions.event_buffer_bytes` to the hub, so the setting takes effect instead of leaving the hub on its default (#44).
+- The e2e `TestSessionLLMBusyDoesNotCharge` no longer assumes a model call is settled when the agent's reply is visible. It probes the proxy until the earlier call releases the session's in-flight slot, retries the slow call while it is refused `llm_busy`, and asserts the ledger from that settled baseline. `spec/tla/TokenBudget.tla` separates `Observe` (the client has `data: [DONE]`) from `Charge` (the slot is released), checks `ObserveKeepsSlot` and `NoBusyAfterSettled`, proves `BusyRetryAdmitted`, and `TokenBudget_observe_implies_settled_buggy.cfg` must fail on `NoBusyAfterSettled`; `TestInternalLLMBusyUntilUpstreamEOF` and `FuzzServeLLMBudget` cover the same window. `hack/e2e.sh` streams each control-plane pod's log into `$E2E_ARTIFACTS/pods`, so a pod that a restart or upgrade test deletes still leaves its log (#49 follow-up).
+- The e2e `TestSessionLLMBusyDoesNotCharge` no longer fails when the `kubectl port-forward` tunnel drops a call before the control plane admits it. `tunnelRetryAfter` repeats a probe or the slow call only after a transport error while the session's admitted request count did not move, and a dropped call that moved the count fails as a lost response instead of repeating a billed call. `TestTunnelRetryAfter` and `FuzzTunnelRetryDecision` cover the decision without a cluster, and `hack/e2e.sh` passes `E2E_ARTIFACTS` to the suite, which copies each `kubectl port-forward` stderr to `$E2E_ARTIFACTS/port-forward-<n>.log`.
+- The e2e `TestDeadLetter` no longer fails on a claim that a rolled-back session start deleted but Kubernetes still lists. The check reads each session object's `deletionTimestamp`: an object without one fails at once as a real leak, and the test then waits up to 30 seconds for a terminating object to disappear. `parseLeftovers` and `unterminatedLeftovers` (`e2e/leftovers.go`) hold the decision, with `TestParseLeftovers`, `TestUnterminatedLeftovers`, and `FuzzLeftoverParse` covering it without a cluster. `CreateSession`'s rollback now logs every delete error that is not `NotFound` with the session ID and `kind/name`, and still runs the remaining deletes.
 
 ## [1.0.0-rc.2] - 2026-11-20
 
@@ -268,6 +295,8 @@ Historical: these describe 0.1.0, and many no longer apply. See the README for c
 - Sidecar calls carry a short-lived token signed with the session's `gateway-key`, which is mounted only into sidecars. Service calls carry a token signed with the per-plugin key in `mayfly-gateway-<name>`.
 - The default NetworkPolicy requires a CNI that enforces it. The e2e suite verifies enforcement.
 
+[1.0.0-rc.4]: https://github.com/hayfever/mayfly/releases/tag/v1.0.0-rc.4
+[1.0.0-rc.3]: https://github.com/hayfever/mayfly/releases/tag/v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/hayfever/mayfly/releases/tag/v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/hayfever/mayfly/releases/tag/v1.0.0-rc.1
 [0.3.0]: https://github.com/hayfever/mayfly/releases/tag/v0.3.0

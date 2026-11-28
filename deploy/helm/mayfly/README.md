@@ -27,7 +27,7 @@ helm install mayfly deploy/helm/mayfly \
   --set config.server.public_url=https://mayfly.example.com
 ```
 
-The default images are `ghcr.io/hayfever/mayflyd` and `ghcr.io/hayfever/mayfly-agent`, tagged with the chart's `appVersion` (`1.0.0-rc.2` for this chart) when `image.tag` and `agentImage.tag` are empty. Override `image` and `agentImage` for your registry.
+The default images are `ghcr.io/hayfever/mayflyd` and `ghcr.io/hayfever/mayfly-agent`, tagged with the chart's `appVersion` (`1.0.0-rc.4` for this chart) when `image.tag` and `agentImage.tag` are empty. Override `image` and `agentImage` for your registry.
 
 Check the token:
 

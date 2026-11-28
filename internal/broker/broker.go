@@ -5,11 +5,14 @@ package broker
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,58 +62,102 @@ func (b *Broker) HTTPClient() *http.Client { return b.client }
 // ServeLLM handles POST /internal/v1/llm/chat/completions. The session token is
 // validated by the caller, which also passes the model assigned to the session.
 // A session cannot select a different model, even an allowlisted one.
-func (b *Broker) ServeLLM(w http.ResponseWriter, r *http.Request, sessionModel string) {
+//
+// admit runs after body and model validation and before the upstream request.
+// It lets a caller enforce a budget: a non-nil error makes the broker write the
+// hook's refusal (see Refusal) and skip the upstream call. A nil admit skips
+// the check.
+//
+// The returned CallResult reports the upstream status, any usage the provider
+// sent, and the byte counts. The proxy still passes the response through
+// unparsed, so a caller sees the bytes the provider sent.
+func (b *Broker) ServeLLM(w http.ResponseWriter, r *http.Request, sessionModel string, admit func(reqBytes int64, maxOut int64) error) CallResult {
+	var res CallResult
 	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
+		res.Status = http.StatusMethodNotAllowed
+		res.RespBytes = writeError(w, res.Status, "method not allowed")
+		return res
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, b.cfg.MaxBodyBytes+1))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "read request body")
-		return
+		res.Status = http.StatusBadRequest
+		res.RespBytes = writeError(w, res.Status, "read request body")
+		return res
 	}
 	if int64(len(body)) > b.cfg.MaxBodyBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
-		return
+		res.Status = http.StatusRequestEntityTooLarge
+		res.RespBytes = writeError(w, res.Status, "request body too large")
+		return res
 	}
 	var probe struct {
-		Model  string `json:"model"`
-		Stream bool   `json:"stream"`
+		Model               string          `json:"model"`
+		Stream              bool            `json:"stream"`
+		MaxTokens           json.RawMessage `json:"max_tokens"`
+		MaxCompletionTokens json.RawMessage `json:"max_completion_tokens"`
 	}
 	if err := json.Unmarshal(body, &probe); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
-		return
+		res.Status = http.StatusBadRequest
+		res.RespBytes = writeError(w, res.Status, "invalid JSON body")
+		return res
 	}
 	switch probe.Model {
 	case "":
 		// Fill in the session model so the upstream cannot pick another one.
 		body, err = setModel(body, sessionModel)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON body")
-			return
+			res.Status = http.StatusBadRequest
+			res.RespBytes = writeError(w, res.Status, "invalid JSON body")
+			return res
 		}
 	case sessionModel:
 	default:
-		writeError(w, http.StatusForbidden, "model is not assigned to this session")
-		return
+		res.Status = http.StatusForbidden
+		res.RespBytes = writeError(w, res.Status, "model is not assigned to this session")
+		return res
 	}
 	if !b.cfg.ModelAllowed(sessionModel) {
-		writeError(w, http.StatusForbidden, "model is not allowed")
-		return
+		res.Status = http.StatusForbidden
+		res.RespBytes = writeError(w, res.Status, "model is not allowed")
+		return res
+	}
+	if probe.Stream {
+		// Ask the provider to send usage in the final stream chunk. Only a
+		// streamed request may carry stream_options.
+		body, err = injectStreamOptions(body, true)
+		if err != nil {
+			res.Status = http.StatusBadRequest
+			res.RespBytes = writeError(w, res.Status, "invalid JSON body")
+			return res
+		}
 	}
 
 	base := strings.TrimRight(b.cfg.BaseURL, "/")
 	upstream, err := url.Parse(base + "/chat/completions")
 	if err != nil || (upstream.Scheme != "http" && upstream.Scheme != "https") {
 		b.logger.Error("invalid llm base_url", "base_url", b.cfg.BaseURL)
-		writeError(w, http.StatusInternalServerError, "model backend is not configured")
-		return
+		res.Status = http.StatusInternalServerError
+		res.RespBytes = writeError(w, res.Status, "model backend is not configured")
+		return res
 	}
+
+	res.ReqBytes = int64(len(body))
+	res.MaxOut = outputLimit(probe.MaxCompletionTokens, probe.MaxTokens)
+	if admit != nil {
+		if err := admit(res.ReqBytes, res.MaxOut); err != nil {
+			res.Status, res.RespBytes = writeRefusal(w, err)
+			return res
+		}
+	}
+	// The hook admitted the call, so from here the reservation stands even if
+	// the upstream never answers. The request is marked forwarded only once it
+	// is built: a request that never left the process costs no tokens.
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstream.String(), bytes.NewReader(body))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "build upstream request")
-		return
+		res.Status = http.StatusInternalServerError
+		res.RespBytes = writeError(w, res.Status, "build upstream request")
+		return res
 	}
+	res.Forwarded = true
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", r.Header.Get("Accept"))
 	if b.cfg.APIKey != "" {
@@ -122,13 +169,32 @@ func (b *Broker) ServeLLM(w http.ResponseWriter, r *http.Request, sessionModel s
 	resp, err := b.client.Do(req)
 	if err != nil {
 		b.logger.Warn("llm upstream request failed", "error", err)
-		writeError(w, http.StatusBadGateway, "model backend unavailable")
-		return
+		res.TransportErr = true
+		res.Status = http.StatusBadGateway
+		res.RespBytes = writeError(w, res.Status, "model backend unavailable")
+		return res
 	}
 	defer func() { _ = resp.Body.Close() }()
 	copyHeaders(w.Header(), resp.Header, "Content-Type", "Cache-Control")
+	res.Status = resp.StatusCode
 	w.WriteHeader(resp.StatusCode)
-	streamCopy(w, resp.Body)
+
+	if probe.Stream && strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		res.Streamed = true
+		scan := &usageScanner{}
+		streamCopy(w, resp.Body, scan)
+		res.RespBytes = scan.total
+		res.Usage, res.Reported = scan.Result()
+		return res
+	}
+
+	capture := &bodyCapture{limit: maxUsageBufferBytes}
+	streamCopy(w, resp.Body, capture)
+	res.RespBytes = capture.total
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && !capture.overflow {
+		res.Usage, res.Reported = decodeUsage(capture.buf)
+	}
+	return res
 }
 
 // ServeMCP proxies one MCP server. upstream is the configured server definition;
@@ -179,7 +245,7 @@ func (b *Broker) ServeMCP(w http.ResponseWriter, r *http.Request, def config.MCP
 	defer func() { _ = resp.Body.Close() }()
 	copyHeaders(w.Header(), resp.Header, "Content-Type", "Cache-Control", "Mcp-Session-Id", "MCP-Protocol-Version")
 	w.WriteHeader(resp.StatusCode)
-	streamCopy(w, resp.Body)
+	streamCopy(w, resp.Body, nil)
 }
 
 // setModel returns the request body with the model field set to name.
@@ -187,6 +253,9 @@ func setModel(body []byte, name string) ([]byte, error) {
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, err
+	}
+	if doc == nil {
+		return nil, errNotJSONObject
 	}
 	encoded, err := json.Marshal(name)
 	if err != nil {
@@ -204,7 +273,10 @@ func copyHeaders(dst, src http.Header, names ...string) {
 	}
 }
 
-func streamCopy(w http.ResponseWriter, r io.Reader) {
+// streamCopy copies r to w and flushes after every read. A non-nil tee sees
+// each chunk that reached the client, after the flush, so it never delays a
+// stream. The tee's writes are ignored: it observes, it does not forward.
+func streamCopy(w http.ResponseWriter, r io.Reader, tee io.Writer) {
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 32*1024)
 	for {
@@ -216,6 +288,9 @@ func streamCopy(w http.ResponseWriter, r io.Reader) {
 			if flusher != nil {
 				flusher.Flush()
 			}
+			if tee != nil {
+				_, _ = tee.Write(buf[:n])
+			}
 		}
 		if err != nil {
 			return
@@ -223,8 +298,46 @@ func streamCopy(w http.ResponseWriter, r io.Reader) {
 	}
 }
 
-func writeError(w http.ResponseWriter, status int, message string) {
+// writeJSON writes value as a JSON response and returns the bytes written.
+func writeJSON(w http.ResponseWriter, status int, value any) int64 {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		payload = []byte(`{"error":"internal error"}`)
+		status = http.StatusInternalServerError
+	}
+	payload = append(payload, '\n')
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+	n, _ := w.Write(payload)
+	return int64(n)
+}
+
+// writeError writes one error object and returns the bytes written.
+func writeError(w http.ResponseWriter, status int, message string) int64 {
+	return writeJSON(w, status, map[string]string{"error": message})
+}
+
+// writeRefusal writes an admit-hook refusal and returns its status and the
+// bytes written. An error that is not a *Refusal becomes a 500 with no code.
+func writeRefusal(w http.ResponseWriter, err error) (int, int64) {
+	status := http.StatusInternalServerError
+	code := ""
+	var refusal *Refusal
+	if errors.As(err, &refusal) {
+		if refusal.Status != 0 {
+			status = refusal.Status
+		}
+		code = refusal.Code
+		if refusal.RetryAfter > 0 {
+			// The runtime reads Retry-After as whole seconds, rounded up, so
+			// a retry never lands before the refusal's own wait.
+			seconds := int64(math.Ceil(refusal.RetryAfter.Seconds()))
+			w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+		}
+	}
+	body := map[string]string{"error": err.Error()}
+	if code != "" {
+		body["code"] = code
+	}
+	return status, writeJSON(w, status, body)
 }

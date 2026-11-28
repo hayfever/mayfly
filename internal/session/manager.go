@@ -151,6 +151,10 @@ type instance struct {
 	// persistMu orders the snapshot and the write of one record, so two
 	// transitions cannot store their snapshots out of order.
 	persistMu sync.Mutex
+	// llmMu guards llm and every write of the LLM fields of sess. It is
+	// acquired before inst.mu, never after.
+	llmMu sync.Mutex
+	llm   llmLedger
 }
 
 // Manager is the control plane session registry and lifecycle engine.
@@ -178,6 +182,12 @@ type Manager struct {
 
 	// records keeps session records and the artifact index across restarts.
 	records RecordStore
+	// adoptRecords is the record store's contents as Start read them, by
+	// session ID. Adoption seeds a live session's model usage from it, because
+	// the session ConfigMap does not carry that usage. An adoption retried
+	// after start reads the same snapshot: a session that is not live yet
+	// cannot have written a newer record.
+	adoptRecords map[string]model.Session
 	// adoptPending holds the session IDs the last adoption pass saw but could
 	// not rebuild, with the attempts and reason, and adoptIncomplete reports a
 	// pass that failed before it saw every session. A record for such an ID is
@@ -330,9 +340,21 @@ func New(cfg *config.Config, bundle *project.Bundle, store artifact.Store, h *hu
 // Start launches maintenance loops and adopts existing Kubernetes pods.
 func (m *Manager) Start(ctx context.Context) error {
 	m.ctx, m.cancel = context.WithCancel(ctx)
+	// Read the records before adoption. Adoption rebuilds a live session from
+	// its ConfigMap, which carries the budget but not the usage counters, so
+	// it seeds them from the record. loadRecords reuses this list instead of
+	// reading the store twice.
+	records, err := m.listRecords(ctx)
+	if err != nil {
+		m.cancel()
+		return err
+	}
+	m.adoptRecords = make(map[string]model.Session, len(records))
+	for _, rec := range records {
+		m.adoptRecords[rec.Session.ID] = rec.Session
+	}
 	var replacements []*instance
 	if m.kube != nil {
-		var err error
 		replacements, err = m.adopt(ctx)
 		if err != nil {
 			m.logger.Warn("adopt existing sessions", "error", err)
@@ -341,7 +363,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	// Adoption rebuilds live sessions first, so a record it owns is not
 	// reported as interrupted. A record this build cannot read stops startup:
 	// serving a partial list would hide sessions an operator can still see.
-	if err := m.loadRecords(ctx); err != nil {
+	if err := m.loadRecords(ctx, records); err != nil {
 		m.cancel()
 		return err
 	}
@@ -525,6 +547,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 	if maxHistory <= 0 {
 		maxHistory = m.cfg.Sessions.MaxHistoryMessages
 	}
+	maxLLMTokens, maxLLMRequests := m.resolveLLMBudget(agent)
 	allowShell := agentAllowShell(agent, m.cfg)
 	harness := harnessName(agent)
 	image := agent.Runtime.Image
@@ -577,6 +600,8 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		LLMTimeoutSeconds:    int(m.cfg.LLM.Timeout.Std().Seconds()),
 		MaxSteps:             maxSteps,
 		MaxHistoryMessages:   maxHistory,
+		MaxLLMTokens:         maxLLMTokens,
+		MaxLLMRequests:       maxLLMRequests,
 		TTLSeconds:           int(ttl.Seconds()),
 		IdleTimeoutSeconds:   int(m.cfg.Sessions.IdleTimeout.Std().Seconds()),
 		WorkspaceDir:         m.cfg.Sessions.WorkspaceDir,
@@ -631,6 +656,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (*model.Sessio
 		env:        cloneEnv(runtimeEnv),
 		launchedAt: now,
 	}
+	inst.setLLMBudget(maxLLMTokens, maxLLMRequests)
 
 	if m.cfg.Runtime.Backend == "local" && agent.Runtime.Image != "" {
 		m.logger.Warn("agent image is ignored by the local backend", "agent", agent.Name, "image", agent.Runtime.Image)
@@ -1450,6 +1476,14 @@ func cloneSession(in model.Session) model.Session {
 	out.Skills = append([]string(nil), in.Skills...)
 	out.MCPServers = append([]string(nil), in.MCPServers...)
 	out.Plugins = append([]string(nil), in.Plugins...)
+	if in.LLMUsage != nil {
+		usage := *in.LLMUsage
+		out.LLMUsage = &usage
+	}
+	if in.LLMBudget != nil {
+		budget := *in.LLMBudget
+		out.LLMBudget = &budget
+	}
 	return out
 }
 
