@@ -134,7 +134,7 @@ func (b *Broker) ServeLLM(w http.ResponseWriter, r *http.Request, sessionModel s
 	base := strings.TrimRight(b.cfg.BaseURL, "/")
 	upstream, err := url.Parse(base + "/chat/completions")
 	if err != nil || (upstream.Scheme != "http" && upstream.Scheme != "https") {
-		b.logger.Error("invalid llm base_url", "base_url", b.cfg.BaseURL)
+		b.logger.Error("invalid llm base_url", "base_url", redactURL(b.cfg.BaseURL))
 		res.Status = http.StatusInternalServerError
 		res.RespBytes = writeError(w, res.Status, "model backend is not configured")
 		return res
@@ -168,7 +168,7 @@ func (b *Broker) ServeLLM(w http.ResponseWriter, r *http.Request, sessionModel s
 	}
 	resp, err := b.client.Do(req)
 	if err != nil {
-		b.logger.Warn("llm upstream request failed", "error", err)
+		b.logger.Warn("llm upstream request failed", "error", redactError(err))
 		res.TransportErr = true
 		res.Status = http.StatusBadGateway
 		res.RespBytes = writeError(w, res.Status, "model backend unavailable")
@@ -238,7 +238,7 @@ func (b *Broker) ServeMCP(w http.ResponseWriter, r *http.Request, def config.MCP
 	}
 	resp, err := b.client.Do(req)
 	if err != nil {
-		b.logger.Warn("mcp upstream request failed", "server", def.Name, "error", err)
+		b.logger.Warn("mcp upstream request failed", "server", def.Name, "error", redactError(err))
 		writeError(w, http.StatusBadGateway, "MCP server unavailable")
 		return
 	}
