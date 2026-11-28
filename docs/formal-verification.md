@@ -706,6 +706,15 @@ The model abstracts these details:
   keeps its slot and charges nothing until EOF, that the retry after EOF is
   admitted, that no in-flight slot leaks, and `BudgetBound`. A 90-second run
   made 39,053 executions.
+- `FuzzRedactURL` (`internal/broker`) drives the helper that prepares a
+  configured `llm.base_url` and a transport error for a log line. For arbitrary
+  input the redacted text must parse with an empty `User`, `RawQuery`, and
+  `Fragment`, must be the placeholder when the input does not parse, and must
+  not change under a second call. The seeds cover userinfo with a password,
+  userinfo without one, encoded userinfo, a bare query, an IPv6 host and port,
+  an empty string, whitespace, a non-URL, an unparsable scheme, a URL with no
+  authority, a 4 KiB path with a query, and the placeholder itself. A
+  60-second run made 1,568,113 executions.
 - `FuzzHubAppendBudget` (`internal/hub`) drives appends, restores, and replays,
   and asserts the byte budget, the count cap, the contiguous suffix, and that
   the inbox keeps its human message.
@@ -893,6 +902,12 @@ ledger operations and replaying them through the model, is future work.
 A fuzz target checks the input handling of the package that adds it; the
 targets do not check the lifecycle. `hack/fuzz.sh` discovers targets
 automatically; a branch with no fuzz target exits 0 and says so.
+
+`FuzzRedactURL` checks the text that `redactURL` returns. It does not prove
+that every broker log line and error path uses the helpers, and it cannot see a
+credential that reaches a log through an error type other than `*url.Error`.
+The broker unit tests cover the known lines: an invalid `llm.base_url`, an LLM
+transport failure, and an MCP transport failure.
 
 The token budget model is checked against the design. `FuzzTokenLedger` and
 `FuzzServeLLMBudget` sample random action sequences against the Go ledger and
