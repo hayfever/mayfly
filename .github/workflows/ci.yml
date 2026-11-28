@@ -160,9 +160,13 @@ jobs:
             hack/k3d-up.sh \
             hack/image-scan.sh \
             hack/test-image-scan.sh \
+            hack/publish-release.sh \
+            hack/test-publish-release.sh \
             hack/test-k3d-images.sh
       - name: image scan policy
         run: bash hack/test-image-scan.sh
+      - name: release publish policy
+        run: bash hack/test-publish-release.sh
 
   api-diff:
     if: github.event_name == 'pull_request'
