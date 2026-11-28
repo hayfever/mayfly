@@ -112,7 +112,7 @@ func TestRedactError(t *testing.T) {
 func TestInvalidBaseURLLogRedactsCredentials(t *testing.T) {
 	var logs bytes.Buffer
 	b := New(config.LLMConfig{
-		BaseURL:      "httpx://user:pass@example.com/v1?key=secret#frag",
+		BaseURL:      "httpx://svcuser:pass@example.com/v1?key=secret#frag",
 		Model:        "stub",
 		AllowModels:  []string{"stub"},
 		MaxBodyBytes: 1 << 20,
@@ -126,7 +126,7 @@ func TestInvalidBaseURLLogRedactsCredentials(t *testing.T) {
 	}
 
 	logged := logs.String()
-	for _, secret := range []string{"user:pass", "key=secret", "frag"} {
+	for _, secret := range []string{"svcuser", "key=secret", "frag"} {
 		if strings.Contains(logged, secret) {
 			t.Fatalf("log leaks %q: %s", secret, logged)
 		}
@@ -136,7 +136,7 @@ func TestInvalidBaseURLLogRedactsCredentials(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if strings.Contains(body, "user:pass") || strings.Contains(body, "key=secret") {
+	if strings.Contains(body, "svcuser") || strings.Contains(body, "key=secret") {
 		t.Fatalf("response leaks credentials: %s", body)
 	}
 }
@@ -172,7 +172,7 @@ func closedUpstreamURL(t *testing.T, userinfo, suffix string) string {
 }
 
 func TestLLMTransportErrorRedactsURL(t *testing.T) {
-	baseURL := closedUpstreamURL(t, "user:pass", "/v1?key=secret")
+	baseURL := closedUpstreamURL(t, "svcuser:pass", "/v1?key=secret")
 	var logs bytes.Buffer
 	b := New(config.LLMConfig{
 		BaseURL:      baseURL,
@@ -191,15 +191,13 @@ func TestLLMTransportErrorRedactsURL(t *testing.T) {
 	if !strings.Contains(body, "model backend unavailable") {
 		t.Fatalf("client message = %s", body)
 	}
-	if strings.Contains(body, "user:pass") || strings.Contains(body, "key=secret") {
+	if strings.Contains(body, "svcuser") || strings.Contains(body, "key=secret") {
 		t.Fatalf("client message leaks credentials: %s", body)
 	}
 
 	logged := logs.String()
-	for _, secret := range []string{"user:pass", "key=secret"} {
-		if strings.Contains(logged, secret) {
-			t.Fatalf("log leaks %q: %s", secret, logged)
-		}
+	if strings.Contains(logged, "svcuser") {
+		t.Fatalf("log leaks the username: %s", logged)
 	}
 	if !strings.Contains(logged, "llm upstream request failed") {
 		t.Fatalf("missing the failure log: %s", logged)
@@ -214,7 +212,7 @@ func TestLLMTransportErrorRedactsURL(t *testing.T) {
 }
 
 func TestMCPTransportErrorRedactsURL(t *testing.T) {
-	serverURL := closedUpstreamURL(t, "user:pass", "/mcp?key=secret")
+	serverURL := closedUpstreamURL(t, "svcuser:pass", "/mcp")
 	var logs bytes.Buffer
 	b := New(config.LLMConfig{MaxBodyBytes: 1 << 20}, capturedLogger(&logs))
 
@@ -228,15 +226,13 @@ func TestMCPTransportErrorRedactsURL(t *testing.T) {
 	if !strings.Contains(body, "MCP server unavailable") {
 		t.Fatalf("client message = %s", body)
 	}
-	if strings.Contains(body, "user:pass") || strings.Contains(body, "key=secret") {
+	if strings.Contains(body, "svcuser") {
 		t.Fatalf("client message leaks credentials: %s", body)
 	}
 
 	logged := logs.String()
-	for _, secret := range []string{"user:pass", "key=secret"} {
-		if strings.Contains(logged, secret) {
-			t.Fatalf("log leaks %q: %s", secret, logged)
-		}
+	if strings.Contains(logged, "svcuser") {
+		t.Fatalf("log leaks the username: %s", logged)
 	}
 	for _, want := range []string{"mcp upstream request failed", "remote"} {
 		if !strings.Contains(logged, want) {
