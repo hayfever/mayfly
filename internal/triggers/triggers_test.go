@@ -282,7 +282,7 @@ func TestGitHubTitleReplacesInvalidUTF8(t *testing.T) {
 	body := []byte(`{"repository":{"full_name":"acme/app"},"sender":{"login":"alice"}}`)
 	header := http.Header{}
 	header.Set("X-GitHub-Event", "push\xff")
-	header.Set("X-GitHub-Delivery", "delivery-\xfe")
+	header.Set("X-GitHub-Delivery", "delivery-1")
 	header.Set("X-Hub-Signature-256", "sha256="+hmacHex(secret, body))
 	res, err := Parse(config.TriggerConfig{Name: "github", Type: "github", Secret: secret}, header, body)
 	if err != nil {
@@ -300,6 +300,55 @@ func TestGitHubTitleReplacesInvalidUTF8(t *testing.T) {
 	}
 	if !strings.Contains(res.Options.Title, "\uFFFD") || !strings.Contains(res.Options.Title, "push") {
 		t.Fatalf("title = %q, want the event name with a replacement rune", res.Options.Title)
+	}
+}
+
+func TestDeliveryKeyMustBeValidUTF8(t *testing.T) {
+	gh := func(delivery string) (*Result, error) {
+		body := []byte(`{}`)
+		header := http.Header{}
+		header.Set("X-GitHub-Event", "push")
+		header.Set("X-GitHub-Delivery", delivery)
+		header.Set("X-Hub-Signature-256", "sha256="+hmacHex("gh-secret", body))
+		return Parse(config.TriggerConfig{Name: "github", Type: "github", Secret: "gh-secret"}, header, body)
+	}
+	// Two distinct invalid deliveries must not collapse to one dedupe key.
+	for _, delivery := range []string{"\xb0", "\xb1"} {
+		if _, err := gh(delivery); !errors.Is(err, ErrBadRequest) {
+			t.Fatalf("delivery %q returned %v, want ErrBadRequest", delivery, err)
+		}
+	}
+	const uuid = "9f0d6a2e-4c3b-4a1e-9f8d-2b7c6e5a1d30"
+	res, err := gh(uuid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DeliveryKey != uuid || res.Options.Trigger.Delivery != uuid {
+		t.Fatalf("delivery key = %q trigger delivery = %q, want %q", res.DeliveryKey, res.Options.Trigger.Delivery, uuid)
+	}
+
+	// The Idempotency-Key fallback follows the same rule for every kind.
+	for _, kind := range []string{"generic", "datadog"} {
+		cfg := config.TriggerConfig{Name: kind, Type: kind, AllowUnsigned: true}
+		header := http.Header{}
+		header.Set("Idempotency-Key", "\xb0")
+		if _, err := Parse(cfg, header, []byte(`{}`)); !errors.Is(err, ErrBadRequest) {
+			t.Fatalf("%s with an invalid Idempotency-Key returned %v, want ErrBadRequest", kind, err)
+		}
+		header.Set("Idempotency-Key", "  idem-1 \n")
+		res, err := Parse(cfg, header, []byte(`{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.DeliveryKey != "idem-1" || res.Options.Trigger.Delivery != "idem-1" {
+			t.Fatalf("%s delivery key = %q trigger delivery = %q, want idem-1", kind, res.DeliveryKey, res.Options.Trigger.Delivery)
+		}
+	}
+
+	// A Slack trigger_id is a delivery key too.
+	slack := config.TriggerConfig{Name: "slack", Type: "slack", AllowUnsigned: true}
+	if _, err := Parse(slack, http.Header{}, []byte("command=%2Fmayfly&text=hi&trigger_id=%B0")); !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("slack trigger_id with invalid UTF-8 returned %v, want ErrBadRequest", err)
 	}
 }
 

@@ -1,0 +1,106 @@
+name: image-scan
+
+# Nightly, blocking: build the images from the default branch and scan them,
+# then scan the images of the latest published release. The policy is
+# hack/image-scan.sh, the same one ci, e2e-stability, and release run. A
+# finding fails the run and writes the findings to the job summary. See
+# docs/release.md.
+#
+# This is its own workflow rather than a job in verify.yml: verify.yml runs
+# only when a formal-verification path changes, and its schedule drives TLC
+# and fuzzing. The image scan has different inputs, a different timeout, and
+# its own history of failures.
+on:
+  schedule:
+    # Daily at 05:43 UTC; verify runs at 04:17 and the stability gate on
+    # Sunday at 06:00.
+    - cron: "43 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  main:
+    name: image scan (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [mayflyd, mayfly-agent]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: read the Trivy version
+        id: trivy-version
+        run: echo "value=$(cat .github/trivy-version)" >> "$GITHUB_OUTPUT"
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ steps.trivy-version.outputs.value }}
+      - name: build without pushing
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/images/${{ matrix.image }}"
+          mkdir -p "$dir"
+          for platform in linux/amd64 linux/arm64; do
+            docker buildx build \
+              --file ./Dockerfile \
+              --target "${{ matrix.image }}" \
+              --platform "$platform" \
+              --build-arg VERSION=0.0.0-nightly \
+              --build-arg COMMIT="$GITHUB_SHA" \
+              --build-arg DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --output "type=docker,dest=${dir}/${platform//\//-}.tar" \
+              .
+          done
+      - name: scan both platforms
+        run: hack/image-scan.sh --dir "$RUNNER_TEMP/images/${{ matrix.image }}"
+
+  # A published tag can gain a finding after release: the database moves on.
+  # Scan the latest published release so the exposure is visible while the
+  # next release is prepared. When no release is published (every release is
+  # still a draft, as after a failed release run), there is nothing to scan.
+  published:
+    name: published image scan (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [mayflyd, mayfly-agent]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: read the Trivy version
+        id: trivy-version
+        run: echo "value=$(cat .github/trivy-version)" >> "$GITHUB_OUTPUT"
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ steps.trivy-version.outputs.value }}
+      - name: find the latest published release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName // ""')"
+          if [[ -z "$tag" ]]; then
+            echo "no published release exists; nothing to scan"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          fi
+      - name: scan both platforms
+        if: steps.release.outputs.tag != ''
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          hack/image-scan.sh "ghcr.io/${owner}/${{ matrix.image }}:${TAG#v}"

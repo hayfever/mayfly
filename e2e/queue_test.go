@@ -33,8 +33,21 @@ func TestDeadLetter(t *testing.T) {
 	if !slices.Contains(deadIDs(t), id) {
 		t.Fatal("dead job is not listed under /api/v1/queue/dead")
 	}
-	if left, err := env.sessionObjects(""); err != nil || len(left) != 0 {
-		t.Fatalf("failed session starts left objects behind: %v (%v)", left, err)
+	// A delete only sets a deletionTimestamp, and the pvc-protection
+	// finalizer keeps the claim listed until its controller clears it, so
+	// `kubectl get -o name` reports an object that is on its way out. Fail
+	// at once on an object without a timestamp: no delete was accepted for
+	// it, which is a real leak. Then wait for the terminating objects to
+	// disappear.
+	objs, err := env.sessionObjectList()
+	if err != nil {
+		t.Fatalf("list session objects: %v", err)
+	}
+	if leaks := unterminatedLeftovers(objs); len(leaks) > 0 {
+		t.Fatalf("real leak: %s has no deletionTimestamp", strings.Join(leaks, ", "))
+	}
+	if err := env.waitNoSessionObjects(30 * time.Second); err != nil {
+		t.Fatal(err)
 	}
 	firstFailure := job.FailedAt
 

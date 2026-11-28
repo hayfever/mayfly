@@ -11,6 +11,9 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
   - package-ecosystem: docker
+    # `/` covers every FROM in the root Dockerfile: the golang build image,
+    # the node agent image, and the distroless stages. Dependabot updates a
+    # digest-pinned base when its tag moves.
     directories:
       - /
       - /e2e/plugins

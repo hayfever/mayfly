@@ -40,6 +40,8 @@ patches:
             close_grace: 60s
             event_buffer: 5000
             max_steps: 24
+            max_llm_tokens: 0
+            max_llm_requests: 0
             # The demo agent exercises run_command.
             allow_shell: true
             shell_timeout: 120s

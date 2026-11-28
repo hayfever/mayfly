@@ -536,7 +536,15 @@ func (m *Manager) finalize(inst *instance, status model.SessionStatus, reason, e
 		}
 	}
 	inst.sess.Status = final
-	inst.sess.Error = errMsg
+	// A session closed for its budget keeps the message exhaustLLM recorded:
+	// the runtime reports no error of its own for a graceful stop, so an empty
+	// errMsg would erase the only record of why the session ended.
+	errText := errMsg
+	if errText == "" && inst.sess.Error != "" &&
+		(inst.closeReason == llmCloseReason || reason == llmCloseReason) {
+		errText = inst.sess.Error
+	}
+	inst.sess.Error = errText
 	inst.sess.ClosedAt = &now
 	inst.sess.LastActivity = now
 	hash := inst.tokenHash
@@ -546,14 +554,14 @@ func (m *Manager) finalize(inst *instance, status model.SessionStatus, reason, e
 
 	m.removeToken(hash)
 	text := "Session " + string(final) + "."
-	if errMsg != "" {
-		text += " " + errMsg
+	if errText != "" {
+		text += " " + errText
 	}
 	m.hub.Append(inst.sess.ID, model.Event{
 		Type:  model.EventStatus,
 		Actor: "mayfly",
 		Text:  text,
-		Data:  model.StatusData{Status: final, Reason: reason, Error: errMsg},
+		Data:  model.StatusData{Status: final, Reason: reason, Error: errText},
 	})
 	// Shutdown waits for cleanup. A control plane that exits partway through
 	// would otherwise leave objects that adoption reads as a resumable
@@ -944,6 +952,9 @@ func (m *Manager) adoptPods(ctx context.Context, pods []corev1.Pod, only map[str
 		if inst.sess.Title == "" {
 			inst.sess.Title = "Session " + id
 		}
+		// The ConfigMap carries the budget but not the counters, so restore
+		// them from the record. The persist below writes the seed.
+		inst.seedLLM(m.adoptRecord(id), cfg)
 		// Seed before registering: a session whose turn keys cannot be
 		// placed above the previous lifetime's must not accept messages. The
 		// pod keeps its objects, so garbage collection leaves it alone.
@@ -966,6 +977,10 @@ func (m *Manager) adoptPods(ctx context.Context, pods []corev1.Pod, only map[str
 		m.hub.Create(id)
 		m.persistInstance(inst)
 		m.hub.Append(id, model.Event{Type: model.EventSystem, Actor: "mayfly", Text: "Session recovered by control plane restart."})
+		// A seeded ledger at its limit has nothing left to pay for, and no
+		// queued turn can run. Close before any redelivery so the session does
+		// not start work it cannot charge.
+		m.closeExhaustedAdopted(inst)
 		m.restoreJournalThread(id)
 		m.redeliverPending(inst)
 		m.logger.Info("adopted session", "session", id, "pod", pod.Name, "restarts", inst.restarts)
@@ -1054,6 +1069,9 @@ func (m *Manager) adoptPodless(ctx context.Context, id string, objs k8s.OrphanOb
 	if inst.sess.Title == "" {
 		inst.sess.Title = "Session " + id
 	}
+	// The ConfigMap carries the budget but not the counters, so restore them
+	// from the record. The registration path persists the seed.
+	inst.seedLLM(m.adoptRecord(id), cfg)
 	empty, err := m.seedSequence(ctx, id)
 	if err != nil {
 		m.logger.Error("adopt: cannot seed session sequence; leaving session unadopted", "session", id, "error", err)
@@ -1073,6 +1091,15 @@ func (m *Manager) adoptPodless(ctx context.Context, id string, objs k8s.OrphanOb
 	m.persistInstance(inst)
 	m.hub.Append(id, model.Event{Type: model.EventSystem, Actor: "mayfly", Text: "Session recovered by control plane restart."})
 	m.restoreJournalThread(id)
+	// A seeded ledger at its limit has nothing left to pay for, and no queued
+	// turn can run. Close before any redelivery. There is no pod, so no
+	// runtime will finalize the close: complete it here instead of waiting
+	// out the close grace period, which would mark the session failed.
+	if closed, message := m.closeExhaustedAdopted(inst); closed {
+		m.finalize(inst, model.StatusCompleted, llmCloseReason, message)
+		m.logger.Info("adopted session without a pod; closed on its model budget", "session", id)
+		return nil, false
+	}
 	m.redeliverPending(inst)
 	m.logger.Info("adopted session without a pod; starting a replacement", "session", id)
 	return inst, true

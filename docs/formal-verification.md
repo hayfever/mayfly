@@ -2,18 +2,22 @@
 
 Two checks cover behavior that unit tests can only sample: TLA+ models of the
 session lifecycle, hub retention, request-body deadlines, queue poison
-recovery, schedule time zones, and release gating, and native Go fuzz targets. A third check covers
+recovery, schedule time zones, release gating, and LLM token budgets, plus
+native Go fuzz targets. A third check covers
 the chart RBAC over its whole namespace configuration space. A fourth check
-covers the k3d image-name matcher with fixture JSON. Each has a script
-or command and a CI job.
+covers the k3d image-name matcher with fixture JSON. A fifth check covers the
+image scan policy across every workflow. Each has a script or command and a CI
+job.
 
 | Check | Script | CI job |
 |---|---|---|
-| TLC on `SessionResume.tla`, `HubRetention.tla`, `BodyReadDeadline.tla`, `QueuePoison.tla`, `AuthHardening.tla`, `CronTimezone.tla`, and `ReleaseGating.tla` | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
-| TLC with two sessions | `hack/tlc.sh --deep` | `tlc-deep` in verify.yml, nightly and on demand |
+| TLC on `SessionResume.tla`, `HubRetention.tla`, `BodyReadDeadline.tla`, `QueuePoison.tla`, `AuthHardening.tla`, `CronTimezone.tla`, `ReleaseGating.tla`, and `TokenBudget.tla` | `hack/tlc.sh` | `tlc` in [verify.yml](../.github/workflows/verify.yml), on pull requests |
+| TLC with two sessions and three budget callers | `hack/tlc.sh --deep` | `tlc-deep` in verify.yml, nightly and on demand |
 | Every fuzz target | `hack/fuzz.sh` | `fuzz-nightly` in verify.yml |
 | Chart RBAC property check | `MAYFLY_REQUIRE_HELM=1 go test ./test/chart/...` | `chart` step of the `test` job in [ci.yml](../.github/workflows/ci.yml) |
 | k3d image-name matcher fixtures | `hack/test-k3d-images.sh` | `shell` job in [ci.yml](../.github/workflows/ci.yml) |
+| Workflow and image scan policy conformance | `go test ./test/imagepolicy` | `test` job in ci.yml (`make test`) |
+| Image scan exit codes with a fake trivy | `hack/test-image-scan.sh` | `shell` job in ci.yml |
 
 `hack/tlc.sh` needs a JDK 17 or newer (`java` on `PATH`, or `JAVA`). It
 downloads the pinned, checksummed `tla2tools.jar` once into
@@ -97,6 +101,10 @@ fail on the invariant named in the cfg. See
 The model's fixed turn script is user, model, idempotent tool, non-idempotent
 tool, assistant. `ToolAt` names the tool of a step, so the call key is the same
 `<session>/<turn>/<step>` the gateway derives.
+
+The [token budget model](#token-budget-model) maps its own actions and
+invariants to `internal/session/budget.go` and `internal/broker` in its section
+below.
 
 ## Invariants and liveness
 
@@ -519,8 +527,185 @@ The model abstracts these details:
   publish that passes `--latest=true` for an RC. The `make_latest` template in
   `.goreleaser.yaml` is the production reason the switch is FALSE.
 
+## Token budget model (#49)
+
+`spec/tla/TokenBudget.tla` models the per-session LLM token budget from #49:
+the admit check before the upstream request, the in-flight cap, the durable
+reservation per call, the charge that lands in the counter and in the session
+record, the control-plane crash that loses memory only, the recovery that seeds
+the counter from the record plus its outstanding reservation, and the close
+that follows exhaustion. The flags tie to the exhaustion and concurrency
+decisions: a session at or over its budget refuses further calls and closes,
+and a session with a budget allows one call in flight with a durable
+reservation behind it.
+
+`Observe` and `Charge` are separate steps. `Observe` is the client's read of
+the reply finishing: for a stream that is `data: [DONE]`, which the agent's
+client stops at. `Charge` is the broker reaching upstream EOF, which settles
+the ledger and releases the slot. The reply is therefore complete on the wire
+while the call still holds the session's only slot, and a caller that treats
+`[DONE]` as a settled call is refused `llm_busy`. `AttemptBusy` is that
+refusal, and `WaitForSettle` is the caller's policy: on, the fixed caller waits
+for the settle; off, it waits only for the reply, which is the pre-fix
+assumption of the e2e overlap test. `Retry` is the fixed caller's retry of a
+refused call.
+
+| TLA+ action | Go code it models |
+|---|---|
+| `Admit` | the budget hook: the per-session ledger admit under `llmMu` in `internal/session/budget.go`, called from `ServeLLM`'s `admit` hook (`internal/broker/broker.go`). The in-flight check, the `max_llm_tokens` and `max_llm_requests` checks, the request increment, the reservation, and the synchronous record write |
+| `Upstream` | `broker.ServeLLM` after `client.Do` and the usage scan in `internal/broker/usage.go`. The charge is the reported usage or the byte estimate `req_bytes/4 + resp_bytes/4`, whose completion part stops at the call's `max_tokens` |
+| `Charge` | the charge-after path of the ledger (`internal/session/budget.go`): usage into the counter and the record, reservation released, token metric updated |
+| `Observe` | `readStream` in `internal/llm/client.go` returning at `data: [DONE]`, and the assistant message the runtime publishes from it. The slot, the reservation, and the ledger do not move |
+| `AttemptBusy` | `admitLLM` (`internal/session/budget.go`) refusing with `llm_busy`, 429 plus `Retry-After`, while `inflight >= 1`. It changes no usage and does not settle the running call |
+| `Retry` | the retry loop in `executeModel` (`internal/agent/runtime.go`) after `retryableModelError` accepts a 429 `llm_busy`, and the e2e test's `proxyBusyRetry`. One retry is one admission |
+| `Refuse` | `broker.Refusal` written by `writeRefusal`: `llm_busy` is 429 with `Retry-After`, `llm_budget_exhausted` is 429 without it, and `llm_persist_failed` is 503. A refusal is not forwarded and changes no counter. The model represents the exhausted refusal as `Refuse`, the busy refusal as `AttemptBusy`, and `llm_persist_failed` as an `Admit` that does not happen |
+| `Crash` | a control-plane process restart; no single Go function, because the process is gone. Memory is lost; the record keeps the charge and the reservation |
+| `Recover` | `session.Manager.Start` listing records before `adopt`, and the seeding in `adoptPods` and `adoptPodless` (`internal/session/manager.go`, `lifecycle.go`): `spent = record.spent + record.pending` |
+| `Exhaust` | the `EventError` and `Close(id, "llm_budget_exhausted")` in the charge path, with `sess.Error` set |
+| none (metrics) | `Metrics.LLMRequest` and `Metrics.LLMTokens` (`internal/metrics/metrics.go`), recorded by `internalLLM` for every call, including a panic after admit. The model has no metric state |
+| `Stutter` | no Go function; no further call at the modeled bound |
+
+| Property | Meaning | Tests that sample it |
+|---|---|---|
+| `TypeOK` | Every variable stays in its declared domain | none; model well-formedness |
+| `BudgetBound` | Billed tokens never exceed one call past the limit, and the request count never exceeds its cap | `FuzzTokenLedger`, `FuzzServeLLMBudget`, `TestLLMOvershootAtMostOneResponse`, `TestLLMRequestCapOvershootsByZero`, e2e `TestSessionBudgetExhaustion` |
+| `NoChargeLost` | A charged call always settles: the in-memory ledger and the durable record never fall below the billed tokens, and a refusal never releases a running call's slot | `FuzzTokenLedger`, `FuzzServeLLMBudget`, `TestLLMAdmitCharge`, `TestLLMChargeKeepsMemoryWhenPersistFails`, `TestLLMAdmitRollsBackOnPersistPanic`, `TestLLMAdmitFailsClosedWhenReservationIsNotDurable`, `TestInternalLLMBusyDoesNotCharge`, `TestInternalLLMPanicChargesReservation`, e2e `TestSessionLLMBusyDoesNotCharge`, `TestSessionBudgetSurvivesRestart` |
+| `NoAdmitWhenExhausted` | An exhausted session refuses every call, and a refusal changes no ledger state | `FuzzTokenLedger`, `FuzzServeLLMBudget`, `TestInternalLLMExhaustedBudget`, `TestInternalLLMPersistFailureRefusesAndLabels`, `TestLLMRefusedAdmitThenChargeChangesNothing`, `TestAdoptClosesExhaustedSession`, e2e `TestSessionBudgetExhaustion` |
+| `ClosedAfterExhaust` | A charge that reaches a limit appends one error event, closes with reason `llm_budget_exhausted`, and ends `completed` | `TestLLMExhaustionClosesSession`, `TestLLMExhaustionSurvivesEmptyFinalize`, `TestInternalLLMExhaustedBudget`, `TestAdoptClosesExhaustedSession`, `TestAdoptClosesExhaustedPodlessSession`, e2e `TestSessionBudgetExhaustion` |
+| `ObserveKeepsSlot` | An observed call is still in flight: the reply is complete on the wire, and the call still holds the slot and has not settled | `TestInternalLLMBusyUntilUpstreamEOF`, `TestInternalLLMBusyDoesNotCharge`, `FuzzServeLLMBudget` (the delayed-EOF op), e2e `TestSessionLLMBusyDoesNotCharge` |
+| `NoBusyAfterSettled` | A caller that waits for the earlier call to settle after it reads the reply is never refused busy. The ghost counts a refusal taken while the held reply was already visible | `TestInternalLLMBusyUntilUpstreamEOF`, e2e `TestSessionLLMBusyDoesNotCharge` |
+| `BusyRetryAdmitted` | A call refused busy is eventually admitted, or the session closes first. It holds under weak fairness on `Upstream`, `Observe`, `Charge`, and `Retry` | `TestTurnRetriesBusyModelError`, `TestInternalLLMBusyUntilUpstreamEOF`, `FuzzServeLLMBudget` (the delayed-EOF op), e2e `TestSessionLLMBusyDoesNotCharge` |
+
+The e2e cases in `e2e/budget_test.go` run against the deployed release. They
+cover exhaustion, two overlapping calls with `llm_busy`, the session fields and
+the CLI tokens line, the token and estimate counters, usage across a
+control-plane restart with bbolt, a per-agent override, and the defaults-off
+case. The exhaustion case spends the request cap through the proxy and then
+accepts either outcome for the next call: the `429 llm_budget_exhausted`
+refusal while the session is still open, or a `401` once the charge has closed
+the session and removed its scoped token. The usage must not change in either
+case.
+
+The overlap case encodes the `Observe`/`Charge` split. The agent's reply is
+visible at `data: [DONE]`, so the test first probes the proxy until a call is
+admitted: an admitted probe proves the earlier call released the slot, and the
+usage read after it is the settled baseline. It then starts a slow call and
+retries it while the answer is `llm_busy`, the same retry the runtime applies,
+and it retries the overlapping probe until the control plane refuses it busy,
+so the refusal belongs to the slow call and not to an agent call that settled
+in between. The request count is asserted as a lower bound, because the
+runtime's own retry and a redelivered prompt can add calls of their own.
+
+The suite reaches the control plane through a `kubectl port-forward`, which can
+drop a call that never left the tunnel; Go does not replay a POST with a body.
+`tunnelRetryAfter` (`e2e/forward.go`) repeats a call only after a transport
+error `forwardBroken` accepts while the session's admitted request count did not
+move. A dropped call that moved the count was admitted, so its missing response
+fails the test instead of repeating a billed call. `TestTunnelRetryAfter` and
+`FuzzTunnelRetryDecision` cover the decision without a cluster.
+
+The dead-letter case checks the objects a failed session start leaves behind. A
+delete only sets `metadata.deletionTimestamp`: the
+`kubernetes.io/pvc-protection` finalizer keeps a claim listed until its
+controller clears it, and `kubectl get -o name` prints a terminating object like
+any other. `TestDeadLetter` therefore lists the session objects with
+`kubectl get ... -o jsonpath` as `kind/name<TAB>deletionTimestamp`, fails at
+once when `unterminatedLeftovers` (`e2e/leftovers.go`) finds an object without a
+timestamp (no delete was accepted for it, so it is a real leak), and then waits
+up to 30 seconds for `waitNoSessionObjects` to see the terminating objects gone.
+`TestParseLeftovers`, `TestUnterminatedLeftovers`, and `FuzzLeftoverParse` cover
+the decision without a cluster; the fuzz target checks that a parsed listing
+keeps one object per non-blank line, in order, and marks an object terminating
+only when its timestamp is present. `CreateSession`'s rollback logs every delete
+error that is not `NotFound` with the session ID and `kind/name`, and still runs
+the remaining deletes; `TestCreateSessionRollbackLogsFailedDeletes` covers that
+with a fake clientset.
+
+`TokenBudget.cfg` sets `Budget = 3`, `MaxCall = 2`, two callers, no crash, an
+in-flight cap of one, the check, charge, and reservation writes on, and
+`WaitForSettle = TRUE` for the fixed caller. It checks every invariant and
+proves `ClosedAfterExhaust` and `BusyRetryAdmitted` under weak fairness on
+`Exhaust`, `Recover`, `Upstream`, `Observe`, `Charge`, and `Retry`: 310 states
+generated, 101 distinct, under one second. `TokenBudget_crash.cfg` adds two
+control-plane crashes: 2,284 generated, 703 distinct. The negative cfgs each
+flip one switch:
+
+| Cfg | Constant | Expected violation |
+|---|---|---|
+| `TokenBudget_no_inflight_cap_buggy.cfg` | `InflightCap = 2` | `BudgetBound` |
+| `TokenBudget_check_after_buggy.cfg` | `CheckBefore = FALSE` | `BudgetBound` |
+| `TokenBudget_volatile_counter_buggy.cfg` | `PersistCharge = FALSE` | `NoChargeLost` |
+| `TokenBudget_no_pending_buggy.cfg` | `DurablePending = FALSE` | `NoChargeLost` |
+| `TokenBudget_observe_implies_settled_buggy.cfg` | `WaitForSettle = FALSE` | `NoBusyAfterSettled` |
+
+The runs stop quickly: no-in-flight-cap 431 states generated (133 distinct),
+check-after 314 (119), volatile-counter 108 (64), and no-pending 14 (11). With
+`InflightCap = 2` two callers are admitted at `Budget - 1` and both responses
+charge `MaxCall`, so the provider's total passes the one-response allowance.
+With `CheckBefore = FALSE` the counter is tested only after the charge, so a
+call is admitted with the counter already at the budget. With
+`PersistCharge = FALSE` the record never holds a settled charge and a restart
+loses it. With `DurablePending = FALSE` the reservation never reaches the
+record, so a charge has no durable coverage while it is in flight.
+`TokenBudget_observe_implies_settled_buggy.cfg` turns `WaitForSettle` off: the
+caller treats `data: [DONE]` as a settled call, so its next call arrives while
+the observed call still holds the slot and is refused busy. TLC stops after 109
+states (62 distinct) on `NoBusyAfterSettled`; the counterexample is `Admit`,
+`Upstream`, `Observe`, then `AttemptBusy`. The positive cfgs reach the same
+`AttemptBusy` step when the holder's reply is not visible, so the liveness
+check is not vacuous: the refusal is legitimate there, and `Retry` admits the
+caller once `Charge` frees the slot.
+`deep/TokenBudget_three_callers.cfg` runs nightly with three callers, budget
+16, and two crashes: 105,108 states generated, 30,961 distinct, about eight
+seconds.
+
+The check-after cfg omits `NoAdmitWhenExhausted`, because admitting past the
+limit is that cfg's modeled bug; `BudgetBound` is the invariant that must bite.
+
+The model abstracts these details:
+
+- One call's charge is a nondeterministic value from 1 to `MaxCall`, and the
+  reservation is `MaxCall`. The model assumes that the estimate is an upper
+  bound. The Go reservation is `req_bytes/4` plus `max_tokens` (4096 by
+  default), which is a heuristic; the estimated completion stops at
+  `max_tokens`, so an estimated charge stays inside the reservation, while a
+  reported usage is charged as reported.
+- Tokens only. `max_llm_requests` is a second counter with no reservation and
+  no overshoot; it is outside the model.
+- `Observe` and `Charge` are single steps. Provider latency, SSE chunk
+  boundaries, and the gap between the last reply byte and EOF are outside the
+  model, as are the retry backoff (1s doubling to 5s) and its 5-minute budget:
+  `Retry` is one admission. A JSON reply reaches the client and EOF together;
+  the model covers the streamed case where `[DONE]` arrives first.
+- The caller policy is one switch. A real session can have several callers,
+  and the runtime retries a busy refusal while the e2e test waits for the
+  settle; `WaitForSettle` selects one policy for every caller in a cfg.
+- One session. The resolved per-session limit is the constant `Budget`;
+  per-agent overrides resolve before the ledger sees them.
+- `Exhaust` is the close decision. Session finalize, final status, and artifact
+  export after the close are modeled by `SessionResume.tla`.
+- bbolt writes are atomic, as in the other models.
+
 ## Fuzz targets for the bounds
 
+- `FuzzTokenLedger` (`internal/session`) drives the real ledger with random
+  admit, charge, crash and recover, refusal, save-failure, and concurrent-admit
+  sequences. It asserts `BudgetBound`, `NoChargeLost`, and
+  `NoAdmitWhenExhausted` against a ghost total of every charge the provider
+  billed, so it is the Action-to-Go bridge for the
+  [token budget model](#token-budget-model). Each charge must also equal the
+  amount the harness expects, which fails a size estimate that bills past the
+  call's `max_tokens` cap. A 90-second run made 499,297 executions.
+- `FuzzServeLLMBudget` (`internal/httpapi`) drives the internal LLM route with
+  random budgets and responses: reported usage, a 2xx without usage, a 2xx
+  whose body is far past the completion cap, an upstream 5xx, a forwarded 4xx,
+  a transport failure, two overlapping calls, a panic after admit, a persist
+  failure, a probe at the limit, an overlap while the provider holds the stream
+  open after `data: [DONE]`, and an unbudgeted session. It asserts that a
+  refusal changes no usage and settles no running call, that the open call
+  keeps its slot and charges nothing until EOF, that the retry after EOF is
+  admitted, that no in-flight slot leaks, and `BudgetBound`. A 90-second run
+  made 39,053 executions.
 - `FuzzHubAppendBudget` (`internal/hub`) drives appends, restores, and replays,
   and asserts the byte budget, the count cap, the contiguous suffix, and that
   the inbox keeps its human message.
@@ -543,6 +728,13 @@ The model abstracts these details:
   boundary seeds at the cap, one byte over, and a straddling rune.
   `FuzzGitHubParse` applies the UTF-8 assertion to every input, and one seed
   carries a non-UTF-8 `X-GitHub-Event` header.
+- `FuzzParseUntrusted` asserts the delivery-key rule across every trigger kind:
+  a key from `X-GitHub-Delivery`, Slack `trigger_id`, or `Idempotency-Key` is
+  accepted only when it is valid UTF-8, and an accepted key is used verbatim,
+  so two different raw keys can never share one dedupe identity. The seed
+  `testdata/fuzz/FuzzParseUntrusted/085a2b2b0c4ae5ad` carries a lone `0xB0`
+  byte in `X-GitHub-Delivery` and is the regression from the scheduled verify
+  run that sanitized the key to U+FFFD.
 - `FuzzWorkerHandlerPanic` (`internal/queue`) runs a handler that panics on
   fuzz-chosen bytes. It asserts that the worker recovers, counts
   `max_attempts` attempts, buries the poison job, and still completes a healthy
@@ -608,9 +800,36 @@ The model abstracts these details:
   empty jobs list, invalid JSON, a dispatch on another commit whose title names
   the target, and titles with a short, longer, unbounded, or prefix-sharing
   SHA. A 60-second run made 6,493,973 executions.
+- `FuzzSSEUsage` (`internal/broker`) feeds SSE bytes split at fuzzer-chosen
+  boundaries to the usage scan. It asserts that the scan matches the
+  single-chunk result, that a line over the line cap is skipped without growing
+  memory, that the forwarded bytes are unchanged, and that nothing panics.
+- `FuzzUsageJSON` (`internal/broker`) decodes arbitrary usage payloads. Tokens
+  never go negative, a huge or float value saturates instead of wrapping, and a
+  non-object is ignored.
+- `FuzzInjectStreamOptions` (`internal/broker`) rewrites streamed request
+  bodies. The output is valid JSON, `model` and every other key survive,
+  `include_usage` is true, existing `stream_options` keys are kept, and a
+  non-streamed body is unchanged.
 
 ## What is abstracted away
 
+- The e2e tunnel retry treats a dropped call as one error from the set
+  `forwardBroken` accepts: `io.EOF`, `ECONNRESET`, `ECONNREFUSED`, and
+  `net.ErrClosed`. A real port-forward can drop a call at any byte, and the
+  session's admitted request count is the only signal that the control plane
+  saw the call. Capture of `kubectl port-forward` stderr under
+  `E2E_ARTIFACTS` is not modeled.
+- The e2e dead-letter cleanup check treats a leftover object as removed once it
+  carries a `deletionTimestamp` and `waitNoSessionObjects` no longer lists it
+  within 30 seconds. The finalizer controller's own timing is not modeled, and
+  the listing spread over five `kubectl get` calls is not atomic; the wait that
+  follows covers an object created between the calls.
+- The token budget model abstracts one call's charge as a value from 1 to
+  `MaxCall` and assumes the reservation bounds it. The Go code keeps an
+  estimated charge inside that bound: the estimate's completion part stops at
+  the call's `max_tokens`. Byte counting, streaming, retries, the separate
+  request counter, and the finalize after the close are not modeled.
 - The release gating model abstracts each workflow job as an action. Job
   retries, runner availability, and the GitHub API's pagination and rate
   limits are not modeled. The model has one tag at a time.
@@ -660,17 +879,63 @@ A fuzz target checks the input handling of the package that adds it; the
 targets do not check the lifecycle. `hack/fuzz.sh` discovers targets
 automatically; a branch with no fuzz target exits 0 and says so.
 
+The token budget model is checked against the design. `FuzzTokenLedger` and
+`FuzzServeLLMBudget` sample random action sequences against the Go ledger and
+route, and the Go tests cover the named paths; neither proves every
+interleaving of the Go code. The e2e budget cases run against `llmstub`, a fake
+provider, not a real one. The stub reports usage unless the prompt carries its
+`no-usage` directive, which the metrics case uses to stay on the size estimate.
+The e2e suite is not run on the development machine for this change (Docker is
+unavailable); CI runs it against the release.
+
+The e2e tunnel retry is checked against synthetic transport errors and request
+counts. A live `kubectl port-forward` drop is not part of these checks, and the
+`E2E_ARTIFACTS` stderr capture is checked only by `TestForwardLogFile`, which
+writes to a temporary directory.
+
+The e2e dead-letter cleanup check is not run on the development machine (Docker
+and k3d are unavailable); CI runs it against the release. The terminating-object
+path needs a real claim held by the `pvc-protection` finalizer, so the local
+checks cover the parser, the decision, and the rollback logging only.
+
 The release gate reads synthetic GitHub API payloads. Its Go tests and
 `FuzzDecide` cover run and job selection, but the live API's field names and
 pagination are not verified. A change on the GitHub side fails the gate closed:
 an unreadable history is a failed gate. A real `v*` tag and a real release run
 are outside every check in this repository.
 
+The workflow policy check reads files; it does not run GitHub Actions. It
+cannot prove that a job is triggered, that a QEMU build succeeds, that a
+scanner's database download works, or that GHCR serves a tag. The ci
+`image-scan`, the nightly, the stability preflight, and the release scan are
+the proof. The check also cannot see a CVE published, or a fix released, after
+the last preflight run; the release scan catches that finding and leaves the
+release a draft. The release publish check reads the workflow and exercises
+`hack/publish-release.sh` against a fake `gh`; it does not prove that GitHub
+accepts the edit or that the API returns the expected latest tag after a real
+release.
+
 The k3d image fixtures check the matcher, not the cluster. They do not run
 `k3d image import`, do not read a live `crictl` inventory, and do not check node
 discovery from Docker labels. The retry backoff and the per-node report run only
 in `hack/e2e.sh` and `hack/k3d-up.sh`. The 20-run stability gate is the only
 check of the live import path.
+
+The token budget model assumes the estimate bounds the charge. The Go estimate
+is a heuristic: `bytes/4` under-counts images and CJK text, so a provider can
+charge more for a call than the estimate. The ledger never bills an estimated
+call past its reservation, because the completion part stops at the call's
+`max_tokens`; the real cost can still exceed what the counter shows. A provider
+that reports usage is charged what it reports, and a reported prompt count can
+exceed `req_bytes/4`, so a reported charge can pass the reservation and the
+one-response overshoot remains possible. A provider
+that omits usage is charged the estimate, and whether each provider honors
+`stream_options.include_usage` is unverified: the broker injects it and accepts
+a missing object, but no live provider call is part of these checks. A
+third-party harness may reject the injected usage-only SSE chunk with an empty
+`choices` array; the built-in runtime ignores it. Cost in dollars, the
+gateway and MCP spend, and cross-session or per-project aggregate budgets are
+outside the model and the implementation.
 
 ## Chart RBAC property check
 
@@ -784,3 +1049,81 @@ make test-k3d-images
 
 The `shell` job in [ci.yml](../.github/workflows/ci.yml) runs the fixtures and
 `shellcheck` on the helper and both callers on every push and pull request.
+
+## Workflow and image scan policy
+
+`hack/image-scan.sh` is the one image scan. The `image-scan` job in ci, the
+nightly `image-scan` workflow, the stability gate's `preflight-scan` job, and
+the release `images` job all call it, and no workflow invokes trivy directly.
+The script declares the whole policy once:
+`--scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`, for
+`linux/amd64` and `linux/arm64`. Trivy's version is in
+`.github/trivy-version`.
+
+`test/imagepolicy` is a test-only package. It parses every file under
+`.github/workflows` into jobs and steps, reads `hack/image-scan.sh`, and checks:
+
+- no workflow run step invokes trivy, and a workflow that calls the script
+  installs trivy;
+- every `aquasecurity/setup-trivy` step passes
+  `${{ steps.trivy-version.outputs.value }}`, and its job reads
+  `.github/trivy-version` into that step;
+- the script declares each policy flag once with the required value, declares
+  both platforms, and sets `set -euo pipefail`;
+- the release `images` job builds, scans, signs, and tags in that order, and
+  the scan step does not set `continue-on-error`;
+- `ci.yml` has a `changes` job that uses `dorny/paths-filter` and an
+  `image-scan` job that needs it and builds both images;
+- `e2e-stability.yml` has `preflight-scan`, checks out the gated SHA, and the
+  `gate` job needs it;
+- `image-scan.yml` runs on `schedule` and `workflow_dispatch`, builds both
+  images, and scans both images of the latest published release;
+- every third-party `uses:` in every workflow is pinned to a 40-hex commit.
+
+`TestWorkflowPolicyRejectsBrokenCopies` is the negative check. It loads the
+repository, applies one mutation in memory, and requires the check to report
+it. The mutations lower the severity to `CRITICAL` only, remove
+`--ignore-unfixed`, drop a platform, add an inline `trivy image` step, drift
+setup-trivy's version, pin an action by tag, sign before the scan, make the
+release scan non-blocking, remove `preflight-scan` from the gate's `needs`,
+scan `main` instead of the gated SHA, delete the nightly workflow, and remove
+its schedule. Every mutation is rejected.
+
+`hack/test-image-scan.sh` runs the script with a fake trivy on `PATH`, without
+a network. It proves both platforms always run with the policy flags, a
+finding on one platform fails the whole scan after both run, a trivy error
+fails the scan, `--dir` scans both archives, a missing archive fails, the
+step summary lists both platforms, and a missing trivy fails.
+
+There is no fuzz target. The script does no text parsing: it builds an
+argument vector, reads an exit status, and writes a summary. The version file
+is read by a `cat` step in the workflow, and the policy check compares the
+value. There is no parser to fuzz.
+
+### Release publish check
+
+`test/release/publish_test.go` parses every workflow under `.github/workflows`.
+It checks that the release `publish` job runs `hack/publish-release.sh` and
+that the step env sets `GH_REPO` (`${{ github.repository }}`), so `gh` names the repository even without a working tree. The job also checks out the repository so the script is present. It checks that no step asks `gh` for the `isLatest` JSON field,
+which the CLI does not have. For every job that runs `gh`, the check requires
+an `actions/checkout` step, a non-empty `GH_REPO` in the step or job env, or a
+repo-qualified call (`-R`, `--repo`, or `gh api` with a `repos/<owner>/<repo>/`
+path). A job that mixes a repo-qualified `gh api` with an unqualified
+`gh release view` fails unless it also checks out or sets `GH_REPO`.
+
+`TestReleasePublishPolicyRejectsBrokenCopies` applies one mutation in memory
+and requires the check to report it: remove `GH_REPO` from the publish step;
+add a step that asks for `--json isLatest`; add `isLatest` to a `--json` field
+list; add a job that runs `gh release view` with no checkout, no `GH_REPO`, and
+no `-R`; inline `gh` in the publish step; and remove the checkout from the
+image-scan `published` job. Every mutation is rejected.
+
+`hack/test-publish-release.sh` is the behavioral check of the RC-versus-final
+rule. With a fake `gh` on `PATH` and no network, it proves that an RC is edited
+with `--latest=false` and fails when it is the repository's latest release,
+that a final tag is edited with `--latest=true` and fails when another tag is
+latest, and that a failed view, edit, or API read, a release that stays a
+draft, an unreadable draft state, and a missing `GH_REPO` or `GH_TOKEN` all
+fail. The `shell` job in ci runs it and shellchecks both scripts. There is no
+fuzz target: the scripts build argument vectors and the test reads exit
+statuses, so there is no Go parser to fuzz.

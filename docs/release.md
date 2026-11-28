@@ -39,7 +39,7 @@ The gate selects the two workflows differently:
 
 The workflow peels the target ref to its commit before the API query. An annotated tag (`git tag -a`, as this document uses) is a tag object, and a tag push can set `GITHUB_SHA` to that object. The gate runs `git rev-parse "${GITHUB_SHA}^{commit}"` so the lookup uses the commit the tag names, not the tag object.
 
-A tag push on a commit without the gate fails in the `gate` job. Nothing is built, signed, tagged, or published.
+A tag push on a commit without the gate fails in the `gate` job. Nothing is built, signed, tagged, or published. The gate runs on the commit the tag names, so the final release commit needs its own `ci` and 20-run `e2e-stability` history; a green candidate commit does not cover it.
 
 The decision is `hack/release-gate`, with the logic in `internal/releasegate`. It reads the `gh api` payloads and makes no network call. Unit tests and `FuzzDecide` cover a missing run, a failed run, a run with fewer than 20 e2e jobs, a failed `ci`, the rerun case, and run-name matching for a dispatch on `main`, including short, prefix, and embedded SHAs. Run it locally against saved `gh api` payloads with `go run ./hack/release-gate -sha <sha> -runs runs.json -jobs jobs.json`.
 
@@ -60,16 +60,41 @@ CI runs `govulncheck ./...` in the `vulncheck` job. The job fails when the modul
 The release workflow builds each image, scans it, signs it, and tags it in that order:
 
 1. Docker Buildx builds the multi-arch image and pushes the manifest and layers by digest, without a tag.
-2. `trivy image` scans that digest for `linux/amd64` and `linux/arm64` with `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`. A HIGH or CRITICAL vulnerability that has a fixed version fails the job. A finding without a fix is reported and does not block.
+2. `hack/image-scan.sh` scans that digest for `linux/amd64` and `linux/arm64` with `--scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`. A HIGH or CRITICAL vulnerability that has a fixed version fails the job. A finding without a fix is reported and does not block.
 3. `cosign sign` signs the digest with the workflow's GitHub OIDC identity. No key and no stored secret is involved.
 4. Only a signed digest gets the image tags with `docker buildx imagetools create`: the version tag, and for a final release `major.minor` and `latest`.
 5. The chart job waits for both images, then pushes the chart to GHCR, uploads it to the draft release, and signs it with the same identity.
 
 A failed scan fails the job before any tag exists. A failed signature fails the job before the tag step runs. Either failure leaves no tag for the digest, so no tag names an unsigned image. The untagged manifest is not a release artifact, and the registry garbage collector removes it. A tag that does not verify is not a release artifact.
 
+### Preflight image scan
+
+`hack/image-scan.sh` is the only place the scan policy lives. Every workflow calls it; no workflow runs `trivy` directly. It scans a registry reference, or the per-platform docker archives that a workflow builds without pushing:
+
+```bash
+hack/image-scan.sh ghcr.io/hayfever/mayflyd:1.0.0-rc.4
+hack/image-scan.sh --dir "$RUNNER_TEMP/images/mayflyd"
+```
+
+The script always scans both platforms. It fails when any platform has a fixed HIGH or CRITICAL finding, when an archive is missing, or when trivy itself fails, so a database download cannot pass. Trivy is pinned in `.github/trivy-version`, and each workflow reads that file when it installs trivy.
+
+The same blocking scan runs before a tag:
+
+| Where | When | What it scans |
+|---|---|---|
+| `image-scan` job in [ci.yml](../.github/workflows/ci.yml) | pull requests and pushes that change `Dockerfile`, `go.mod`, `go.sum`, `hack/image-scan.sh`, `.github/trivy-version`, or `ci.yml` | both images built from the change |
+| `main` job in [image-scan.yml](../.github/workflows/image-scan.yml) | nightly at 05:43 UTC and on demand | both images built from the default branch |
+| `published` job in image-scan.yml | nightly | both images of the latest published release from GHCR |
+| `preflight-scan` job in [e2e-stability.yml](../.github/workflows/e2e-stability.yml) | every stability run | both images built from the gated `ref`; `gate` needs it, so a failed or skipped scan fails the gate |
+| `scan` step in [release.yml](../.github/workflows/release.yml) | every `v*` tag | the digest pushed without a tag, before signing and tagging |
+
+The ci job is gated by `dorny/paths-filter` inside the workflow, not by a `paths:` trigger. A job that `if:` skips reports `skipped`, which satisfies a required status check. A workflow that a path filter never starts leaves its required check pending and blocks the merge.
+
+One window remains. A CVE published, or a fix released, after the last preflight run is invisible to that run. The release scan still fails on it, the images job stops before signing, and the GitHub release stays a draft. Cut the next release candidate (`v1.0.0-rc.4`) from a commit with the fix; never retag the release whose scan failed.
+
 GoReleaser signs the CLI release too. It builds the archives and `checksums.txt`, runs `cosign sign-blob --bundle checksums.txt.sigstore.json checksums.txt` with the same keyless identity, and attaches the bundle to the release. The goreleaser job has `id-token: write` for that token.
 
-The GitHub release is a draft from creation until the `publish` job, which needs `goreleaser`, both `images`, and `chart`. A failed image scan, signature, or chart push therefore leaves only a draft release. `publish` runs `gh release edit <tag> --draft=false --latest=true|false` after every job succeeded. It passes `--latest=false` when the tag contains `-` (an RC) and `--latest=true` otherwise, then checks `isLatest` matches.
+The GitHub release is a draft from creation until the `publish` job, which needs `goreleaser`, both `images`, and `chart`. A failed image scan, signature, or chart push therefore leaves only a draft release. `publish` checks out the repository so it can run `hack/publish-release.sh`, and sets `GH_REPO` to `${{ github.repository }}` so `gh` names the repository without relying on the working tree. The script runs `gh release edit <tag> --draft=false --latest=true|false`, passing `--latest=false` when the tag contains `-` (an RC) and `--latest=true` otherwise. It then reads the repository's latest release from `GET /repos/{owner}/{repo}/releases/latest` and checks `.tag_name`: a final release must be that tag, and an RC must not.
 
 ### Verify a published release
 
@@ -113,7 +138,9 @@ Each `cosign` command must print the workflow identity and the tag. The OIDC iss
 
 ## Pre-release checklist
 
-1. Update `CHANGELOG.md` and the chart `version` and `appVersion` if they differ from the tag. Replace `Unreleased` in the release heading with the tag date, for example `## [1.0.0-rc.1] - 2026-11-20`, in the commit you tag. Do this for an RC too.
+1. An RC and the final release use different commits.
+   - For an RC, update `CHANGELOG.md`, the chart `version` and `appVersion`, and `api/openapi.yaml` `info.version` in the commit you tag. Replace `Unreleased` in the release heading with the tag date, for example `## [1.0.0-rc.1] - 2026-11-20`.
+   - For the final release, make one release commit on top of the candidate commit that passed. The commit changes only release metadata: the dated `## [1.0.0] - <date>` heading, the chart `version` and `appVersion`, `api/openapi.yaml` `info.version`, and the current-release strings in `README.md` and `docs`. Run `ci` and the 20-run `e2e-stability` gate on that release commit before you tag `v1.0.0` on it.
 2. Run the full test path:
 
 ```bash
@@ -140,7 +167,7 @@ go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
 
 3. Build both images locally. Check that `mayfly version`, `mayflyd --version`, and `mayfly-agent --version` show the release version, commit, and date.
 4. Verify the chart with a real install, including ingress/TLS or port-forward, secret mount, and a complete session.
-5. Run the e2e stability gate on the release commit, before you tag an RC or a final release. The gate needs 20 of 20 e2e runs green and the unit stress green:
+5. Run the e2e stability gate on the release commit, before you tag an RC or a final release. The gate needs both preflight image scans green, 20 of 20 e2e runs green, and the unit stress green:
 
 ```bash
 gh workflow run e2e-stability.yml -f runs=20 -f ref=<40-hex commit sha>
@@ -160,7 +187,7 @@ The release workflow runs on `v*` tags in this order:
 
 1. `gate` peels the pushed tag to its commit (an annotated tag is a tag object), then reads that commit's workflow history. It fails the workflow unless `ci` succeeded and a successful `e2e-stability` attempt with 20 runs exists for that commit.
 2. `goreleaser` builds the CLI archives and `checksums.txt`, signs `checksums.txt` with keyless cosign, and creates the GitHub release as a draft. The job fails when its Go toolchain is older than 1.27.4 (GO-2026-6859).
-3. `images` builds each control-plane and agent image with SBOM and provenance, pushes it by digest without a tag, scans both architectures, signs the digest, and only then creates the version tags.
+3. `images` builds each control-plane and agent image with SBOM and provenance, pushes it by digest without a tag, scans both architectures with `hack/image-scan.sh`, signs the digest, and only then creates the version tags.
 4. `chart` pushes and signs the chart, and uploads it to the draft release.
 5. `publish` turns the draft into a public release. It runs only when `goreleaser`, `images`, and `chart` all succeeded.
 
@@ -175,7 +202,9 @@ git tag -a vX.Y.Z-rc.1 -m "Mayfly vX.Y.Z-rc.1"
 git push origin vX.Y.Z-rc.1
 ```
 
-The same gated workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`). Its `make_latest` setting is the template `{{ if .Prerelease }}false{{ else }}true{{ end }}`, so GoReleaser creates an RC without the `latest` marker and a final release with it. The `publish` job repeats the decision: it passes `--latest=false` for a tag that contains `-` and `--latest=true` otherwise, then checks `isLatest`. An RC never becomes latest. The release stays a draft until `publish` runs. The image tags come from the semver patterns in `release.yml`: an RC tag like `v1.0.0-rc.1` publishes only `1.0.0-rc.1`. `docker/metadata-action` skips the `{{major}}.{{minor}}` pattern for a pre-release, and `latest` is enabled only for a tag with no `-`. The chart is pushed as `1.0.0-rc.1`. Install it with `--version 1.0.0-rc.1`. When the candidate passes, tag `v1.0.0` on the same commit; that tag publishes `1.0.0`, `1.0`, and `latest`.
+The same gated workflow runs. GoReleaser marks the GitHub release as a pre-release (`prerelease: auto`). Its `make_latest` setting is the template `{{ if .Prerelease }}false{{ else }}true{{ end }}`, so GoReleaser creates an RC without the `latest` marker and a final release with it. The `publish` job repeats the decision: it passes `--latest=false` for a tag that contains `-` and `--latest=true` otherwise, then reads the repository's latest release from `GET /repos/{owner}/{repo}/releases/latest`. A final release must be that tag, and an RC must not. An RC never becomes latest. The release stays a draft until `publish` runs. The image tags come from the semver patterns in `release.yml`: an RC tag like `v1.0.0-rc.1` publishes only `1.0.0-rc.1`. `docker/metadata-action` skips the `{{major}}.{{minor}}` pattern for a pre-release, and `latest` is enabled only for a tag with no `-`. The chart is pushed as `1.0.0-rc.1`. Install it with `--version 1.0.0-rc.1`.
+
+When a candidate passes, do not tag `v1.0.0` on the candidate commit. Make the release commit described in step 1 of the [Pre-release checklist](#pre-release-checklist) on top of the candidate commit. That commit changes only release metadata, so it needs its own `ci` run and its own 20-run `e2e-stability` gate. Tag `v1.0.0` on that release commit. Only the final tag publishes `1.0.0`, `1.0`, and `latest`.
 
 ## Post-release verification
 

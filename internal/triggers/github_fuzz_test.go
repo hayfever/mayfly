@@ -60,6 +60,9 @@ func FuzzGitHubParse(f *testing.F) {
 		}
 		fuzzCheckError(t, err)
 		if err != nil {
+			if !errors.Is(err, ErrBadRequest) && !utf8.ValidString(delivery) {
+				t.Fatalf("invalid delivery key returned %v, want ErrBadRequest", err)
+			}
 			return
 		}
 		if res == nil {
@@ -68,8 +71,11 @@ func FuzzGitHubParse(f *testing.F) {
 		if want := textutil.Valid(event); res.Options.Trigger.Kind != "github" || res.Options.Trigger.Event != want {
 			t.Fatalf("trigger = %+v", res.Options.Trigger)
 		}
-		if want := textutil.Valid(delivery); res.DeliveryKey != want {
-			t.Fatalf("delivery key = %q, want %q", res.DeliveryKey, want)
+		if !utf8.ValidString(delivery) {
+			t.Fatalf("accepted a delivery key that is not valid UTF-8: %q", delivery)
+		}
+		if res.DeliveryKey != delivery {
+			t.Fatalf("delivery key = %q, want %q", res.DeliveryKey, delivery)
 		}
 		if res.Options.Trigger.Delivery != res.DeliveryKey {
 			t.Fatalf("trigger delivery = %q, want %q", res.Options.Trigger.Delivery, res.DeliveryKey)

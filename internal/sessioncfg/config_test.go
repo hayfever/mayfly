@@ -33,6 +33,33 @@ func TestValidateAcceptsRuntimeConfig(t *testing.T) {
 	}
 }
 
+func TestConfigCarriesResolvedBudget(t *testing.T) {
+	cfg := validConfig()
+	cfg.MaxLLMTokens = 120000
+	cfg.MaxLLMRequests = 40
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["max_llm_tokens"] != float64(120000) || decoded["max_llm_requests"] != float64(40) {
+		t.Fatalf("budget keys = %v / %v", decoded["max_llm_tokens"], decoded["max_llm_requests"])
+	}
+	var round Config
+	if err := json.Unmarshal(raw, &round); err != nil {
+		t.Fatal(err)
+	}
+	if round.MaxLLMTokens != 120000 || round.MaxLLMRequests != 40 {
+		t.Fatalf("round trip = %d / %d", round.MaxLLMTokens, round.MaxLLMRequests)
+	}
+}
+
 func TestValidateDefaultsProtocol(t *testing.T) {
 	cfg := validConfig()
 	cfg.RuntimeProtocol = 0
@@ -59,6 +86,8 @@ func TestValidateRejectsBrokenConfig(t *testing.T) {
 		{"workspace", func(c *Config) { c.WorkspaceDir = "" }, "workspace_dir"},
 		{"artifacts dir", func(c *Config) { c.ArtifactsDir = "" }, "artifacts_dir"},
 		{"max steps", func(c *Config) { c.MaxSteps = 0 }, "max_steps"},
+		{"token budget", func(c *Config) { c.MaxLLMTokens = -1 }, "max_llm_tokens"},
+		{"request budget", func(c *Config) { c.MaxLLMRequests = -1 }, "max_llm_requests"},
 		{"skill name", func(c *Config) { c.Skills = []Skill{{Body: "x"}} }, "empty name"},
 		{"stdio command", func(c *Config) { c.MCPServers = []MCPServer{{Name: "s", Transport: "stdio"}} }, "command"},
 		{"transport", func(c *Config) { c.MCPServers = []MCPServer{{Name: "s", Transport: "grpc"}} }, "unsupported transport"},
