@@ -203,6 +203,33 @@ func TestPanicRecoveryBeforeWriteSends500(t *testing.T) {
 	}
 }
 
+func TestPanicRecoveryAfterSwitchingProtocolsSkipsErrorBody(t *testing.T) {
+	s, logs := newPanicServer(t)
+	handler := s.recoverPanics(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusSwitchingProtocols)
+		panic("boom")
+	}))
+	rec := newHeaderCounter()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil))
+
+	if rec.writeHeaders != 1 {
+		t.Fatalf("WriteHeader calls = %d, want 1", rec.writeHeaders)
+	}
+	if rec.Code != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("body = %q, want empty", rec.Body.String())
+	}
+	got := logs.String()
+	if !strings.Contains(got, "panic serving request") {
+		t.Fatalf("panic was not logged: %s", got)
+	}
+	if !strings.Contains(got, "headers_sent=true") {
+		t.Fatalf("log does not report sent headers: %s", got)
+	}
+}
+
 func TestPanicRecoveryAfterFlushSkipsErrorBody(t *testing.T) {
 	s, logs := newPanicServer(t)
 	handler := s.recoverPanics(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

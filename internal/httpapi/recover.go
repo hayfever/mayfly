@@ -22,12 +22,14 @@ type writeTracker struct {
 func (w *writeTracker) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (w *writeTracker) WriteHeader(status int) {
-	// A 1xx response is interim: net/http still sends a final status, so an
-	// error response after one is legal. Record only after the call returns:
-	// a writer that panics has not reported a committed status, and the error
-	// path then observes that failure instead of hiding it.
+	// A 1xx response is usually interim: net/http still sends a final status,
+	// so an error response after 100/102/103 is legal. 101 Switching Protocols
+	// is the exception; it is a final upgrade even without a subsequent Hijack.
+	// Record only after the call returns: a writer that panics has not reported
+	// a committed status, and the error path then observes that failure instead
+	// of hiding it.
 	w.ResponseWriter.WriteHeader(status)
-	if status >= 200 {
+	if status >= 200 || status == http.StatusSwitchingProtocols {
 		w.wroteHeader = true
 	}
 }

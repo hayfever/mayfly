@@ -37,7 +37,7 @@ func (r *panicRecorder) Header() http.Header {
 
 func (r *panicRecorder) WriteHeader(status int) {
 	r.codes = append(r.codes, status)
-	if status >= 200 {
+	if status >= 200 || status == http.StatusSwitchingProtocols {
 		r.final = true
 	}
 }
@@ -75,7 +75,7 @@ func (o *panicOps) apply(w http.ResponseWriter, ops []byte) {
 				i += 2
 			}
 			o.codes = append(o.codes, code)
-			if code >= 200 {
+			if code >= 200 || code == http.StatusSwitchingProtocols {
 				o.final = true
 			}
 			w.WriteHeader(code)
@@ -132,6 +132,7 @@ func FuzzRecoverPanics(f *testing.F) {
 		{1},            // Write, implicit 200
 		{2},            // Flush, implicit 200
 		{0, 0, 3},      // WriteHeader(103), interim only
+		{0, 0, 1},      // WriteHeader(101), Switching Protocols
 	}
 	for kind := uint8(0); kind < 7; kind++ {
 		for _, pattern := range patterns {
